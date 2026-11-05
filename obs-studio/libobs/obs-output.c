@@ -200,11 +200,14 @@ obs_output_t *obs_output_create(const char *id, const char *name, obs_data_t *se
 	int ret;
 
 	output = bzalloc(sizeof(struct obs_output));
+	pthread_mutex_init_value(&output->encoder_error_mutex);
 	pthread_mutex_init_value(&output->interleaved_mutex);
 	pthread_mutex_init_value(&output->delay_mutex);
 	pthread_mutex_init_value(&output->pause.mutex);
 	pthread_mutex_init_value(&output->pkt_callbacks_mutex);
 
+	if (pthread_mutex_init_recursive(&output->encoder_error_mutex) != 0)
+		goto fail;
 	if (pthread_mutex_init(&output->interleaved_mutex, NULL) != 0)
 		goto fail;
 	if (pthread_mutex_init(&output->delay_mutex, NULL) != 0)
@@ -337,6 +340,7 @@ void obs_output_destroy(obs_output_t *output)
 
 		os_event_destroy(output->stopping_event);
 		pthread_mutex_destroy(&output->pause.mutex);
+		pthread_mutex_destroy(&output->encoder_error_mutex);
 		pthread_mutex_destroy(&output->interleaved_mutex);
 		pthread_mutex_destroy(&output->delay_mutex);
 		pthread_mutex_destroy(&output->pkt_callbacks_mutex);
@@ -359,8 +363,23 @@ const char *obs_output_get_name(const obs_output_t *output)
 bool obs_output_actual_start(obs_output_t *output)
 {
 	bool success = false;
-
-	os_event_wait(output->stopping_event);
+	/* Fail reentrant notification callbacks before waiting for a stop that
+	 * the current callback itself must finish. Never hold the lock while waiting. */
+	if (pthread_mutex_trylock(&output->encoder_error_mutex) != 0)
+		return false;
+	bool busy = output->encoder_start_in_progress || output->encoder_error_in_progress;
+	pthread_mutex_unlock(&output->encoder_error_mutex);
+	if (busy || os_event_wait(output->stopping_event) != 0)
+		return false;
+	if (pthread_mutex_trylock(&output->encoder_error_mutex) != 0)
+		return false;
+	if (output->encoder_start_in_progress || output->encoder_error_in_progress ||
+	    os_event_try(output->stopping_event) != 0) {
+		pthread_mutex_unlock(&output->encoder_error_mutex);
+		return false;
+	}
+	output->encoder_start_in_progress = true;
+	os_atomic_inc_long(&output->start_generation);
 	output->stop_code = 0;
 	if (output->last_error_message) {
 		bfree(output->last_error_message);
@@ -390,6 +409,8 @@ bool obs_output_actual_start(obs_output_t *output)
 		pthread_mutex_unlock(&ctrack->caption_mutex);
 	}
 
+	output->encoder_start_in_progress = false;
+	pthread_mutex_unlock(&output->encoder_error_mutex);
 	return success;
 }
 
@@ -2427,22 +2448,41 @@ static void default_raw_audio_callback(void *param, size_t mix_idx, struct audio
 	}
 }
 
-static inline void start_audio_encoders(struct obs_output *output, encoded_callback_t encoded_callback)
+/* Start all tracks transactionally. A rejected track must not leave an
+ * output active with only a subset of its encoders connected. */
+static bool start_encoded_encoders(struct obs_output *output, encoded_callback_t callback, bool has_audio,
+				   bool has_video)
 {
-	for (size_t i = 0; i < MAX_OUTPUT_AUDIO_ENCODERS; i++) {
-		if (output->audio_encoders[i]) {
-			obs_encoder_start(output->audio_encoders[i], encoded_callback, output);
+	bool audio_started[MAX_OUTPUT_AUDIO_ENCODERS] = {0};
+	bool video_started[MAX_OUTPUT_VIDEO_ENCODERS] = {0};
+	if (has_audio) {
+		for (size_t i = 0; i < MAX_OUTPUT_AUDIO_ENCODERS; i++) {
+			if (!output->audio_encoders[i])
+				continue;
+			if (!obs_encoder_start_checked(output->audio_encoders[i], callback, output))
+				goto rollback;
+			audio_started[i] = true;
 		}
 	}
-}
-
-static inline void start_video_encoders(struct obs_output *output, encoded_callback_t encoded_callback)
-{
-	for (size_t i = 0; i < MAX_OUTPUT_VIDEO_ENCODERS; i++) {
-		if (output->video_encoders[i]) {
-			obs_encoder_start(output->video_encoders[i], encoded_callback, output);
+	if (has_video) {
+		for (size_t i = 0; i < MAX_OUTPUT_VIDEO_ENCODERS; i++) {
+			if (!output->video_encoders[i])
+				continue;
+			if (!obs_encoder_start_checked(output->video_encoders[i], callback, output))
+				goto rollback;
+			video_started[i] = true;
 		}
 	}
+	return true;
+rollback:
+	os_atomic_set_bool(&output->data_active, false);
+	for (size_t i = 0; i < MAX_OUTPUT_VIDEO_ENCODERS; i++)
+		if (video_started[i])
+			obs_encoder_stop(output->video_encoders[i], callback, output);
+	for (size_t i = 0; i < MAX_OUTPUT_AUDIO_ENCODERS; i++)
+		if (audio_started[i])
+			obs_encoder_stop(output->audio_encoders[i], callback, output);
+	return false;
 }
 
 static inline void start_raw_audio(obs_output_t *output)
@@ -2485,7 +2525,7 @@ static inline bool preserve_active(struct obs_output *output)
 	return (output->delay_flags & OBS_OUTPUT_DELAY_PRESERVE) != 0;
 }
 
-static void hook_data_capture(struct obs_output *output)
+static bool hook_data_capture(struct obs_output *output)
 {
 	encoded_callback_t encoded_callback;
 	bool has_video = flag_video(output);
@@ -2511,10 +2551,13 @@ static void hook_data_capture(struct obs_output *output)
 			     output->context.name, output->delay_sec, preserve_active(output) ? "on" : "off");
 		}
 
-		if (has_audio)
-			start_audio_encoders(output, encoded_callback);
-		if (has_video)
-			start_video_encoders(output, encoded_callback);
+		if (!start_encoded_encoders(output, encoded_callback, has_audio, has_video)) {
+			if (output->active_delay_ns) {
+				os_atomic_set_bool(&output->delay_active, false);
+				obs_output_cleanup_delay(output);
+			}
+			return false;
+		}
 	} else {
 		if (has_video)
 			start_raw_video(output->video, obs_output_get_video_conversion(output), 1,
@@ -2522,6 +2565,7 @@ static void hook_data_capture(struct obs_output *output)
 		if (has_audio)
 			start_raw_audio(output);
 	}
+	return true;
 }
 
 static inline void signal_start(struct obs_output *output)
@@ -2755,7 +2799,7 @@ static void calculate_batch_size(struct obs_output *output)
 	da_free(intervals);
 }
 
-bool obs_output_begin_data_capture(obs_output_t *output, uint32_t flags)
+static bool begin_data_capture_locked(obs_output_t *output, uint32_t flags)
 {
 	UNUSED_PARAMETER(flags);
 
@@ -2779,7 +2823,10 @@ bool obs_output_begin_data_capture(obs_output_t *output, uint32_t flags)
 		pair_encoders(output);
 
 	os_atomic_set_bool(&output->data_active, true);
-	hook_data_capture(output);
+	if (!hook_data_capture(output)) {
+		os_atomic_set_bool(&output->data_active, false);
+		return false;
+	}
 
 	calculate_batch_size(output);
 
@@ -2801,6 +2848,19 @@ bool obs_output_begin_data_capture(obs_output_t *output, uint32_t flags)
 	}
 
 	return true;
+}
+
+bool obs_output_begin_data_capture(obs_output_t *output, uint32_t flags)
+{
+	if (!obs_output_valid(output, "obs_output_begin_data_capture"))
+		return false;
+	/* A connect thread must not wait here while an error task holds this
+	 * lock and joins that same thread in the output's stop callback. */
+	if (pthread_mutex_trylock(&output->encoder_error_mutex) != 0)
+		return false;
+	bool success = !output->encoder_error_in_progress && begin_data_capture_locked(output, flags);
+	pthread_mutex_unlock(&output->encoder_error_mutex);
+	return success;
 }
 
 static inline void stop_audio_encoders(obs_output_t *output, encoded_callback_t encoded_callback)

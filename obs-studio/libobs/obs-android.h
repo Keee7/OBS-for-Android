@@ -267,6 +267,9 @@ struct obs_android_screen_host {
 	/** 从环形缓冲取走最多 max_frames 帧（交织 int16，每声道一列），返回实际帧数。
 	 *  0 = 此刻没有数据，不是错误 —— 调用方稍后再问。 */
 	uint32_t (*read_audio)(void *param, int16_t *out, uint32_t max_frames);
+
+	/** Copy a capture failure to caller-owned UTF-8 storage (never a JNI pointer). */
+	void (*capture_error)(void *param, char *out, size_t size);
 };
 
 /** App 启动时调用；传 NULL 可注销。 */
@@ -288,6 +291,7 @@ EXPORT void obs_android_screen_release_consent(void);
 EXPORT bool obs_android_screen_display_size(uint32_t *width, uint32_t *height, uint32_t *dpi);
 EXPORT bool obs_android_screen_start_display(void *native_window);
 EXPORT void obs_android_screen_stop_display(void);
+EXPORT void obs_android_screen_capture_error(char *out, size_t size);
 
 /* 这三格同样 fail-closed：没接线时 start 返回 false（源据此就不起音频线程）、stop 空转、
  * read 返回 0 帧。"问不到"在这一路一律不等于"在录"。 */
@@ -295,6 +299,55 @@ EXPORT bool obs_android_screen_start_audio(uint32_t *sample_rate, uint32_t *chan
 EXPORT void obs_android_screen_stop_audio(void);
 EXPORT uint32_t obs_android_screen_read_audio(int16_t *out, uint32_t max_frames);
 
+/* Browser host: opaque per-source handles. create/update/destroy are called on the
+ * OBS graphics thread; UI work is queued by the host and never waited for. */
+struct obs_android_browser_host {
+ void *(*create)(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css);
+ int (*update)(void *handle, float transform[16]);
+ void (*reload)(void *handle);
+ void (*set_visible)(void *handle, bool visible);
+ /* action: 0 down, 1 up, 2 move, 3 cancel */
+ void (*touch)(void *handle, int x, int y, int action);
+ void (*destroy)(void *handle);
+};
+EXPORT void obs_android_set_browser_host(const struct obs_android_browser_host *host);
+EXPORT void *obs_android_browser_create(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css);
+/* -1: failed; 0: no new frame; 1: matrix updated. */
+EXPORT int obs_android_browser_update(void *handle, float transform[16]);
+EXPORT void obs_android_browser_reload(void *handle);
+EXPORT void obs_android_browser_set_visible(void *handle, bool visible);
+EXPORT void obs_android_browser_touch(void *handle, int x, int y, int action);
+EXPORT void obs_android_browser_destroy(void *handle);
+
+#ifdef __cplusplus
+}
+#endif
+
+/* File descriptors returned by this host transfer to libobs (fclose owns them). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+EXPORT void obs_android_set_storage_open(int (*open_document)(const char *, const char *));
+EXPORT int obs_android_storage_open(const char *uri, const char *mode);
+EXPORT void obs_android_set_decoder_query(bool (*query)(const char *, char *, size_t));
+EXPORT bool obs_android_find_hardware_decoder(const char *mime, char *out, size_t size);
+#ifdef __cplusplus
+}
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* GPU screen host: all calls run with the OBS graphics context current. */
+struct obs_android_screen_gpu_host {
+ void *(*create)(uint32_t texture, uint32_t width, uint32_t height, uint32_t dpi);
+ int (*update)(void *handle, float transform[16]);
+ void (*destroy)(void *handle);
+};
+EXPORT void obs_android_set_screen_gpu_host(const struct obs_android_screen_gpu_host *host);
+EXPORT void *obs_android_screen_gpu_create(uint32_t texture, uint32_t width, uint32_t height, uint32_t dpi);
+EXPORT int obs_android_screen_gpu_update(void *handle, float transform[16]);
+EXPORT void obs_android_screen_gpu_destroy(void *handle);
 #ifdef __cplusplus
 }
 #endif

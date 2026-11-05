@@ -1412,6 +1412,73 @@ gs_texture_t *gs_texture_create(uint32_t width, uint32_t height, enum gs_color_f
 						       flags);
 }
 
+#ifdef __ANDROID__
+struct android_surface_wrapper {
+	gs_android_encoder_surface_t *backend;
+	bool (*submit)(gs_android_encoder_surface_t *, gs_texture_t *, int64_t);
+	void (*destroy)(gs_android_encoder_surface_t *);
+};
+
+gs_android_encoder_surface_t *gs_android_encoder_surface_create(void *window)
+{
+	if (!gs_valid("gs_android_encoder_surface_create") || !window)
+		return NULL;
+	struct gs_exports *e = &thread_graphics->exports;
+	gs_android_encoder_surface_t *backend =
+		e->device_android_encoder_surface_create(thread_graphics->device, window);
+	if (!backend)
+		return NULL;
+	struct android_surface_wrapper *s = bzalloc(sizeof(*s));
+	s->backend = backend;
+	s->submit = e->device_android_encoder_surface_submit;
+	s->destroy = e->device_android_encoder_surface_destroy;
+	return s;
+}
+
+bool gs_android_encoder_surface_submit(gs_android_encoder_surface_t *surface, gs_texture_t *texture,
+				       int64_t timestamp_ns)
+{
+	struct android_surface_wrapper *s = surface;
+	return s && texture && timestamp_ns >= 0 && s->submit(s->backend, texture, timestamp_ns);
+}
+
+void gs_android_encoder_surface_destroy(gs_android_encoder_surface_t *surface)
+{
+	struct android_surface_wrapper *s = surface;
+	if (!s || !gs_valid("gs_android_encoder_surface_destroy"))
+		return;
+	s->destroy(s->backend);
+	bfree(s);
+}
+
+gs_android_external_texture_t *gs_android_external_texture_create(uint32_t width, uint32_t height)
+{
+	if (!gs_valid("gs_android_external_texture_create") || !width || !height)
+		return NULL;
+	return thread_graphics->exports.device_android_external_texture_create(thread_graphics->device, width, height);
+}
+
+uint32_t gs_android_external_texture_get_id(gs_android_external_texture_t *texture)
+{
+	if (!texture || !gs_valid("gs_android_external_texture_get_id"))
+		return 0;
+	return thread_graphics->exports.device_android_external_texture_get_id(texture);
+}
+
+gs_texture_t *gs_android_external_texture_render(gs_android_external_texture_t *texture, const float transform[16])
+{
+	if (!texture || !transform || !gs_valid("gs_android_external_texture_render"))
+		return NULL;
+	return thread_graphics->exports.device_android_external_texture_render(texture, transform);
+}
+
+void gs_android_external_texture_destroy(gs_android_external_texture_t *texture)
+{
+	if (texture && gs_valid("gs_android_external_texture_destroy"))
+		thread_graphics->exports.device_android_external_texture_destroy(texture);
+}
+#endif
+
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__DragonFly__)
 
 gs_texture_t *gs_texture_create_from_dmabuf(unsigned int width, unsigned int height, uint32_t drm_format,

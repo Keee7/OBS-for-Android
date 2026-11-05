@@ -83,6 +83,8 @@ static void *gpu_encode_thread(void *data)
 			uint32_t skip = 0;
 
 			obs_encoder_t *encoder = encoders.array[i];
+			if (os_atomic_load_bool(&encoder->gpu_error_queued))
+				continue;
 			obs_weak_encoder_t **paired = encoder->paired_encoders.array;
 			size_t num_paired = encoder->paired_encoders.num;
 
@@ -187,7 +189,10 @@ static void *gpu_encode_thread(void *data)
 				ept->fer = fer_ts;
 			}
 
-			send_off_encoder_packet(encoder, success, received, &pkt);
+			if (success || !(encoder->info.caps & OBS_ENCODER_CAP_PASS_TEXTURE_RGB))
+				send_off_encoder_packet(encoder, success, received, &pkt);
+			else
+				obs_encoder_gpu_error(encoder);
 
 			lock_key = next_key;
 
@@ -236,10 +241,12 @@ bool init_gpu_encoding(struct obs_core_video_mix *video)
 
 	deque_reserve(&video->gpu_encoder_avail_queue, NUM_ENCODE_TEXTURES);
 	for (size_t i = 0; i < NUM_ENCODE_TEXTURES; i++) {
-		gs_texture_t *tex;
-		gs_texture_t *tex_uv;
+		gs_texture_t *tex = NULL;
+		gs_texture_t *tex_uv = NULL;
 
-		if (info->format == VIDEO_FORMAT_P010) {
+		if (video->using_rgb_tex) {
+			tex = gs_texture_create(info->width, info->height, GS_BGRA, 1, NULL, GS_RENDER_TARGET);
+		} else if (info->format == VIDEO_FORMAT_P010) {
 			gs_texture_create_p010(&tex, &tex_uv, info->width, info->height,
 					       GS_RENDER_TARGET | GS_SHARED_KM_TEX);
 		} else {

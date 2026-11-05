@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.28...3.30)
+add_library(android-mediacodec MODULE)
+add_library(OBS::android-mediacodec ALIAS android-mediacodec)
+target_sources(android-mediacodec PRIVATE android-mediacodec.c)
+target_link_libraries(android-mediacodec PRIVATE OBS::libobs mediandk android log)
+set_target_properties_obs(android-mediacodec PROPERTIES FOLDER plugins/android-mediacodec PREFIX "")

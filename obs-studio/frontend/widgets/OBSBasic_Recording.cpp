@@ -54,6 +54,11 @@ extern volatile bool replaybuf_active;
 
 void OBSBasic::AutoRemux(QString input, bool no_show)
 {
+#ifdef __ANDROID__
+	// These recordings are already muxed directly into the destination document.
+	if (input.startsWith(QStringLiteral("content://")))
+		return;
+#endif
 	auto config = Config();
 
 	bool autoRemux = config_get_bool(config, "Video", "AutoRemux");
@@ -136,6 +141,23 @@ void OBSBasic::StartRecording()
 		DiskSpaceMessage();
 		return;
 	}
+
+#ifdef __ANDROID__
+	if (obsAndroidStorageManaged(QString::fromUtf8(GetCurrentOutputPath()))) {
+		const bool advanced = strcmp(config_get_string(Config(), "Output", "Mode"), "Advanced") == 0;
+		const char *section = advanced ? "AdvOut" : "SimpleOutput";
+		const char *format = config_get_string(Config(), section, "RecFormat2");
+		const bool nativeMuxer = strcmp(format, "hybrid_mp4") == 0 || strcmp(format, "hybrid_mov") == 0;
+		const bool custom = advanced ? strcmp(config_get_string(Config(), "AdvOut", "RecType"), "FFmpeg") == 0
+					     : strcmp(config_get_string(Config(), "SimpleOutput", "RecQuality"), "Lossless") == 0;
+		if (!nativeMuxer || custom || (advanced && config_get_bool(Config(), "AdvOut", "RecSplitFile"))) {
+			OBSMessageBox::warning(this, QTStr("Output.StartRecordingFailed"),
+				QStringLiteral("共享文件夹录像请选择混合 MP4 或混合 MOV，并关闭文件分割。"
+					       "此测试版尚不支持将 FFmpeg 自定义输出直接写入 Android 文档目录。"));
+			return;
+		}
+	}
+#endif
 
 	OnEvent(OBS_FRONTEND_EVENT_RECORDING_STARTING);
 
@@ -419,7 +441,16 @@ bool OBSBasic::LowDiskSpace()
 		return false;
 	}
 
+#ifdef __ANDROID__
+	// statvfs(content://...) fails, and the old API converts failure to zero.
+	// Unknown provider capacity must not be reported as a full disk.
+	const qint64 available = obsAndroidStorageSpace(QString::fromUtf8(path));
+	if (available < 0)
+		return false;
+	uint64_t num_bytes = static_cast<uint64_t>(available);
+#else
 	uint64_t num_bytes = os_get_free_disk_space(path);
+#endif
 
 	if (num_bytes < (MAX_BYTES_LEFT)) {
 		return true;

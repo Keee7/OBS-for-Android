@@ -73,8 +73,7 @@ static bool encode_sink_start(void *data)
 	sink->keyframes = 0;
 	sink->bytes = 0;
 
-	obs_output_begin_data_capture(sink->output, 0);
-	return true;
+	return obs_output_begin_data_capture(sink->output, 0);
 }
 
 static void *stop_thread(void *data)

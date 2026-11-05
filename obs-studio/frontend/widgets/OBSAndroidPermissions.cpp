@@ -19,6 +19,7 @@
 #include <QObject>
 
 #include <atomic>
+#include <cstdio>
 #include <string.h>
 
 #include <obs.hpp>
@@ -518,6 +519,46 @@ static uint32_t screenReadAudio(void *param, int16_t *out, uint32_t max_frames)
 	return (uint32_t)got;
 }
 
+static void screenCaptureError(void *, char *out, size_t size)
+{
+	const QJniObject error = QJniObject::callStaticObjectMethod(kProjectionClass, "captureError",
+								"()Ljava/lang/String;");
+	const QByteArray bytes = error.toString().toUtf8();
+	if (size)
+		snprintf(out, size, "%s", bytes.constData());
+}
+
+static constexpr auto kScreenGpuClass = "com/obsproject/studio/ObsScreenGpuHost";
+struct ScreenGpuHandle { QJniObject object; };
+static void *screenGpuCreate(uint32_t texture, uint32_t width, uint32_t height, uint32_t dpi)
+{
+ const QJniObject context = hostContext();
+ if (!context.isValid()) return nullptr;
+ auto object = QJniObject::callStaticObjectMethod(kScreenGpuClass, "create",
+  "(Landroid/content/Context;IIII)Lcom/obsproject/studio/ObsScreenGpuHost;",
+  context.object<jobject>(), jint(texture), jint(width), jint(height), jint(dpi));
+ if (!object.isValid()) return nullptr;
+ return new ScreenGpuHandle{object};
+}
+static int screenGpuUpdate(void *ptr, float matrix[16])
+{
+ auto *h = static_cast<ScreenGpuHandle *>(ptr);
+ QJniEnvironment env;
+ jfloatArray a = env->NewFloatArray(16);
+ if (!a) return -1;
+ int result = h->object.callMethod<jint>("update", "([F)I", a);
+ if (result == 1) env->GetFloatArrayRegion(a, 0, 16, matrix);
+ env->DeleteLocalRef(a);
+ return result;
+}
+static void screenGpuDestroy(void *ptr)
+{
+ auto *h = static_cast<ScreenGpuHandle *>(ptr);
+ h->object.callMethod<void>("close");
+ delete h;
+}
+static const struct obs_android_screen_gpu_host kScreenGpuHost = {screenGpuCreate, screenGpuUpdate, screenGpuDestroy};
+
 static const struct obs_android_screen_host kScreenHost = {
 	nullptr,
 	screenHasConsent,
@@ -529,7 +570,19 @@ static const struct obs_android_screen_host kScreenHost = {
 	screenStartAudio,
 	screenStopAudio,
 	screenReadAudio,
+	screenCaptureError,
 };
+
+static bool hardwareDecoderQuery(const char *mime, char *out, size_t size)
+{
+    auto type = QJniObject::fromString(QString::fromUtf8(mime));
+    auto name = QJniObject::callStaticObjectMethod("com/obsproject/studio/ObsCodecCapabilities", "findHardwareDecoder",
+        "(Ljava/lang/String;)Ljava/lang/String;", type.object<jstring>());
+    QByteArray bytes = name.toString().toUtf8();
+    if (bytes.isEmpty() || size <= size_t(bytes.size())) return false;
+    memcpy(out, bytes.constData(), size_t(bytes.size()) + 1);
+    return true;
+}
 
 void obsAndroidPermissionsRegisterScreenBus()
 {
@@ -539,6 +592,8 @@ void obsAndroidPermissionsRegisterScreenBus()
 	s_bus_registered = true;
 
 	obs_android_set_screen_host(&kScreenHost);
+	obs_android_set_decoder_query(hardwareDecoderQuery);
+	obs_android_set_screen_gpu_host(&kScreenGpuHost);
 
 	/* 这一行是 P-18-a/b/d/e 的冒烟抓手。几格在这里**现调**（ready / has_consent / display_size /
 	 * start_audio / stop_audio）：本轮还没有任何采集源去问它们，所以"native → JNI → Java 走得通"

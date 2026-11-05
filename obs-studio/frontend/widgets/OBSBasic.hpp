@@ -72,6 +72,8 @@ enum class LogFileType;
 enum class ItemPasteType { Invalid, Reference, Duplicate, Both };
 } // namespace OBS
 
+#define SIMPLE_ENCODER_ANDROID_MEDIACODEC "android_mediacodec"
+#define SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC "android_mediacodec_hevc"
 #define SIMPLE_ENCODER_X264 "x264"
 #define SIMPLE_ENCODER_X264_LOWCPU "x264_lowcpu"
 #define SIMPLE_ENCODER_QSV "qsv"

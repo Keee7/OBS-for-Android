@@ -39,6 +39,9 @@ typedef struct obs_encoder obs_encoder_t;
 #define OBS_ENCODER_CAP_ROI (1 << 4)
 #define OBS_ENCODER_CAP_SCALING (1 << 5)
 #define OBS_ENCODER_CAP_MULTITRACK_DYN_BITRATE (1 << 6)
+/* GPU RGB texture input. Requires PASS_TEXTURE and encode_texture2; tex[0]
+ * contains the composed image, rather than the Y plane of an NV12 texture. */
+#define OBS_ENCODER_CAP_PASS_TEXTURE_RGB (1 << 7)
 
 /** Specifies the encoder type */
 enum obs_encoder_type {
@@ -348,6 +351,11 @@ struct obs_encoder_info {
 
 	/** Audio encoder only: Returns padding, in samples, that must be skipped at the start of the stream. */
 	uint32_t (*get_priming_samples)(void *data);
+
+	/* Optional for asynchronous texture encoders. Called after the final input
+	 * connection stops, before its output callback is removed. Return queued
+	 * packets one at a time, then received_packet=false after bounded EOS drain. */
+	bool (*encode_texture_flush)(void *data, struct encoder_packet *packet, bool *received_packet);
 };
 
 EXPORT void obs_register_encoder_s(const struct obs_encoder_info *info, size_t size);

@@ -117,6 +117,9 @@ static bool is_local_file_modified(obs_properties_t *props, obs_property_t *prop
 static void ffmpeg_source_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_bool(settings, "is_local_file", true);
+#ifdef __ANDROID__
+	obs_data_set_default_bool(settings, "hw_decode", true);
+#endif
 	obs_data_set_default_bool(settings, "looping", false);
 	obs_data_set_default_bool(settings, "clear_on_media_end", true);
 	obs_data_set_default_bool(settings, "restart_on_activate", true);
@@ -769,7 +772,12 @@ static obs_missing_files_t *ffmpeg_source_missingfiles(void *data)
 	struct ffmpeg_source *s = data;
 	obs_missing_files_t *files = obs_missing_files_create();
 
-	if (s->is_local_file && strcmp(s->input, "") != 0) {
+	if (s->is_local_file && s->input && *s->input) {
+#ifdef __ANDROID__
+		/* A document URI is not a filesystem path; stat cannot validate it. */
+		if (strncmp(s->input, "content://", 10) == 0)
+			return files;
+#endif
 		if (!os_file_exists(s->input)) {
 			obs_missing_file_t *file = obs_missing_file_create(s->input, missing_file_callback,
 									   OBS_MISSING_FILE_SOURCE, s->source, NULL);

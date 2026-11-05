@@ -145,7 +145,7 @@ public final class ObsProjectionHost extends Activity {
      * Surface 是 native 那边用 ANativeWindow_toSurface 从 AImageReader 的窗口换来的，
      * 交进来之后由本类持有全局引用：VirtualDisplay 活着期间它不能被回收。
      */
-    private static volatile VirtualDisplay display;
+    private static volatile ObsProjectionSession<Surface> session;
     private static volatile Surface captureSurface;
 
     private static android.view.Display defaultDisplay(Context ctx) {
@@ -230,13 +230,14 @@ public final class ObsProjectionHost extends Activity {
      * "屏幕量取"日志（P-8 那条日志量的账正愁没处减）。一次往返、一份数组，问几轮都只量一次。
      */
     public static synchronized int[] captureSize(Context ctx) {
-        return measureCapture(ctx);
+        final int[] displaySize = measureCapture(ctx);
+        return session == null ? displaySize : session.captureSize(displaySize);
     }
 
     /**
-     * 建投影面。flags 传 0：MediaProjection 这条路不需要（也不该要）VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
-     * —— 镜像那一档是给"不经令牌"的截屏用的，带上它反而可能被系统按"你没权限"拒掉。
-     * 失败一律返回 false 并把原文留在 describe() 里（native 侧要能把"建不起来"说成人话）。
+     * Attach a capture surface, creating at most one mirrored display per consent.
+     * On scene activation or rotation, reuse it via resize()/setSurface().
+     * Failure details are available through captureError() and describe().
      */
     public static synchronized boolean startCapture(Context ctx, Surface s, int w, int h, int dpi) {
         if (projection == null) {
@@ -249,53 +250,69 @@ public final class ObsProjectionHost extends Activity {
             Log.e(TAG, lastError);
             return false;
         }
-        if (display != null)
-            stopCapture("换发新面前先收旧的");
-        captureSurface = s;
+        if (captureSurface != null && captureSurface != s) {
+            lastError = "已有屏幕源正在采集，请复用已有源，或停用它再启用另一屏幕源";
+            return false;
+        }
         try {
-            /* 只有一个重载：(..., Surface, Callback, Handler)，API 21 起就在 —— 我原先按印象写了个
-             * 六参数的分支，javac 直接否了（"需要: String,int,int,int,int,Surface,Callback,Handler"）。
-             * callback 传 null：令牌的生死已经由 takeToken 里那个带身份判定的 onStop 看着，
-             * 挂在这里的回调只会被叫两次。 */
-            display = projection.createVirtualDisplay("obs-screen", w, h, (dpi > 0) ? dpi : 160, 0, s, null, null);
+            // Android 14+: one createVirtualDisplay per consent, including scene reactivation.
+            // Resizing/replacing an ImageReader must reuse that display.
+            session.attach(s, w, h, (dpi > 0) ? dpi : 160);
+            captureSurface = s;
         } catch (Throwable t) {
-            lastError = "createVirtualDisplay 抛异常: " + t;
+            final String error = "屏幕投影启动失败: " + t + "。请停用并重新启用屏幕源，重新授权共享。";
+            lastError = error;
             Log.e(TAG, lastError, t);
-            display = null;
-            captureSurface = null;
+            // A failed create may already consume the token. Never retry it in a loop.
+            stopProjection("投影面创建或重接失败");
+            lastError = error;
             return false;
         }
-        if (display == null) {
-            lastError = "createVirtualDisplay 返回 null（令牌有效但面没建起来）";
-            Log.e(TAG, lastError);
-            captureSurface = null;
-            return false;
-        }
+        lastError = "<none>";
         lastAction = "投影面已建 " + w + "x" + h + "@" + dpi;
         Log.i(TAG, lastAction);
         return true;
     }
 
-    /** 收面。**顺序有讲究**：先 release 投影面，再放令牌 —— 反过来系统会认为还在录。 */
+    /** Detach only the caller's surface, never a newer or unrelated capture. */
+    public static synchronized void stopCaptureForSurface(Surface surface) {
+        if (surface != null && captureSurface == surface)
+            stopCapture("GPU surface closed");
+    }
+
+    /** Pause delivery while retaining the one display allocated to this consent. */
     public static synchronized void stopCapture(String why) {
-        if (display == null && captureSurface == null)
+        if (captureSurface == null)
             return;
-        if (display != null) {
-            try {
-                display.release();
-            } catch (Throwable t) {
-                lastError = "VirtualDisplay.release() 抛异常: " + t;
-                Log.e(TAG, lastError, t);
-            }
-            display = null;
+        try {
+            if (session != null) session.detach();
+        } catch (Throwable t) {
+            lastError = "VirtualDisplay.setSurface(null) 失败: " + t;
+            Log.e(TAG, lastError, t);
+            stopProjection("暂停投影面失败");
         }
         captureSurface = null;
-        Log.i(TAG, "投影面已收（" + why + "）");
+        Log.i(TAG, "投影面已暂停，保留同一授权的显示（" + why + "）");
+    }
+
+    private static void releaseDisplay() {
+        ObsProjectionSession<Surface> old = session;
+        session = null;
+        captureSurface = null;
+        try {
+            if (old != null) old.release();
+        } catch (Throwable t) {
+            Log.e(TAG, "释放投影显示失败", t);
+        }
+    }
+
+    public static synchronized String captureError() {
+        return lastError;
     }
 
     /** 投影面在不在（诊断用；真正的采集判据还是 hasProjection()）。 */
     public static synchronized boolean hasCapture() {
-        return display != null;
+        return session != null && session.isAttached();
     }
 
     /**
@@ -306,7 +323,7 @@ public final class ObsProjectionHost extends Activity {
     public static synchronized boolean stopProjection(String why) {
         if (projection == null && !wantProjection)
             return false;
-        stopCapture("交还令牌前先收面（" + why + "）"); // 顺序：面先、令牌后，反过来系统以为还在录
+        releaseDisplay();
         if (projection != null) {
             try {
                 projection.stop();
@@ -587,7 +604,7 @@ public final class ObsProjectionHost extends Activity {
         else
             verdict = "其它";
         return "令牌=" + (projection != null ? "有" : "无") + " 意图=" + (wantProjection ? "要投影" : "无")
-               + " 面=" + (display != null ? "已建" : "无") + " 发起=" + consentRequests + " 收到结果=" + consentResults
+               + " 面=" + (session != null && session.hasDisplay() ? (session.isAttached() ? "已建" : "暂停") : "无") + " 发起=" + consentRequests + " 收到结果=" + consentResults
                + " 最后一次 resultCode=" + verdict + "(" + lastResultCode + ")"
                + " 动作=" + lastAction + " 错误=" + lastError;
     }
@@ -704,13 +721,25 @@ public final class ObsProjectionHost extends Activity {
             final MediaProjection mine = p;
             p.registerCallback(new MediaProjection.Callback() {
                 @Override
+                public void onCapturedContentResize(int width, int height) {
+                    synchronized (ObsProjectionHost.class) {
+                        if (projection != mine || session == null) return;
+                        if (session.contentResized(width, height))
+                            Log.i(TAG, "采集内容尺寸=" + width + "x" + height +
+                                "；采集源将按内容比例重接现有投影显示");
+                    }
+                    // Native polls captureSize(). It replaces its Surface and reuses the
+                    // same VirtualDisplay, applying the user's 1080p/native size limit.
+                }
+
+                @Override
                 public void onStop() {
                     final boolean current;
                     final String line;
                     synchronized (ObsProjectionHost.class) {
                         current = (projection == mine);
                         if (current) {
-                            stopCapture("系统收回令牌"); // 令牌都没了，建在它上面的面必须一起收
+                            releaseDisplay();
                             projection = null;
                             wantProjection = false;
                             lastAction = "系统收回了投影令牌（onStop）";
@@ -728,6 +757,16 @@ public final class ObsProjectionHost extends Activity {
                     }
                 }
             }, null);
+            session = new ObsProjectionSession<>((surface, width, height, density) -> {
+                final VirtualDisplay vd = mine.createVirtualDisplay("obs-screen", width, height, density,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, surface, null, null);
+                if (vd == null) return null;
+                return new ObsProjectionSession.Display<Surface>() {
+                    public void resize(int w, int h, int dpi) { vd.resize(w, h, dpi); }
+                    public void surface(Surface target) { vd.setSurface(target); }
+                    public void release() { vd.release(); }
+                };
+            });
             projection = p;
             lastAction = "已拿到投影令牌（" + Build.VERSION.SDK_INT + " 档系统）";
             Log.i(TAG, lastAction + " " + describe());

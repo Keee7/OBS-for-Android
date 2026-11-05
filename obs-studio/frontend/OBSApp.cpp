@@ -48,6 +48,7 @@
 #endif
 
 #ifdef __ANDROID__
+#include "widgets/OBSAndroidBrowser.hpp"
 #include "widgets/OBSAndroidDisplay.hpp" // 3-3 模态遮挡：obsAndroidDisplaySetVisible
 #include "widgets/OBSAndroidPath.hpp" // 3-4：openUrl(本地路径) 的 Android 替代
 #include <QAbstractScrollArea> // 3-4 触摸：长按坐标要按 viewport 系给（itemAt/exec 都吃这个系）
@@ -1849,7 +1850,10 @@ QStyle *OBSApp::GetInvisibleCursorStyle()
  * "已藏"，是那种最难复现的脏状态；现算无状态、幂等，代价只是两次指针判空。 */
 static void androidSyncPreviewVisibility()
 {
-	bool covered = qApp->activeModalWidget() || qApp->activePopupWidget();
+	const QWidget *surfaceOwner = qobject_cast<QWidget *>(obsAndroidDisplayLifecycleOwner());
+	const QWidget *ownerWindow = surfaceOwner ? surfaceOwner->window() : nullptr;
+	const QWidget *modal = qApp->activeModalWidget();
+	bool covered = (modal && modal != ownerWindow) || qApp->activePopupWidget();
 
 	/* 只认"模态/弹出"不够：添加源那个窗口（`OBSBasic_SceneItems.cpp:831` 走的是 `show()` 不是
 	 * `exec()`，非模态）2026-09-05 20:09 实测弹出来时一句 藏面 都没有，预览面照样压在它右半边，
@@ -1868,7 +1872,7 @@ static void androidSyncPreviewVisibility()
 		const QWidget *faceOwner = qobject_cast<QWidget *>(obsAndroidDisplayLifecycleOwner());
 		const auto tops = qApp->topLevelWidgets();
 		for (const QWidget *w : tops) {
-			if (!w->isVisible() || !w->isWindow() || w == main || w == faceOwner)
+			if (!w->isVisible() || !w->isWindow() || w == main || w == faceOwner || w == ownerWindow)
 				continue;
 			switch (w->windowType()) {
 			case Qt::Tool:
@@ -2102,6 +2106,20 @@ string GetFormatExt(const char *container)
 string GetOutputFilename(const char *path, const char *container, bool noSpace, bool overwrite, const char *format)
 {
 	OBSBasic *main = OBSBasic::Get();
+
+#ifdef __ANDROID__
+	if (path && obsAndroidStorageManaged(QString::fromUtf8(path))) {
+		const auto name = GenerateSpecifiedFilename(GetFormatExt(container).c_str(), noSpace, format);
+		const auto uri = obsAndroidStorageCreate(QString::fromUtf8(path), QString::fromStdString(name));
+		if (uri.isEmpty()) {
+			OBSMessageBox::warning(main, QTStr("Output.BadPath.Title"),
+				QStringLiteral("无法在所选文件夹创建录像。请重新选择并授权目录，确认存储空间充足。"
+					       "录像文件名不能包含子目录。"));
+		}
+		// The provider resolves name collisions without overwriting existing recordings.
+		return uri.toStdString();
+	}
+#endif
 
 	os_dir_t *dir = path && path[0] ? os_opendir(path) : nullptr;
 
@@ -2479,6 +2497,9 @@ void OBSApp::applicationShutdown() noexcept
 
 	if (libobs_initialized) {
 		obs_shutdown();
+#ifdef __ANDROID__
+		OBSAndroidBrowserShutdown();
+#endif
 		libobs_initialized = false;
 	}
 }

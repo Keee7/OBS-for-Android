@@ -28,6 +28,15 @@
  * ========================================================================= */
 
 struct gs_exports {
+#ifdef __ANDROID__
+	gs_android_encoder_surface_t *(*device_android_encoder_surface_create)(gs_device_t *, void *);
+	bool (*device_android_encoder_surface_submit)(gs_android_encoder_surface_t *, gs_texture_t *, int64_t);
+	void (*device_android_encoder_surface_destroy)(gs_android_encoder_surface_t *);
+	gs_android_external_texture_t *(*device_android_external_texture_create)(gs_device_t *, uint32_t, uint32_t);
+	uint32_t (*device_android_external_texture_get_id)(gs_android_external_texture_t *);
+	gs_texture_t *(*device_android_external_texture_render)(gs_android_external_texture_t *, const float *);
+	void (*device_android_external_texture_destroy)(gs_android_external_texture_t *);
+#endif
 	const char *(*device_get_name)(void);
 	const char *(*gpu_get_driver_version)(void);
 	const char *(*gpu_get_renderer)(void);

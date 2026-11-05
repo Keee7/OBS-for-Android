@@ -10,6 +10,9 @@
 #include <qt-wrappers.hpp>
 
 #include <QThreadPool>
+#ifdef __ANDROID__
+#include <widgets/OBSAndroidPath.hpp>
+#endif
 
 using namespace std;
 
@@ -441,7 +444,11 @@ void BasicOutputHandler::SetupAutoRemux(const char *&container)
 std::string BasicOutputHandler::GetRecordingFilename(const char *path, const char *container, bool noSpace,
 						     bool overwrite, const char *format, bool ffmpeg)
 {
-	if (!ffmpeg) {
+	bool remux = !ffmpeg;
+#ifdef __ANDROID__
+	remux = remux && !obsAndroidStorageManaged(QString::fromUtf8(path));
+#endif
+	if (remux) {
 		SetupAutoRemux(container);
 	}
 

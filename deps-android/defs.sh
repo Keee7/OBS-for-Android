@@ -176,6 +176,19 @@ build_x264() {
 # ---------------------------------------------------------------- ffmpeg
 build_ffmpeg() {
   local s; s=$(src_dir ffmpeg)
+  # Both dependency build routes must use the decoder fixes shipped with OBS.
+  local patch_file
+  for patch_file in "$HERE/../scripts/android-native-deps/ffmpeg-7.1.3-mediacodec-codec-name.patch" \
+                    "$HERE/../scripts/android-native-deps/ffmpeg-7.1.3-mediacodec-crop.patch"; do
+    if patch -d "$s" -p1 -R --force --dry-run --silent < "$patch_file" > /dev/null 2>&1; then
+      echo "Already applied: $(basename "$patch_file")"
+    elif patch -d "$s" -p1 --force --dry-run --silent < "$patch_file" > /dev/null 2>&1; then
+      patch -d "$s" -p1 --force < "$patch_file" || return 1
+    else
+      echo "FFmpeg patch does not match source: $patch_file" >&2
+      return 1
+    fi
+  done
   _common_env
   local arch extra
   case "$ABI" in

@@ -4,7 +4,7 @@ add_library(android-capture MODULE)
 add_library(OBS::android-capture ALIAS android-capture)
 
 target_sources(android-capture PRIVATE uvc-input.c)
-target_link_libraries(android-capture PRIVATE OBS::libobs)
+target_link_libraries(android-capture PRIVATE OBS::libobs $<$<PLATFORM_ID:Android>:log>)
 
 if(OS_ANDROID)
   # 阶段 2 第 2 项的 USB 栈，全部来自 deps-android/prebuilt/<ABI>（交叉编译的静态库）：

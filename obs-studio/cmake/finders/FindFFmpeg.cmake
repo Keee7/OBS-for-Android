@@ -128,7 +128,7 @@ macro(FFmpeg_find_component component)
   list(GET component_${component} 1 component_name)
   list(GET component_${component} 2 component_header)
 
-  if(NOT CMAKE_HOST_SYSTEM_NAME MATCHES "Windows")
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
     find_package(PkgConfig QUIET)
     if(PKG_CONFIG_FOUND)
       pkg_search_module(PC_FFmpeg_${component} QUIET ${component_libname})
@@ -145,7 +145,7 @@ macro(FFmpeg_find_component component)
 
   ffmpeg_check_version()
 
-  if(CMAKE_HOST_SYSTEM_NAME MATCHES "Windows")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     find_library(
       FFmpeg_${component}_IMPLIB
       NAMES ${component_libname} ${component_name}

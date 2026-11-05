@@ -59,8 +59,7 @@ static bool null_output_start(void *data)
 	if (context->stop_thread_active)
 		pthread_join(context->stop_thread, NULL);
 
-	obs_output_begin_data_capture(context->output, 0);
-	return true;
+	return obs_output_begin_data_capture(context->output, 0);
 }
 
 static void *stop_thread(void *data)

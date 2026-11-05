@@ -1,6 +1,9 @@
 #include "OBSBasicStats.hpp"
 
 #include <widgets/OBSBasic.hpp>
+#ifdef __ANDROID__
+#include "OBSAndroidPath.hpp"
+#endif
 
 #include <qt-wrappers.hpp>
 
@@ -312,7 +315,13 @@ void OBSBasicStats::Update()
 #define MBYTE (1024ULL * 1024ULL)
 #define GBYTE (1024ULL * 1024ULL * 1024ULL)
 #define TBYTE (1024ULL * 1024ULL * 1024ULL * 1024ULL)
+#ifdef __ANDROID__
+	const qint64 available = obsAndroidStorageSpace(QString::fromUtf8(path));
+	diskSpaceKnown = available >= 0;
+	num_bytes = diskSpaceKnown ? static_cast<uint64_t>(available) : 0;
+#else
 	num_bytes = os_get_free_disk_space(path);
+#endif
 	QString abrv = QStringLiteral(" MB");
 	long double num;
 
@@ -326,9 +335,11 @@ void OBSBasicStats::Update()
 	}
 
 	str = QString::number(num, 'f', 1) + abrv;
-	hddSpace->setText(str);
+	hddSpace->setText(diskSpaceKnown ? str : QStringLiteral("—"));
 
-	if (num_bytes < GBYTE) {
+	if (!diskSpaceKnown) {
+		setClasses(hddSpace, "");
+	} else if (num_bytes < GBYTE) {
 		setClasses(hddSpace, "text-danger");
 	} else if (num_bytes < (5 * GBYTE)) {
 		setClasses(hddSpace, "text-warning");
@@ -448,6 +459,11 @@ void OBSBasicStats::ResetRecTimeLeft()
 
 void OBSBasicStats::RecordingTimeLeft()
 {
+	if (!diskSpaceKnown) {
+		bitrates.clear();
+		recordTimeLeft->setText(QStringLiteral("—"));
+		return;
+	}
 	if (bitrates.empty()) {
 		return;
 	}

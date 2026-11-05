@@ -40,6 +40,15 @@
 bool load_graphics_imports(struct gs_exports *exports, void *module, const char *module_name)
 {
 	bool success = true;
+#ifdef __ANDROID__
+	GRAPHICS_IMPORT(device_android_encoder_surface_create);
+	GRAPHICS_IMPORT(device_android_encoder_surface_submit);
+	GRAPHICS_IMPORT(device_android_encoder_surface_destroy);
+	GRAPHICS_IMPORT(device_android_external_texture_create);
+	GRAPHICS_IMPORT(device_android_external_texture_get_id);
+	GRAPHICS_IMPORT(device_android_external_texture_render);
+	GRAPHICS_IMPORT(device_android_external_texture_destroy);
+#endif
 
 	GRAPHICS_IMPORT(device_get_name);
 	GRAPHICS_IMPORT_OPTIONAL(gpu_get_driver_version);

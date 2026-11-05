@@ -22,6 +22,7 @@
 
 #ifdef __ANDROID__
 #include "OBSAndroidDisplay.hpp"
+#include <QTimer>
 #endif
 
 #include "moc_OBSQTDisplay.cpp"
@@ -119,6 +120,16 @@ OBSQTDisplay::OBSQTDisplay(QWidget *parent, Qt::WindowFlags flags) : QWidget(par
 
 	windowHandle()->installEventFilter(new SurfaceEventFilter(this));
 
+#ifdef __ANDROID__
+	/* Moving an ancestor or changing Android window insets need not emit a
+	 * moveEvent on this child. Reconcile only the active preview, outside the
+	 * render loop; Java skips relayout when the rectangle already matches. */
+	auto geometryTimer = new QTimer(this);
+	geometryTimer->setInterval(1000);
+	connect(geometryTimer, &QTimer::timeout, this, &OBSQTDisplay::syncAndroidGeometry);
+	geometryTimer->start();
+#endif
+
 	/* B-4/B-8：Android 暂停/恢复不走 Qt 的 visibleChanged（实测），面的销毁/重建得由 Java 的
 	 * surface 生命周期回调驱动。回调槽**不在这里认领**：全应用有好几个 OBSQTDisplay（主预览 +
 	 * 属性/滤镜/交互对话框里那个同名 preview），构造就抢会把主预览的槽顶掉。改到 CreateDisplay
@@ -190,14 +201,32 @@ void OBSQTDisplay::UpdateDisplayBackgroundColor()
 }
 
 #ifdef __ANDROID__
-/* 控件在屏幕上的绝对像素矩形：位置 = mapToGlobal(逻辑) × DPR，尺寸 = GetPixelSize(已含 DPR)。
+/* Qt Android 控件的窗口像素矩形：位置 = mapToGlobal(逻辑) × DPR，尺寸 = GetPixelSize(已含 DPR)。
  * CreateDisplay 初次建面、resizeEvent/OnMove 推几何同步，三处共用同一算法才不会自相矛盾。 */
-static QRect AndroidScreenRectPx(QWidget *w)
+static QRect AndroidWindowRectPx(QWidget *w)
 {
 	const qreal dpr = w->devicePixelRatioF();
 	const QPoint g = w->mapToGlobal(QPoint(0, 0));
 	const QSize px = GetPixelSize(w);
 	return QRect(qRound(g.x() * dpr), qRound(g.y() * dpr), px.width(), px.height());
+}
+
+void OBSQTDisplay::syncAndroidGeometry()
+{
+	if (destroying || androidSuspended || !display || !isVisible() ||
+	    !obsAndroidDisplayIsLifecycleOwner(this))
+		return;
+	const QRect r = AndroidWindowRectPx(this);
+	if (r.width() <= 0 || r.height() <= 0)
+		return;
+	uint32_t width, height;
+	obs_display_size(display, &width, &height);
+	if (width != (uint32_t)r.width() || height != (uint32_t)r.height()) {
+		obs_display_resize(display, r.width(), r.height());
+		emit DisplayResized();
+	}
+	QString detail;
+	obsAndroidDisplayUpdateRect(r.x(), r.y(), r.width(), r.height(), &detail);
 }
 #endif
 
@@ -220,7 +249,7 @@ void OBSQTDisplay::CreateDisplay()
 	 * 再经 createDisplayFromExistingSurface 换成真 ANativeWindow* 建 obs_display（走 gl-android
 	 * 的窗口面分支，不再是 M2 以来的 1x1 pbuffer）。B-4 的暂停恢复复用同一个
 	 * createDisplayFromExistingSurface()，但走不到这（view 还在 → 不重跑 attach，只重建面）。 */
-	const QRect r = AndroidScreenRectPx(this);
+	const QRect r = AndroidWindowRectPx(this);
 
 	/* 先认领再 attach：Java 只有一块 SurfaceView，抢不到槽的控件（属性/滤镜对话框里那个
 	 * preview）一 attach 就会把主预览的面摘走，对话框一关就没人还得回来。
@@ -230,7 +259,7 @@ void OBSQTDisplay::CreateDisplay()
 	if (androidSuspended)
 		return;
 
-	const bool preemptive = isWindow();
+	const bool preemptive = isWindow() || property("androidDisplayPreemptive").toBool();
 	auto onSurface = [this](int what) { onAndroidSurfaceEvent(what); };
 	const bool claimed =
 		preemptive ? obsAndroidDisplayClaimLifecyclePreemptive(this, onSurface)
@@ -425,9 +454,7 @@ void OBSQTDisplay::resizeEvent(QResizeEvent *event)
 #ifdef __ANDROID__
 		/* B-3：把同样的矩形推给 Java，让 SurfaceView 的 buffer 尺寸跟上 obs_display_resize，
 		 * 否则渲染视口与窗口面尺寸错位，多出来的部分是没清过的黑。 */
-		const QRect r = AndroidScreenRectPx(this);
-		QString d;
-		obsAndroidDisplayUpdateRect(r.x(), r.y(), r.width(), r.height(), &d);
+		syncAndroidGeometry();
 #endif
 	}
 
@@ -445,9 +472,7 @@ void OBSQTDisplay::OnMove()
 		obs_display_update_color_space(display);
 #ifdef __ANDROID__
 		/* 位置变了（尺寸可能没变）也要推给 Java，SurfaceView 才跟得住。 */
-		const QRect r = AndroidScreenRectPx(this);
-		QString d;
-		obsAndroidDisplayUpdateRect(r.x(), r.y(), r.width(), r.height(), &d);
+		syncAndroidGeometry();
 #endif
 	}
 }

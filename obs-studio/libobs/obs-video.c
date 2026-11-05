@@ -472,7 +472,12 @@ static inline bool queue_frame(struct obs_core_video_mix *video, bool raw_active
 	 * some chance the very first frame has to be duplicated for whatever
 	 * reason.  otherwise, it goes to the 'duplicate' case above, which
 	 * will ensure better performance. */
-	if (raw_active || vframe_info->count > 1) {
+	if (video->using_rgb_tex) {
+		/* Keep the final composed RGB image on the GPU. Do not swap the
+		 * borrowed render/output texture into the encoding pool. */
+		gs_copy_texture(tf.tex, video->rgb_encode_texture);
+		gs_flush();
+	} else if (raw_active || vframe_info->count > 1) {
 		gs_copy_texture(tf.tex, video->convert_textures_encode[0]);
 #ifndef _WIN32
 		/* Y and UV textures are views of the same texture on D3D, and
@@ -520,7 +525,7 @@ static void output_gpu_encoders(struct obs_core_video_mix *video, bool raw_activ
 {
 	profile_start(output_gpu_encoders_name);
 
-	if (!video->texture_converted)
+	if (!video->texture_converted && !video->using_rgb_tex)
 		goto end;
 	if (!video->vframe_info_buffer_gpu.size)
 		goto end;
@@ -551,6 +556,7 @@ static inline void render_video(struct obs_core_video_mix *video, bool raw_activ
 		gs_stagesurf_t *const *copy_surfaces = video->copy_surfaces[cur_texture];
 		size_t channel_count = NUM_CHANNELS;
 		gs_texture_t *output_texture = render_output_texture(video);
+		video->rgb_encode_texture = output_texture;
 
 		if (gpu_active) {
 			convert_textures = video->convert_textures_encode;

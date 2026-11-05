@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OBS Android browser test</title>
+<style>
+html,body{margin:0;background:transparent;color:white;font:20px sans-serif}
+main{background:rgba(0,0,0,.65);padding:1rem;display:inline-block}
+canvas{display:block;margin:8px 0}button{font-size:22px}
+</style>
+<main><strong>TOP / 顶部 — Transparency / interaction / Canvas / WebGL test</strong>
+<p>Outside this panel is transparent. Compare it against a contrasting OBS background.</p>
+<button id="button">Tap or click: 0</button>
+<canvas id="motion" width="500" height="100"></canvas>
+<canvas id="gl" width="500" height="100"></canvas>
+<span id="result">WebGL initializing</span><p>BOTTOM / 底部</p></main>
+<script>
+let count=0; const b=document.querySelector('#button');
+b.onclick=()=>b.textContent='Tap or click: '+(++count);
+const ctx=document.querySelector('#motion').getContext('2d');
+const gl=document.querySelector('#gl').getContext('webgl',{alpha:true});
+document.querySelector('#result').textContent=gl?'WebGL available':'WebGL unavailable';
+function draw(t){ctx.clearRect(0,0,500,100);ctx.fillStyle='#19e5ff';
+ctx.fillRect((t/4)%460,20,40,40);ctx.fillStyle='white';ctx.fillText('Canvas animation '+Math.floor(t),4,90);
+if(gl){gl.clearColor(.5+.5*Math.sin(t/1000),.15,.65,1);gl.clear(gl.COLOR_BUFFER_BIT)}
+requestAnimationFrame(draw)} requestAnimationFrame(draw);
+</script>

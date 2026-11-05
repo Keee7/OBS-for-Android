@@ -54,6 +54,10 @@ OBSBasicInteraction::OBSBasicInteraction(QWidget *parent, OBSSource source_)
 	setWindowFlags(flags & (~helpFlag));
 
 	ui->setupUi(this);
+#ifdef __ANDROID__
+	// This dialog needs the single Android SurfaceView while it is open.
+	ui->preview->setProperty("androidDisplayPreemptive", true);
+#endif
 
 	ui->preview->setMouseTracking(true);
 	ui->preview->setFocusPolicy(Qt::StrongFocus);

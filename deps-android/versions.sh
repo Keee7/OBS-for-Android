@@ -1,11 +1,6 @@
 # deps-android 依赖清单（版本 + 下载源）——唯一真源
 #
-# 网络策略（2026-09 实测）：
-#   github.com        : WSL 内不可达，Windows 侧必须走代理 127.0.0.1:7892
-#   code.videolan.org : 直连可达
-#   ffmpeg.org        : 直连可达
-#   downloads.sourceforge.net : 直连可达
-# 因此 fetch.sh 会自动对 github 域名加代理。
+# 网络：fetch.sh 默认使用 curl 的网络配置；需要额外代理时设置 OBS_PROXY。
 #
 # zlib 不在此列：直接使用 NDK sysroot 自带的 libz.a / zlib.h。
 

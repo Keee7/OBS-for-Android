@@ -1,151 +1,105 @@
-# OBS Studio for Android
+# OBS for Android
 
 **English** | [简体中文](README_CN.md)
 
-A working branch porting [OBS Studio](https://github.com/obsproject/obs-studio) to Android. The current baseline is upstream **32.2.1** (commit `57bfcf10a`), on top of which this repo provides: the `libobs` Android platform layer, a GLES/EGL rendering backend, Android adaptation of the Qt frontend, four `android-*` capture plugins, USB host capture sources (PTP for Nikon Z bodies, UVC for webcams/HDMI capture cards), and the Java host on the APK side.
+An Android port of OBS Studio with scenes, sources, recording and streaming. This fork adds **MediaCodec H.264/HEVC hardware encoding, hardware-decoded media playback, a WebView browser source, GPU screen capture and Android shared-storage recording**.
 
-The goal is **an OBS on Android that can record, stream, and actually be used** — not a demo. All development and verification is done on **WSL2 + a real arm64 device**.
+Based on [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android), which ports [OBS Studio 32.2.1](https://github.com/obsproject/obs-studio) to Android. This is a community project, not an official OBS Project Android release. Original authors, license notices and commit history are preserved.
 
-![OBS Studio running on a real Android device: recursive screen-capture preview](screenshot.png)
+**Current test version:** `0.1.11-capture-alpha-test` / versionCode `12`. Package `com.obsproject.studio`; **arm64-v8a, Android 10+ (API 29), target API 35**. The Qt UI primarily targets landscape tablets. Development APKs use the public debug key and remain debuggable.
 
-Live RTMP streaming test over LAN — the tablet streams its camera at ~6 Mbps / 30 FPS while the monitor behind plays the received stream:
+## Features and validation
 
-![Real-device live streaming test: OBS on a tablet pushing RTMP over LAN, received stream playing on the monitor behind](Live_Stream_Test.JPG)
+“Implemented” means the source and test APK build successfully; device evidence is listed separately.
 
----
+| Feature | Implementation and evidence |
+| --- | --- |
+| H.264 hardware encoding | Named hardware MediaCodec component and Surface/GPU input. Xring O1 `c2.xring.avc.encoder` tested at 1920×1080/60 fps over local RTMP. |
+| HEVC / H.265 hardware encoding | Main-compatible 8-bit SDR, VPS/SPS/PPS handling, capability checks and Surface input. Host tests/build checks passed; device HEVC recording needs validation. |
+| Hardware encoding quality | Advanced output exposes supported CBR/VBR/CQ and Automatic/Low/Medium/High settings mapped to component complexity/quality ranges. MediaCodec does not use x264 presets. Device quality comparisons remain pending. |
+| GPU screen capture | MediaProjection → SurfaceTexture/OES → OBS composition. New sources default to GPU; failures retry with backoff, without automatic CPU fallback. Manual CPU mode remains available. GPU capture was confirmed working on the test tablet. |
+| Single-app capture and Alpha | Android 14+ captured-content size callbacks; compatible, straight-Alpha and premultiplied-Alpha modes. Host composition tests passed. VTube Studio → Android projection → OBS transparency is **not yet verified on-device**. |
+| Browser source | System WebView via GPU texture: URL, size, FPS limit, CSS, refresh, visibility and basic pointer interaction. No CEF plugin support or separate web-audio track; device/browser compatibility needs testing. |
+| Media playback and hardware decoding | Android document URI input and named MediaCodec hardware decoders through patched FFmpeg. A 4K H.264 cropping problem was reproduced and fixed on Xring O1, including after restarting the app. Other formats need individual validation. |
+| Shared-folder recording | MediaStore / SAF for local seekable destinations such as `Download/obs`; fixes failed path-space queries being reported as insufficient space. Use Hybrid MP4/MOV; folder/provider combinations require device testing. |
+| Floating-window preview | Unified Qt/Android window coordinates. Entering, moving, resizing and leaving floating-window mode checked on the test tablet. |
+| RTMP streaming | Reconnect state reset, CBR/VBR dynamic bitrate and packet cleanup on send failures. Local device tests covered normal streaming, forced disconnection and bandwidth limitation. |
+| Camera and USB sources | Retains upstream Camera2, system audio, Nikon PTP and UVC. Published upstream device results have not all been repeated in this fork. |
 
-## Status at a glance
+Hardware encoding reports initialization failures instead of silently choosing a software encoder. Media-source decoding can fall back to software **during initialization**; this is independent of the screen-capture retry policy.
 
-| Capability | Status | Notes |
-|---|---|---|
-| libobs + plugins + Qt frontend built into an APK | ✅ Verified | arm64-v8a, WSL2 build chain |
-| Preview, scenes, sources, filter panels | ✅ Verified | Landscape only, laid out for 16:10; sRGB window surface, colors match the system |
-| Recording (mp4/mkv, x264 + AAC) | ✅ Verified | Recorded files have valid video/audio tracks |
-| Built-in camera source (Camera2 NDK) | ✅ Verified | Tested on a real device, with one-tap front/back switching on the main UI |
-| Nikon Webcam source (Z series, self-implemented PTP) | ✅ Verified | Real Z8: 1024×576 @ ~55 fps, 22 min continuous, zero dropped frames |
-| UVC camera / HDMI capture card source (self-implemented UVC-over-libusb) | ✅ Verified | UGREEN 95348 (2b89:5348), YUYV 1280×720@60 stable (~56 fps measured) |
-| Screen capture source (MediaProjection + VirtualDisplay) | ✅ Verified | Tested on a real device; can recursively capture OBS's own window |
-| System audio capture (AudioPlaybackCapture) | ✅ Verified | Reaches the mixer on a real device; recordings have sound |
-| Foreground keep-alive service (survives long record/stream sessions) | ✅ Verified | Not reclaimed by the system during long runs on a real device |
-| Streaming (RTMP) | ✅ Verified | Live LAN streaming test on a real device (photo below) |
+## Device evidence and performance scope
 
-## USB capture sources (OTG)
+Recent tests targeted an **Xring O1 tablet running Android 16**, with 1080p60 output:
 
-Both ride the frontend's USB host bus (the Java side opens the device and hands the fd down to libobs) — no root needed.
+- Local RTMP: 88.600 seconds, 5,317 video frames, measured 60.000 fps and approximately 6.028 Mbps. The received file decoded without errors; one rendering lag and one encoding lag were recorded.
+- Forced receiver disconnect: reconnected in approximately 1.267 seconds; both received segments decoded successfully.
+- A local 2 Mbps limit reduced measured encoder output to approximately 1.711 Mbps over five seconds; after removing the limit it recovered to approximately 5.836 Mbps toward a 6 Mbps target.
+- Input was an existing 4K H.264 media file. A 60 fps output does not establish 60 distinct input-motion frames.
 
-### Nikon Webcam (Z series)
+These are USB-forwarded local RTMP results, not a guarantee for live platforms, real Wi-Fi loss, RTMPS, long thermal runs or every Android chipset. HEVC, browser performance and transparent capture require further device tests. See [the device record](scripts/DEVICE_VALIDATION_WINDOW_STREAM.md).
 
-- Source id `nikon_webcam_input`. Speaks **self-implemented PTP** directly to Nikon Z-series bodies — **no Nikon SDK required** (the official SDK ships for Windows/macOS only).
-- Camera side: just set USB to MTP/PTP mode. Verified on a real Z8: **1024×576 @ ~55 fps, 22 minutes continuous, zero dropped frames**.
-- Limits: in photo mode Live View is 1024×768 (4:3, untested); while the app holds the camera, other hosts (e.g. a PC) cannot reach it; the Z8 has no UVC mode, so the UVC source below cannot use it directly.
+The image below is inherited from the original Android port and illustrates its UI; it is not evidence of this fork's hardware-encoder tests.
 
-### UVC camera (Android USB)
+![Original Android port's screen-capture preview](screenshot.png)
 
-- Source id `android_video_input`, listed as "UVC 摄像头（Android USB）". **Rewritten from scratch as self-implemented UVC-over-libusb** — libuvc's init is denied by SELinux on Android. Device enumeration, permission, detaching the kernel `uvcvideo` driver, format negotiation, an asynchronous bulk-read pipeline, and error self-healing are all handled in-house.
-- Verified: **UGREEN 95348 HDMI capture card (2b89:5348), YUYV 1280×720@60 stable** (~56 fps measured) — works with a camera's HDMI output.
-- Quirks & self-healing: a quirks table (2b89:5348's MJPEG/NV12 outputs are a full black field — a firmware defect, also reproducible on Windows — so YUYV is preferred automatically); any card outputting black frames for 3 s is auto-downgraded to YUYV; a freeze watchdog renegotiates a stalled stream; unplug/replug recovers by itself.
-- Resolution: the ceiling depends on both the device and the host — YUYV 1080p60 needs a sustained **250 MB/s** (trivial for PCs, but phones/tablets generally can't keep up and the stream freezes). **For 1080p and above, prefer a capture card with a healthy MJPEG path** (MJPEG 1080p60 is only ~10–20 MB/s, mobile-friendly). The source accepts up to the device-reported 4K.
-- For Z8 owners: the Z8 has no UVC mode — "Z8 as webcam" goes through an HDMI capture card (this source) or the PTP source above.
+## Getting started
 
-## Repository layout
+1. Build a test APK using [BUILDING.md](BUILDING.md). APKs and dependency binaries are excluded from Git. Published downloads, when available, belong in [Releases](https://github.com/Keee7/OBS-for-Android/releases).
+2. Install with `adb install -r <test.apk>`. Back up configuration before changing signing keys or uninstalling an existing build.
+3. Start with 1920×1080, 60 fps, SDR BT.709 and Android MediaCodec H.264. In Advanced output start with CBR and Automatic quality, then check output statistics.
+4. Add a screen source and approve Android's sharing dialog. New sources default to GPU; existing saved CPU choices remain respected. Reopen source properties to inspect frame counters.
+5. For shared storage, choose Hybrid MP4, disable file splitting and use `/storage/emulated/0/Download/obs` or authorize a local subfolder through the directory picker.
+6. For media, select the video with Browse and enable “Use hardware decoding when available.” Inspect the logged fallback reason if initialization fails.
 
-```
-OBS_for_Android/
-├── obs-studio/          Upstream OBS source + all porting changes (libobs Android platform
-│                        layer, GLES/EGL backend, Qt frontend adaptation, android-* capture
-│                        plugins, Java host)
-├── android-shell/       Minimal Qt Android shell (regression vehicle for early milestones),
-│                        contains the standard debug keystore used for signing
-├── deps-android/        Download & cross-compile scripts for third-party dependencies
-│                        (versions.sh is the single source of truth for versions; the src/
-│                        downloads and prebuilt/ outputs are not committed — regenerate them
-│                        by running the scripts)
-└── scripts/
-    └── build-frontend-apk-wsl.sh    One-shot build/sign script for the frontend APK
-                                     (WSL, arm64-v8a)
+For transparent composition, put a color/image source beneath the screen source, select the target app in Android's sharing dialog and try **Preserve Alpha (premultiplied input)**. This preserves Alpha delivered by Android; it cannot reconstruct transparency after a background has been composited. Ordinary H.264/HEVC streaming sends the final scene, not Alpha-bearing video. See [the Alpha guide](scripts/TRANSPARENT_CAPTURE_TEST.md).
+
+## Verify hardware encoding
+
+Record moving content for 30–60 seconds and collect the same encoder session:
+
+```sh
+adb logcat -v threadtime -d -s 'OBS-MediaCodec:*' > mediacodec-log.txt
+python scripts/verify-mediacodec-log.py mediacodec-log.txt --codec h264
 ```
 
-Not committed: `releases/` (installable APKs are attached to GitHub Releases), `prebuilt/` (the APK's native payload, a build artifact), `build-fe-*/` (CMake build directories).
+For HEVC, use `--codec hevc`. Require all of these:
 
-The header comments of `obs-studio/frontend/cmake/android/AndroidManifest.xml` record the rationale for every permission and every `screenOrientation` — if you want to understand "why the manifest looks like this", read that first.
+- `event=started`, an actual component name and `hardware=true software=false input=Surface`.
+- `event=first-packet headers=valid keyframe=1`.
+- Increasing `submitted`, `output`, `delivered` and `bytes` counters.
+- A clean `event=summary failed=0`, without an error for that session.
 
-## Requirements
+A selected encoder name or low CPU usage alone is insufficient. Inspect the recording with FFmpeg/ffprobe and check OBS rendering/encoding-lag statistics. See [the hardware encoder guide](scripts/HEVC_HARDWARE_TEST.md).
 
-Every version below is one actually used — not "should also work":
+## Limitations
 
-| Component | Version | Notes |
-|---|---|---|
-| Host | WSL2 (Ubuntu) | Reaching GitHub requires the host-side proxy (see pitfall #2) |
-| Android NDK | **30.0.16138531** | `linux-x86_64` |
-| Android SDK | build-tools **36.0.0**, platform **android-35** | Compiled with `ANDROID_PLATFORM=android-29` |
-| Qt | **6.9.3**, needs `android_arm64_v8a` + **`gcc_64` (as QT_HOST_PATH, provides androiddeployqt — no package without it)** | |
-| CMake | 3.31.6 (installed via pip) | |
-| Ninja | 1.13.2 | |
-| Gradle | 8.14.5 | |
-| JDK | **17** | See pitfall #1 |
-| Target device | Android 10 (API 29) or newer, arm64 hardware | Debug over adb wireless debugging (`adb pair` + `adb connect`) |
+- Codec capabilities, throughput and quality depend on the device. No HDR/Main10 or universal sustained-1080p60 guarantee.
+- GPU screen capture retries without automatic CPU fallback. Revoked sharing consent must be renewed.
+- Media hardware decoding produces CPU-readable frames; it is not end-to-end GPU zero-copy.
+- Shared-document recording requires a local seekable provider. File splitting, replay buffer, custom FFmpeg output and automatic remux are not supported for that destination path. Real low-space conditions still stop recording.
+- Browser source has no separate audio track, local HTML picker or full keyboard/wheel/multitouch integration. Browser Alpha needs device validation; plain HTTP follows the app's network policy.
+- No implemented NDI/Spout2 input. VTube Studio transparency remains experimental.
+- Scripting and built-in Twitch/YouTube/Restream integrations remain disabled. Configure a supported server URL/stream key manually.
 
-## Building
+## Source and documentation
 
-### 0. Environment
-
-Toolchain paths come from environment variables (`ANDROID_SDK_ROOT` / `QT_DIR` / `QT_HOST_PATH` / `NDK_ROOT`). The build script checks each one up front and fails loudly if any is missing.
-
-### 1. Third-party dependencies
-
-```bash
-cd deps-android
-./fetch.sh core        # Download dependency sources (simde/uthash/jansson/x264/ffmpeg/…, see versions.sh)
-./build.sh             # Cross-compile into prebuilt/<abi>/
+```text
+obs-studio/          OBS source, Android platform/frontend and plugins
+  plugins/android-mediacodec/   H.264/HEVC hardware encoders
+  plugins/android-screen/       GPU/CPU screen capture and Alpha handling
+  plugins/android-browser/      WebView browser source
+android-shell/       Early integration shell and public development debug key
+deps-android/        Dependency versions, downloads and WSL/Linux cross-build scripts
+scripts/             Windows build helpers, FFmpeg patches and test guides
 ```
 
-`deps-android/versions.sh` is the single source of truth for the dependency list and versions, batched by porting stage: `core` (required by libobs), `usb` (OTG capture), `filters` (filters/text sources), `output` (streaming/recording).
+[Build](BUILDING.md) · [Contribute](CONTRIBUTING.md) · [Latest test-package notes](scripts/DEVICE_TEST_QUICKSTART.md) · [Media/quality](scripts/MEDIA_QUALITY_TEST.md) · [Storage](scripts/ANDROID_STORAGE_TEST.md) · [Screen capture](scripts/ANDROID_PROJECTION_TEST.md) · [1080p60 acceptance](scripts/android-1080p60-acceptance.md)
 
-### 2. The frontend APK (libobs + rendering backend + plugins + Qt frontend)
-
-```bash
-bash scripts/build-frontend-apk-wsl.sh            # Configure + build + package + sign + verify
-bash scripts/build-frontend-apk-wsl.sh configure  # CMake configure only (quick check of CMake changes)
-```
-
-The artifact is automatically archived to `releases/OBS-Android-arm64-v8a-wsl-<timestamp>.apk`. To install:
-
-```bash
-adb connect <phone-IP>:<port>      # On the phone: Developer options → Wireless debugging
-adb install -r releases/OBS-Android-arm64-v8a-wsl-<timestamp>.apk
-```
-
-Enabled modules: `android-audio` `android-camera` `android-capture` `android-screen` `image-source` `nikon-source` `obs-encode-sink` `obs-ffmpeg` `obs-filters` `obs-outputs` `obs-transitions` `obs-x264` `rtmp-services` `text-freetype2`. Disabled: scripting, Idian Playground, Restream/Twitch/YouTube API integrations.
-
-### 3. When you only changed one .cpp
-
-Don't wait for a full Gradle/ninja round. Copy the **exact** compile command out of `build.ninja` (including `-Werror` and all `-D`/`-I` flags) and add `-fsyntax-only` to check it on the spot:
-
-```bash
-ninja -C build-fe-arm64-v8a-plugins -t commands plugins/android-screen/CMakeFiles/android-screen.dir/screen-capture.c.o
-```
-
-## Build/debug pitfalls (all paid for)
-
-1. **Gradle 8.12/8.14 does not support JDK 25** (class file major version 69). `JAVA_HOME` must be pinned to JDK 17.
-2. **GitHub is not directly reachable inside WSL** — traffic goes through the host's proxy: the proxy client on the Windows host must enable "Allow LAN connections", and Windows Firewall must allow inbound traffic on that port (the WSL subnet counts as an external network). `fetch.sh` applies the proxy per domain automatically (override with the `OBS_PROXY` environment variable). Note that the host IP may change after a WSL restart — get the current one with `ip route | awk '/default/{print $3}'`.
-3. **`androiddeployqt` does not sign in release mode**; the script self-signs with `apksigner`. The `android-shell/debug.keystore` in this repo is the standard Android debug key (alias `androiddebugkey`, password `android`) — for local development only.
-4. **Plugin `.so` files must be manually staged into `libs/<abi>/` and Gradle's native intermediates must be wiped**, otherwise freshly built plugins don't make it into the package and you end up testing the previous version — that's what the "force repackage" section of `build-frontend-apk-wsl.sh` does. Always verify against the copy **inside the APK**, never the rundir copy.
-5. **OBS's `blog()` does not go to logcat.** Logs live on the device at `/data/user/0/com.obsproject.studio/files/.config/obs-studio/logs/*.txt`. The APK manifest carries `android:debuggable="true"`, so on a non-rooted device `adb exec-out run-as com.obsproject.studio cat ...` is enough — **remember to remove that attribute before any formal release build**.
-6. **Artifact identity can only be judged by content** (hashes / `strings` / behavior) — never by file size or mtime.
-
-## Permissions (runtime / manifest)
-
-`INTERNET`, `RECORD_AUDIO`, `CAMERA`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `FOREGROUND_SERVICE_MEDIA_PROJECTION`, `WAKE_LOCK`, `POST_NOTIFICATIONS`, `READ/WRITE_EXTERNAL_STORAGE`; in `uses-feature`, `usb.host`, `camera`, and `camera.any` are all `required=false` (so devices without OTG or without a camera can still install the app).
-
-On first launch, all missing permissions are requested in a single `requestPermissions` dialog. The foreground service type is a combined `specialUse|mediaProjection` — no second service, no second persistent notification; the rationale for choosing `specialUse` is documented in the header comments of `ObsForegroundService.java`.
+[Implementation notes](IMPLEMENTATION_ANDROID.md) and some test guides contain historical version-specific findings. Current defaults are documented above and in the latest test-package notes. Report device/app/Android versions, component names, reproduction steps and sanitized logs in [Issues](https://github.com/Keee7/OBS-for-Android/issues). Remove stream keys and personal paths.
 
 ## License and attribution
 
-- Upstream OBS Studio is **GPL-2.0-or-later**; the full license text is in `obs-studio/COPYING`, and the list of authors and third-party components is in `obs-studio/AUTHORS`. All new code in this port uses the same license.
-- The linked **Qt 6.9.3** is dual-licensed LGPLv3 / GPL; the Qt libraries in the APK are dynamically linked as separate `.so` files, satisfying the relinking requirement.
-- `deps-android/` fetches and cross-compiles x264, FFmpeg, mbedTLS, curl, FreeType, libjpeg-turbo, speexdsp, rnnoise, libuvc, etc. — each under its own upstream license; check them yourself before distributing build artifacts that contain these binaries.
+This port follows upstream OBS Studio's **GPL-2.0-or-later** licensing. See [LICENSE](LICENSE), [OBS COPYING](obs-studio/COPYING), [OBS AUTHORS](obs-studio/AUTHORS) and [NOTICE.md](NOTICE.md). Dependencies retain their own licenses. The debug keystore is public development material, not a private release signing key.
 
-## Out of scope
-
-No portrait layout — the UI is optimized for landscape only, targeting a 16:10 aspect ratio.
+Thanks to [cunminF](https://github.com/cunminF/OBS_for_Android), the [OBS Project](https://github.com/obsproject/obs-studio) and dependency authors. OBS names and icons remain attributable to their respective owners.

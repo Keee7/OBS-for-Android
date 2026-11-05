@@ -114,7 +114,7 @@ else()
   set(Libx264_VERSION 0.0.0)
 endif()
 
-if(CMAKE_HOST_SYSTEM_NAME MATCHES "Windows")
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   find_library(Libx264_IMPLIB NAMES x264 libx264 DOC "Libx264 import library location")
 
   libx264_find_dll()

@@ -22,6 +22,9 @@
 #include <qt-wrappers.hpp>
 
 #include <QDir>
+#ifdef __ANDROID__
+#include "OBSAndroidPath.hpp"
+#endif
 
 void OBSBasic::ResetOutputs()
 {
@@ -118,7 +121,13 @@ void OBSBasic::OutputPathInvalidMessage()
 {
 	blog(LOG_ERROR, "Recording stopped because of bad output path");
 
+#ifdef __ANDROID__
+	OBSMessageBox::critical(this, QTStr("Output.BadPath.Title"),
+		QStringLiteral("无法访问录像目录。请在设置中重新选择文件夹并授予写入权限，"
+			       "或输入 /storage/emulated/0/Download/obs。请勿选择 Android/data 等系统受限目录。"));
+#else
 	OBSMessageBox::critical(this, QTStr("Output.BadPath.Title"), QTStr("Output.BadPath.Text"));
+#endif
 }
 
 bool OBSBasic::IsFFmpegOutputToURL() const
@@ -144,5 +153,9 @@ bool OBSBasic::OutputPathValid()
 	}
 
 	const char *path = GetCurrentOutputPath();
+#ifdef __ANDROID__
+	if (path && obsAndroidStorageManaged(QString::fromUtf8(path)))
+		return obsAndroidStorageWritable(QString::fromUtf8(path));
+#endif
 	return path && *path && QDir(path).exists();
 }

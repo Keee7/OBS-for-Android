@@ -11,6 +11,7 @@
 target_sources(
   obs-studio
   PRIVATE
+    utility/AndroidCodecCapabilities.cpp
     utility/AndroidRuntimeBootstrap.cpp
     utility/CrashHandler_Android.cpp
     utility/NativeEventFilter.cpp
@@ -26,6 +27,7 @@ target_sources(
     widgets/OBSAndroidPermissions.cpp
     # USB host 总线（obs_android_usb_*）的前端注册（Java 侧 .../ObsUsbHost.java，
     # 自 android-shell/obs_usb_host.cpp 移植），给 android-capture 的 UVC 源用。
+    widgets/OBSAndroidBrowser.cpp
     widgets/OBSAndroidUsb.cpp
     # 3-4：桌面 "openUrl(本地路径)" 的 Android 替代（显示路径 + 复制剪贴板）。
     widgets/OBSAndroidPath.cpp
@@ -179,8 +181,8 @@ set_target_properties(
     # 清单与 FileProvider 的 paths 都在 cmake/android/ 下自带；一旦设了这个变量，
     # androiddeployqt 就不再拿自己的模板覆盖清单（同 android-shell 的做法）。
     QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/android"
-    QT_ANDROID_VERSION_NAME "0.1.0"
-    QT_ANDROID_VERSION_CODE 1
+    QT_ANDROID_VERSION_NAME "0.1.11-capture-alpha-test"
+    QT_ANDROID_VERSION_CODE 12
     QT_ANDROID_COMPILE_SDK_VERSION 35
     QT_ANDROID_TARGET_SDK_VERSION 35
     QT_ANDROID_MIN_SDK_VERSION 29)

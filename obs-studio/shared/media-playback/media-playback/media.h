@@ -40,6 +40,10 @@ extern "C" {
 
 struct mp_media {
 	AVFormatContext *fmt;
+#ifdef __ANDROID__
+	AVIOContext *android_io;
+	int android_fd;
+#endif
 
 	mp_video_cb v_preload_cb;
 	mp_video_cb v_seek_cb;
@@ -55,6 +59,10 @@ struct mp_media {
 	int speed;
 
 	enum AVPixelFormat scale_format;
+	bool scale_initialized;
+	int scale_input_width, scale_input_height, scale_input_format;
+	enum AVColorSpace scale_input_colorspace;
+	enum AVColorRange scale_input_range;
 	struct SwsContext *swscale;
 	int scale_linesizes[4];
 	uint8_t *scale_pic[4];

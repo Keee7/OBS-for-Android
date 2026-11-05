@@ -17,6 +17,12 @@
 #include <util/platform.h>
 
 #include <assert.h>
+#ifdef __ANDROID__
+#include <obs-android.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
 
 #include "media-playback.h"
 #include "media.h"
@@ -24,6 +30,27 @@
 
 #include <libavdevice/avdevice.h>
 #include <libavutil/imgutils.h>
+
+#ifdef __ANDROID__
+static int android_media_read(void *opaque, uint8_t *buf, int size)
+{
+	mp_media_t *m = opaque;
+	ssize_t n;
+	do { n = read(m->android_fd, buf, size); } while (n < 0 && errno == EINTR);
+	return n > 0 ? (int)n : n == 0 ? AVERROR_EOF : AVERROR(errno);
+}
+
+static int64_t android_media_seek(void *opaque, int64_t offset, int whence)
+{
+	mp_media_t *m = opaque;
+	if (whence == AVSEEK_SIZE) {
+		struct stat st;
+		return fstat(m->android_fd, &st) == 0 && S_ISREG(st.st_mode) ? st.st_size : AVERROR(ENOSYS);
+	}
+	off_t result = lseek(m->android_fd, offset, whence & ~AVSEEK_FORCE);
+	return result < 0 ? AVERROR(errno) : result;
+}
+#endif
 
 static int64_t base_sys_ts = 0;
 
@@ -261,6 +288,32 @@ static bool mp_media_init_scaling(mp_media_t *m)
 	return true;
 }
 
+static bool mp_media_update_scaling(mp_media_t *m)
+{
+	AVFrame *f = m->v.frame;
+	if (!m->scale_initialized || m->scale_input_width != f->width ||
+	    m->scale_input_height != f->height || m->scale_input_format != f->format ||
+	    m->scale_input_colorspace != f->colorspace || m->scale_input_range != f->color_range) {
+		sws_freeContext(m->swscale);
+		m->swscale = NULL;
+		av_freep(&m->scale_pic[0]);
+		memset(m->scale_pic, 0, sizeof(m->scale_pic));
+		memset(m->scale_linesizes, 0, sizeof(m->scale_linesizes));
+		m->scale_initialized = false;
+		m->scale_format = closest_format(f->format);
+		if (m->scale_format != f->format && !mp_media_init_scaling(m))
+			return false;
+		m->scale_input_width = f->width;
+		m->scale_input_height = f->height;
+		m->scale_input_format = f->format;
+		m->scale_input_colorspace = f->colorspace;
+		m->scale_input_range = f->color_range;
+		m->scale_initialized = true;
+	}
+
+	return true;
+}
+
 bool mp_media_prepare_frames(mp_media_t *m)
 {
 	bool actively_seeking = m->seek_next_ts && m->pause;
@@ -293,14 +346,8 @@ bool mp_media_prepare_frames(mp_media_t *m)
 			return false;
 	}
 
-	if (m->has_video && m->v.frame_ready && !m->swscale) {
-		m->scale_format = closest_format(m->v.frame->format);
-		if (m->scale_format != m->v.frame->format) {
-			if (!mp_media_init_scaling(m)) {
-				return false;
-			}
-		}
-	}
+	if (m->has_video && m->v.frame_ready && !mp_media_update_scaling(m))
+		return false;
 
 	return true;
 }
@@ -683,6 +730,28 @@ static bool init_avformat(mp_media_t *m)
 	}
 
 	m->fmt = avformat_alloc_context();
+	if (!m->fmt) { av_dict_free(&opts); return false; }
+#ifdef __ANDROID__
+	if (m->is_local_file && strncmp(m->path, "content://", 10) == 0) {
+		m->android_fd = obs_android_storage_open(m->path, "r");
+		if (m->android_fd < 0) {
+			blog(LOG_WARNING, "MP: Cannot open Android document: %s", m->path);
+			av_dict_free(&opts);
+			return false;
+		}
+		uint8_t *buffer = av_malloc(32768);
+		if (buffer)
+			m->android_io = avio_alloc_context(buffer, 32768, 0, m, android_media_read, NULL,
+						  android_media_seek);
+		if (!m->android_io) {
+			av_free(buffer);
+			av_dict_free(&opts);
+			return false;
+		}
+		m->fmt->pb = m->android_io;
+		m->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+	}
+#endif
 	if (m->buffering == 0) {
 		m->fmt->flags |= AVFMT_FLAG_NOBUFFER;
 	}
@@ -875,6 +944,9 @@ static inline bool mp_media_init_internal(mp_media_t *m, const struct mp_media_i
 bool mp_media_init(mp_media_t *media, const struct mp_media_info *info)
 {
 	memset(media, 0, sizeof(*media));
+#ifdef __ANDROID__
+	media->android_fd = -1;
+#endif
 	pthread_mutex_init_value(&media->mutex);
 	media->opaque = info->opaque;
 	media->v_cb = info->v_cb;
@@ -937,6 +1009,14 @@ void mp_media_free(mp_media_t *media)
 		av_packet_free(&media->packet_pool.array[i]);
 	da_free(media->packet_pool);
 	avformat_close_input(&media->fmt);
+#ifdef __ANDROID__
+	if (media->android_io) {
+		av_freep(&media->android_io->buffer);
+		avio_context_free(&media->android_io);
+	}
+	if (media->android_fd >= 0)
+		close(media->android_fd);
+#endif
 	pthread_mutex_destroy(&media->mutex);
 	os_sem_destroy(media->sem);
 	sws_freeContext(media->swscale);
@@ -944,6 +1024,9 @@ void mp_media_free(mp_media_t *media)
 	bfree(media->path);
 	bfree(media->format_name);
 	memset(media, 0, sizeof(*media));
+#ifdef __ANDROID__
+	media->android_fd = -1;
+#endif
 	pthread_mutex_init_value(&media->mutex);
 }
 

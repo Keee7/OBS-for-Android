@@ -1,0 +1,46 @@
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -57,6 +57,7 @@
+     int amlogic_mpeg2_api23_workaround;
+ 
+     int use_ndk_codec;
++    char *codec_name;
+ } MediaCodecH264DecContext;
+ 
+ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+@@ -451,6 +452,14 @@
+ 
+     s->ctx->delay_flush = s->delay_flush;
+     s->ctx->use_ndk_codec = s->use_ndk_codec;
++    if (s->codec_name && *s->codec_name) {
++        s->ctx->codec_name = av_strdup(s->codec_name);
++        if (!s->ctx->codec_name) {
++            av_freep(&s->ctx);
++            ret = AVERROR(ENOMEM);
++            goto done;
++        }
++    }
+ 
+     if ((ret = ff_mediacodec_dec_init(avctx, s->ctx, codec_mime, format)) < 0) {
+         s->ctx = NULL;
+@@ -595,6 +604,8 @@
+ #define OFFSET(x) offsetof(MediaCodecH264DecContext, x)
+ #define VD AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM
+ static const AVOption ff_mediacodec_vdec_options[] = {
++    { "codec_name", "Select a specific Android MediaCodec component",
++                    OFFSET(codec_name), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, VD },
+     { "delay_flush", "Delay flush until hw output buffers are returned to the decoder",
+                      OFFSET(delay_flush), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { "ndk_codec", "Use MediaCodec from NDK",
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -773,7 +773,8 @@
+         av_log(avctx, AV_LOG_WARNING, "Unsupported or unknown profile\n");
+     }
+ 
+-    s->codec_name = ff_AMediaCodecList_getCodecNameByType(mime, profile, 0, avctx);
++    if (!s->codec_name)
++        s->codec_name = ff_AMediaCodecList_getCodecNameByType(mime, profile, 0, avctx);
+     if (!s->codec_name) {
+         // getCodecNameByType() can fail due to missing JVM, while NDK
+         // mediacodec can be used without JVM.

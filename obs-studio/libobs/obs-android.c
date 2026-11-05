@@ -509,6 +509,17 @@ void obs_android_screen_stop_display(void)
 	h->stop_display(h->param);
 }
 
+void obs_android_screen_capture_error(char *out, size_t size)
+{
+	if (!out || !size)
+		return;
+	out[0] = 0;
+	const struct obs_android_screen_host *h = screen_host;
+	if (h && h->capture_error)
+		h->capture_error(h->param, out, size);
+	out[size - 1] = 0;
+}
+
 /* ---- P-18-e：系统内录三格。全部 fail-closed，理由写在 obs-android.h 那一段里。 ---- */
 
 bool obs_android_screen_start_audio(uint32_t *sample_rate, uint32_t *channels)
@@ -543,4 +554,73 @@ uint32_t obs_android_screen_read_audio(int16_t *out, uint32_t max_frames)
 	if (!h || !h->read_audio || !out || max_frames == 0)
 		return 0;
 	return h->read_audio(h->param, out, max_frames);
+}
+
+/* Browser host is registered before sources are loaded and unregistered after
+ * all sources have been destroyed. The host table has static lifetime. */
+static int (*storage_open)(const char *, const char *);
+void obs_android_set_storage_open(int (*open_document)(const char *, const char *)) { storage_open = open_document; }
+int obs_android_storage_open(const char *uri, const char *mode) { return storage_open ? storage_open(uri, mode) : -1; }
+
+static const struct obs_android_browser_host *browser_host;
+void obs_android_set_browser_host(const struct obs_android_browser_host *host) { browser_host = host; }
+void *obs_android_browser_create(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css)
+{
+ const struct obs_android_browser_host *h = browser_host;
+ return h && h->create ? h->create(texture, width, height, url, css) : NULL;
+}
+int obs_android_browser_update(void *handle, float transform[16])
+{
+ const struct obs_android_browser_host *h = browser_host;
+ return h && h->update && handle && transform ? h->update(handle, transform) : -1;
+}
+void obs_android_browser_reload(void *handle)
+{
+ const struct obs_android_browser_host *h = browser_host;
+ if (h && h->reload && handle) h->reload(handle);
+}
+void obs_android_browser_destroy(void *handle)
+{
+ const struct obs_android_browser_host *h = browser_host;
+ if (h && h->destroy && handle) h->destroy(handle);
+}
+
+void obs_android_browser_set_visible(void *handle, bool visible)
+{
+ const struct obs_android_browser_host *h = browser_host;
+ if (h && h->set_visible && handle) h->set_visible(handle, visible);
+}
+
+void obs_android_browser_touch(void *handle, int x, int y, int action)
+{
+ const struct obs_android_browser_host *h = browser_host;
+ if (h && h->touch && handle) h->touch(handle, x, y, action);
+}
+
+static const struct obs_android_screen_gpu_host *screen_gpu_host;
+static bool (*decoder_query)(const char *, char *, size_t);
+void obs_android_set_decoder_query(bool (*query)(const char *, char *, size_t)) { decoder_query = query; }
+bool obs_android_find_hardware_decoder(const char *mime, char *out, size_t size)
+{
+ if (!out || !size) return false;
+ out[0] = 0;
+ bool found = decoder_query && decoder_query(mime, out, size);
+ out[size - 1] = 0;
+ return found && out[0];
+}
+void obs_android_set_screen_gpu_host(const struct obs_android_screen_gpu_host *host) { screen_gpu_host = host; }
+void *obs_android_screen_gpu_create(uint32_t texture, uint32_t width, uint32_t height, uint32_t dpi)
+{
+ const struct obs_android_screen_gpu_host *h = screen_gpu_host;
+ return h && h->create ? h->create(texture, width, height, dpi) : NULL;
+}
+int obs_android_screen_gpu_update(void *handle, float transform[16])
+{
+ const struct obs_android_screen_gpu_host *h = screen_gpu_host;
+ return h && h->update ? h->update(handle, transform) : -1;
+}
+void obs_android_screen_gpu_destroy(void *handle)
+{
+ const struct obs_android_screen_gpu_host *h = screen_gpu_host;
+ if (h && h->destroy) h->destroy(handle);
 }

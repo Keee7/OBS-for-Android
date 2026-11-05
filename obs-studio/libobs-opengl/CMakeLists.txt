@@ -31,6 +31,7 @@ target_sources(
   PRIVATE
     $<$<AND:$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>,$<BOOL:${ENABLE_WAYLAND}>>:gl-wayland-egl.c>
     $<$<PLATFORM_ID:Android>:gl-android.c>
+    $<$<PLATFORM_ID:Android>:gl-android-interop.c>
     $<$<PLATFORM_ID:Darwin>:gl-cocoa.m>
     $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:gl-egl-common.c>
     $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:gl-nix.c>

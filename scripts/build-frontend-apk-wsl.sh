@@ -14,7 +14,8 @@ set -uo pipefail
 ACT="${1:-build}"
 API="${API:-29}"
 ABI=arm64-v8a
-ROOT="$HOME/OBS_for_Android"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${OBS_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 [ -f "$HOME/.obs-android-env.sh" ] && . "$HOME/.obs-android-env.sh"
 
@@ -22,7 +23,7 @@ SDK="${ANDROID_SDK_ROOT:?缺 ANDROID_SDK_ROOT，先 source ~/.obs-android-env.sh
 QT="${QT_DIR:?缺 QT_DIR}"
 HOST="${QT_HOST_PATH:?缺 QT_HOST_PATH}"
 NDK="${NDK_ROOT:?缺 NDK_ROOT}"
-GRADLE_BIN="$HOME/toolchain/gradle-8.14.5/bin"
+GRADLE_BIN="${GRADLE_BIN:-$HOME/toolchain/gradle-8.14.5/bin}"
 
 export PATH="$HOME/.venv/bin:$GRADLE_BIN:$SDK/platform-tools:$PATH"
 export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"

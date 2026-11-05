@@ -1,146 +1,105 @@
-# OBS Studio for Android
+# OBS for Android
 
-**[English](README.md)** | 简体中文
+[English](README.md) | **简体中文**
 
-把 [OBS Studio](https://github.com/obsproject/obs-studio) 移植到 Android 的工作分支。当前基线是上游 **32.2.1**（commit `57bfcf10a`），在其之上提供：`libobs` 的 Android 平台层、GLES/EGL 渲染后端、Qt 前端的 Android 适配、四个 `android-*` 采集插件、USB host 采集源（Nikon Z 系列走 PTP、摄像头/HDMI 采集卡走 UVC），以及 APK 侧的 Java 宿主。
+在 Android 上使用 OBS 的场景、来源、录像和推流功能。本分支增加了 **MediaCodec H.264/HEVC 硬编、媒体源硬解、WebView 浏览器源、GPU 屏幕采集和共享目录录像**。
 
-目标是**能录、能推、能用的安卓端 OBS**，而不是演示品。开发与验证全部在 **WSL2 + arm64 真机** 上进行。
+本项目基于 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android)，原移植基于 [OBS Studio 32.2.1](https://github.com/obsproject/obs-studio)。这是社区移植，并非 OBS Project 官方 Android 发行版。保留原作者、许可证声明和提交历史。
 
-![OBS Studio 在 Android 真机上运行：屏幕采集递归预览](screenshot.png)
+**当前测试版本：** `0.1.11-capture-alpha-test`，versionCode `12`。包名 `com.obsproject.studio`，**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。Qt 界面主要面向横屏平板。开发测试包使用公开 debug 密钥，保留调试能力。
 
-RTMP 局域网直播实测——平板以约 6 Mbps / 30 FPS 推摄像头画面，后方显示器上是接收端播放的实时流：
+## 功能与验证状态
 
-![真机直播测试：平板上的 OBS 通过局域网推 RTMP 流，后方显示器播放接收到的流](Live_Stream_Test.JPG)
+“已实现”表示源码和测试 APK 可构建，实机验证范围单独说明。
 
-> **English (TL;DR)** — An Android port of OBS Studio 32.2.1. libobs, the OpenGL ES backend and the Qt frontend build and run as a native Android APK (`com.obsproject.studio`, minSdk 29 / targetSdk 35, arm64-v8a). Verified on a real device: scene preview with correct sRGB output, recording (mp4/mkv, x264 + AAC), Camera2 capture with front/back switching, MediaProjection screen capture (including recursive capture of OBS's own window), system audio capture into the mixer, and a foreground keep-alive service for long sessions. USB host capture is also verified: a self-implemented PTP source for Nikon Z bodies, and a rewritten UVC source for webcams/HDMI capture cards. Landscape-only UI. GPL-2.0-or-later, same as upstream.
+| 功能 | 实现及验证范围 |
+| --- | --- |
+| H.264 硬件编码 | 按名称创建硬件 MediaCodec 组件，Surface/GPU 输入。玄戒 O1 的 `c2.xring.avc.encoder` 已完成 1920×1080 / 60 fps 本地 RTMP 实测。 |
+| HEVC / H.265 硬编 | Main 兼容 8-bit SDR、VPS/SPS/PPS 处理、能力检查和 Surface 输入。主机测试及构建通过，HEVC 实机录像仍待验证。 |
+| 硬编质量控制 | 高级输出提供设备支持的 CBR/VBR/CQ 和自动、低、中、高档位，映射到组件 complexity/quality 范围。MediaCodec 不使用 x264 预设；画质和吞吐需按设备对比。 |
+| GPU 屏幕采集 | MediaProjection → SurfaceTexture/OES → OBS 合成。新建源默认开启，失败退避重试，不自动回退 CPU，保留手动 CPU 选项。测试平板已确认 GPU 采集可用。 |
+| 单应用采集与透明度 | Android 14+ 内容尺寸回调，兼容、直 Alpha、预乘 Alpha 模式。主机合成测试通过；VTube Studio → Android 投影 → OBS 的实际透明效果**尚未实机验证**。 |
+| 浏览器源 | 系统 WebView 经 GPU 纹理接入，支持 URL、尺寸、帧率上限、CSS、刷新、显隐及基础指针交互。暂无 CEF 插件兼容和独立网页音轨，网页/设备兼容性仍需测试。 |
+| 媒体播放与硬解 | Android 文档 URI 输入，通过带补丁的 FFmpeg 选择命名 MediaCodec 硬解组件。在玄戒 O1 复现并修复 4K H.264 只显示一角，应用重启后复测正常；其他格式需单独验证。 |
+| 共享目录录像 | MediaStore / SAF 写入 `Download/obs` 等可 seek 本地目录，修复路径容量查询失败被误报为“磁盘空间不足”。先使用混合 MP4/MOV；目录/提供者组合仍需实机测试。 |
+| 小窗预览 | 统一 Qt/Android 窗口坐标，已检查进入小窗、移动、缩放和返回全屏的预览对齐。 |
+| RTMP 推流 | 修复重连状态重置、CBR/VBR 动态码率及发送失败包释放。本地实机测试覆盖正常推流、主动断线与带宽限制。 |
+| 相机与 USB 采集 | 保留原项目 Camera2、系统内录、Nikon PTP 和 UVC。原项目公开的设备结果属于上游验证，本分支未重复全部测试。 |
 
----
+硬编初始化失败会明确报错，不静默替换为软件编码器。媒体源硬解可以在**初始化失败时**回退软件，与屏幕采集的 GPU 重试策略独立。
 
-## 状态速览
+## 实机证据与性能范围
 
-| 能力 | 状态 | 说明 |
-|---|---|---|
-| libobs + 插件 + Qt 前端编成 APK | ✅ 已验证 | arm64-v8a，WSL2 构建链 |
-| 预览、场景、来源、滤镜面板 | ✅ 已验证 | 横屏专用，按 16:10 布局；sRGB 窗口面，颜色与系统一致 |
-| 录制（mp4/mkv，x264 + AAC） | ✅ 已验证 | 录出的文件视频/音频轨正常 |
-| 内置摄像头采集源（Camera2 NDK） | ✅ 已验证 | 真机实测，含主界面一键前后置切换 |
-| Nikon Webcam 源（Z 系列，自实现 PTP） | ✅ 已验证 | 真机 Z8：1024×576 @ ~55fps，22 分钟连续零丢帧 |
-| UVC 摄像头/HDMI 采集卡源（自实现 UVC-over-libusb） | ✅ 已验证 | UGREEN 95348（2b89:5348），YUYV 1280×720@60 稳定（实测 ~56fps） |
-| 屏幕采集源（MediaProjection + VirtualDisplay） | ✅ 已验证 | 真机实测，可递归采集 OBS 自身窗口 |
-| 系统内录（AudioPlaybackCapture） | ✅ 已验证 | 真机实测进混音器，录制有声 |
-| 前台保活服务（长时录制/推流不被杀） | ✅ 已验证 | 真机长时运行不被系统回收 |
-| 推流（RTMP） | ✅ 已验证 | 真机局域网直播实测（见下方照片） |
+近期验证设备为 **Android 16、玄戒 O1 平板**，输出目标 1080p60：
 
-## USB 采集源（OTG）
+- 本地 RTMP 接收 88.600 秒、5,317 帧，测得 60.000 fps，视频码率约 6.028 Mbps；接收文件完整解码无错，记录到渲染与编码各一次滞后。
+- 接收器主动断开后约 1.267 秒重新连接成功，断线前后文件均完整解码。
+- 本地限制为 2 Mbps 时，实际编码输出五秒窗口最低约 1.711 Mbps；解除后回升到约 5.836 Mbps，目标为 6 Mbps。
+- 输入是已有的 4K H.264 媒体文件。输出 60 fps 不代表输入运动内容每秒有 60 个不同画面。
 
-两个源都跑在前端新增的 USB host 总线上（Java 侧打开设备，fd 传给 libobs），不需要 root。
+这些是 USB 转发后的本地 RTMP 结果，不能替代真实平台、Wi-Fi 丢包、RTMPS、长期温控或其他芯片测试。HEVC、浏览器源性能和透明采集仍待实机验证。详见 [实机记录](scripts/DEVICE_VALIDATION_WINDOW_STREAM.md)。
 
-### Nikon Webcam（Z 系列）
+下图继承自原 Android 移植项目，用于展示界面，不代表本分支新增硬编测试的截图。
 
-- 源 id `nikon_webcam_input`，以**自实现的 PTP 协议**直连 Nikon Z 系列机身，**不需要 Nikon 官方 SDK**（SDK 只有 Windows/macOS 版）。
-- 相机端 USB 设为 MTP/PTP 模式即可。真机 Z8 验证：**1024×576 @ ~55fps，22 分钟连续零丢帧**。
-- 限制：拍照模式下 Live View 为 1024×768（4:3，未实测）；App 独占相机期间其它主机（如 PC）访问不到该相机；Z8 没有 UVC 模式，下面的 UVC 源用不了它。
+![原 Android 移植项目的屏幕采集预览](screenshot.png)
 
-### UVC 摄像头（Android USB）
+## 开始使用
 
-- 源 id `android_video_input`，源列表里显示为「UVC 摄像头（Android USB）」。**整体重写为自实现的 UVC-over-libusb**——libuvc 的初始化在 Android 上被 SELinux 拒绝。设备枚举、授权、内核 uvcvideo 驱动 detach、格式协商、异步流水线采集、错误自愈全部自己完成。
-- 真机验证：**UGREEN 95348 HDMI 采集卡（2b89:5348），YUYV 1280×720@60 稳定**（实测 ~56fps），可接相机 HDMI 输出采集。
-- 怪癖与自愈：quirks 表（2b89:5348 的 MJPEG/NV12 输出全帧黑场属固件缺陷，Windows 上同样复现 → 自动偏好 YUYV）；任何卡黑场 3 秒自动降级 YUYV；冻结看门狗会把停滞的流重新协商；拔插自愈。
-- 分辨率说明：上限取决于设备与主机——YUYV 1080p60 需主机持续 **250MB/s**（PC 无压力，平板/手机类普遍吃力、会冻结）；**想要 1080p 及以上建议选用 MJPEG 通路正常的采集卡**（MJPEG 1080p60 仅需 ~10-20MB/s，移动设备友好）。源最高支持到设备自报的 4K。
-- Z8 用户须知：Z8 本身无 UVC 模式，"Z8 当 webcam" 需经 HDMI 采集卡（本源）或上面的 PTP 源。
+1. 按 [构建说明](BUILDING.md) 生成测试 APK。APK 与依赖产物不提交进 Git；后续公开安装包放在 [Releases](https://github.com/Keee7/OBS-for-Android/releases)。
+2. 使用 `adb install -r <test.apk>` 安装。更换签名或卸载旧包前先备份 OBS 配置。
+3. 先设置 1920×1080、60 fps、SDR BT.709 和 Android MediaCodec H.264。高级输出先使用 CBR、自动质量，再按实际统计调整。
+4. 添加屏幕源并同意系统共享授权。新建源默认使用 GPU，已有源明确保存的 CPU 选择会继续保留。重新打开源属性可查看接收帧计数。
+5. 共享目录录像选择混合 MP4、关闭文件分割，输入 `/storage/emulated/0/Download/obs`，或通过系统目录选择器授权本地子目录。
+6. 媒体源使用“浏览”选择视频并授权，勾选“可用时使用硬件解码”；初始化失败时查看日志中的回退原因。
 
-## 目录结构
+透明合成测试：在屏幕源下面放颜色源或图片，系统共享时选择目标应用，尝试“**保留 Alpha（预乘输入）**”。该功能保留 Android 交付帧中已有的 Alpha；背景已被系统合成后无法恢复透明度。普通 H.264/HEVC 推流发送最终场景，不输出带 Alpha 的视频流。参见 [透明采集测试](scripts/TRANSPARENT_CAPTURE_TEST.md)。
 
-```
-OBS_for_Android/
-├── obs-studio/          上游 OBS 源码 + 全部移植改动（libobs Android 平台层、GLES/EGL 后端、
-│                        Qt 前端适配、android-* 采集插件、Java 宿主）
-├── android-shell/       最小 Qt Android 壳（早期里程碑的回归载体），含签名用标准 debug keystore
-├── deps-android/        第三方依赖的下载与交叉编译脚本（版本号真源在 versions.sh；
-│                        src/ 下载物与 prebuilt/ 编译产物不入库，需自行跑脚本生成）
-└── scripts/
-    └── build-frontend-apk-wsl.sh    前端 APK 的一键构建/签名脚本（WSL，arm64-v8a）
-```
+## 如何确认硬件编码正在运行
 
-`obs-studio/frontend/cmake/android/AndroidManifest.xml` 的头部注释记录了每一条权限、每一个 `screenOrientation` 的理由——想理解"为什么清单长这样"，先读它。
+录制 30–60 秒持续运动画面，收集同一次编码会话的日志：
 
-## 环境要求
-
-以下版本全部是实际用过的，不是"应该也行"：
-
-| 组件 | 版本 | 备注 |
-|---|---|---|
-| 主机 | WSL2（Ubuntu） | 访问 GitHub 需要宿主代理（见"坑"第 2 条） |
-| Android NDK | **30.0.16138531** | `linux-x86_64` |
-| Android SDK | build-tools **36.0.0**，platform **android-35** | 编译期 `ANDROID_PLATFORM=android-29` |
-| Qt | **6.9.3**，需装 `android_arm64_v8a` + **`gcc_64`（作为 QT_HOST_PATH，提供 androiddeployqt，缺了出不了包）** | |
-| CMake | 3.31.6（pip 装的） | |
-| Ninja | 1.13.2 | |
-| Gradle | 8.14.5 | |
-| JDK | **17** | 见"坑"第 1 条 |
-| 目标设备 | Android 10（API 29）及以上，arm64 真机 | 调试用 adb 无线调试（`adb pair` + `adb connect`） |
-
-## 构建
-
-### 0. 环境
-
-工具链路径由环境变量给出（`ANDROID_SDK_ROOT` / `QT_DIR` / `QT_HOST_PATH` / `NDK_ROOT`），构建脚本开头会逐个检查、缺了直接报错。
-
-### 1. 第三方依赖
-
-```bash
-cd deps-android
-./fetch.sh core        # 下载依赖源码（simde/uthash/jansson/x264/ffmpeg/…，见 versions.sh）
-./build.sh             # 交叉编译到 prebuilt/<abi>/
+```sh
+adb logcat -v threadtime -d -s 'OBS-MediaCodec:*' > mediacodec-log.txt
+python scripts/verify-mediacodec-log.py mediacodec-log.txt --codec h264
 ```
 
-依赖清单与版本号的唯一真源是 `deps-android/versions.sh`，按移植阶段分批：`core`（libobs 必需）、`usb`（OTG 采集）、`filters`（滤镜/文字源）、`output`（推流/录制）。
+HEVC 使用 `--codec hevc`。需要同时看到：
 
-### 2. 前端 APK（libobs + 渲染后端 + 插件 + Qt 前端）
+- `event=started`、实际组件名及 `hardware=true software=false input=Surface`。
+- `event=first-packet headers=valid keyframe=1`。
+- `submitted`、`output`、`delivered`、`bytes` 持续增长。
+- 停止时 `event=summary failed=0`，同一会话没有错误。
 
-```bash
-bash scripts/build-frontend-apk-wsl.sh            # 配置 + 构建 + 打包 + 签名 + 校验
-bash scripts/build-frontend-apk-wsl.sh configure  # 只跑 CMake configure（快速验证 CMake 改动）
+只选中了硬编名称或 CPU 占用低，都不足以证明硬编正常产出。还要用 FFmpeg/ffprobe 检查文件，观察 OBS 渲染延迟和编码跳帧。[硬编检查文档](scripts/HEVC_HARDWARE_TEST.md) 有完整步骤。
+
+## 当前限制
+
+- 硬件能力、吞吐和质量取决于系统组件；未实现 HDR/Main10，不保证所有设备持续 1080p60。
+- GPU 屏幕采集失败后重试，不自动切换 CPU；共享授权被收回后必须重新同意。
+- 媒体源硬解输出仍为 CPU 可读帧，不是端到端 GPU 零拷贝。
+- 共享文档录像需要可 seek 的本地提供者；该路径暂不支持分割录像、回放缓存、自定义 FFmpeg 输出和自动 remux。真实空间不足仍会停止录像。
+- 浏览器源暂无独立音轨、本地 HTML 选择器和完整键盘/滚轮/多点触控；网页透明度需设备验证，明文 HTTP 受 Android 网络策略限制。
+- 未实现 NDI/Spout2 输入，VTube Studio 原生透明采集仍待实机验证。
+- 脚本和 Twitch/YouTube/Restream 内置服务集成仍禁用，需手动配置受支持的服务器与推流密钥。
+
+## 仓库与文档
+
+```text
+obs-studio/          OBS 源码、Android 平台/前端和插件
+  plugins/android-mediacodec/   H.264/HEVC 硬件编码器
+  plugins/android-screen/       GPU/CPU 屏幕采集及 Alpha 处理
+  plugins/android-browser/      WebView 浏览器源
+android-shell/       早期测试壳和公开开发调试密钥
+deps-android/        依赖版本、下载及 WSL/Linux 交叉构建
+scripts/             Windows 构建辅助、FFmpeg 补丁与测试文档
 ```
 
-产物自动归档到 `releases/OBS-Android-arm64-v8a-wsl-<时间戳>.apk`，装机：
+[构建](BUILDING.md) · [参与贡献](CONTRIBUTING.md) · [最新测试包说明](scripts/DEVICE_TEST_QUICKSTART.md) · [媒体与质量](scripts/MEDIA_QUALITY_TEST.md) · [存储](scripts/ANDROID_STORAGE_TEST.md) · [屏幕采集](scripts/ANDROID_PROJECTION_TEST.md) · [1080p60 验收](scripts/android-1080p60-acceptance.md)
 
-```bash
-adb connect <手机IP>:<端口>      # 手机开发者选项 → 无线调试
-adb install -r releases/OBS-Android-arm64-v8a-wsl-<时间戳>.apk
-```
+[工程记录](IMPLEMENTATION_ANDROID.md) 和部分测试文档保留了历史版本的结论，当前默认行为以上文和最新测试包说明为准。[反馈问题](https://github.com/Keee7/OBS-for-Android/issues) 时提供设备/应用/Android 版本、组件名称、复现步骤和已脱敏日志，删除推流密钥与私人路径。
 
-启用的模块：`android-audio` `android-camera` `android-capture` `android-screen` `image-source` `nikon-source` `obs-encode-sink` `obs-ffmpeg` `obs-filters` `obs-outputs` `obs-transitions` `obs-x264` `rtmp-services` `text-freetype2`。禁用：脚本引擎、Idian Playground、Restream/Twitch/YouTube API 连接。
+## 许可证与致谢
 
-### 3. 只想改一个 .cpp 时
+本移植沿用 OBS Studio 的 **GPL-2.0-or-later**。参见 [LICENSE](LICENSE)、[OBS COPYING](obs-studio/COPYING)、[OBS AUTHORS](obs-studio/AUTHORS) 及 [NOTICE.md](NOTICE.md)。依赖保留各自许可证。仓库内 debug keystore 是公开开发材料，不是私有发行签名密钥。
 
-不要等整轮 Gradle/ninja。从 `build.ninja` 里把**原样**那条编译命令抄出来（含 `-Werror` 与全部 `-D`/`-I`），加 `-fsyntax-only` 当场判：
-
-```bash
-ninja -C build-fe-arm64-v8a-plugins -t commands plugins/android-screen/CMakeFiles/android-screen.dir/screen-capture.c.o
-```
-
-## 构建/调试的坑（都付过学费）
-
-1. **Gradle 8.12/8.14 不支持 JDK 25**（class file major version 69）。必须显式把 `JAVA_HOME` 钉到 JDK 17。
-2. **GitHub 在 WSL 内不可直连**，要走宿主机的代理：宿主代理客户端需开"允许局域网连接"，且 Windows 防火墙要放行对应端口的入站（WSL 子网算外部网络）。`fetch.sh` 按域名自动加代理（`OBS_PROXY` 环境变量可覆盖）。注意 WSL 重启后宿主 IP 可能变，`ip route | awk '/default/{print $3}'` 拿当前值。
-3. **Release 模式下 `androiddeployqt` 不签名**，脚本用 `apksigner` 自签。仓库里的 `android-shell/debug.keystore` 是 Android 标准 debug key（别名 `androiddebugkey`、口令 `android`），仅供本地开发。
-4. **插件 `.so` 要手工暂存进 `libs/<abi>/` 并清掉 gradle 的 native 中间件**，否则新编出的插件不进包，测的还是上一版——`build-frontend-apk-wsl.sh` 里那段"强制重打包"就是为这个。判据一律取 **APK 里那份**，不取 rundir。
-5. **OBS 的 `blog()` 不进 logcat。** 日志在设备上 `/data/user/0/com.obsproject.studio/files/.config/obs-studio/logs/*.txt`。APK 清单带 `android:debuggable="true"`，非 root 真机用 `adb exec-out run-as com.obsproject.studio cat ...` 即可读取——**出正式发布包前记得把这个属性摘掉**。
-6. **判断产物身份只能看内容**（哈希 / `strings` / 行为），不能看文件大小或修改时间。
-
-## 权限清单（运行时/清单声明）
-
-`INTERNET`、`RECORD_AUDIO`、`CAMERA`、`FOREGROUND_SERVICE`、`FOREGROUND_SERVICE_SPECIAL_USE`、`FOREGROUND_SERVICE_MEDIA_PROJECTION`、`WAKE_LOCK`、`POST_NOTIFICATIONS`、`READ/WRITE_EXTERNAL_STORAGE`；`uses-feature` 里 `usb.host`、`camera`、`camera.any` 全部 `required=false`（不让没有 OTG 或没有相机的设备把包装不上）。
-
-首启会把缺的权限并成一次 `requestPermissions` 弹窗。前台服务类型是 `specialUse|mediaProjection` 两档合一——不起第二个服务、不加第二条常驻通知；选 `specialUse` 的理由写在 `ObsForegroundService.java` 的头注释里。
-
-## 许可与归属
-
-- 上游 OBS Studio 采用 **GPL-2.0-or-later**，许可证全文见 `obs-studio/COPYING`，作者与第三方组件清单见 `obs-studio/AUTHORS`。本移植分支的全部新增代码沿用同一许可证。
-- 链接的 **Qt 6.9.3** 为 LGPLv3 / GPL 双许可；APK 中的 Qt 库以独立 `.so` 形式动态链接，满足重新链接要求。
-- `deps-android/` 会拉取并交叉编译 x264、FFmpeg、mbedTLS、curl、FreeType、libjpeg-turbo、speexdsp、rnnoise、libuvc 等，各自许可证以上游为准；分发包含这些二进制的构建产物前请自行核对。
-
-## 范围之外
-
-竖屏布局不做——UI 只按横屏与 16:10 目标比例优化。
+感谢 [cunminF](https://github.com/cunminF/OBS_for_Android) 的原始移植、[OBS Project](https://github.com/obsproject/obs-studio) 及各依赖作者。OBS 名称和图标的权利与署名归其各自所有者。

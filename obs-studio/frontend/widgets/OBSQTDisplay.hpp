@@ -49,6 +49,7 @@ private:
 	void releaseDisplay();
 
 #ifdef __ANDROID__
+	void syncAndroidGeometry();
 	/* 从 Java 侧现有的 surface 换 ANativeWindow 并 obs_display_create（不重跑 attach）。
 	 * 首启由 CreateDisplay 在 attach 之后调；面事件由 onAndroidSurfaceEvent 调。
 	 * 已有面时幂等返回 true。不负责 emit DisplayCreated（调用方决定何时发）。 */

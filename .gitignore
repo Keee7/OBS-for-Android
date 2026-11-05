@@ -21,3 +21,25 @@ android-shell/obs/
 # 通用
 *.log
 .DS_Store
+
+# Developer machines, captures and credentials
+.codex/
+.codex-attachments/
+.idea/
+.vscode/
+build-tools/
+build-logs/
+device-debug/
+__pycache__/
+*.py[cod]
+*.apk
+*.aab
+.env
+.env.*
+!.env.example
+local.properties
+*.jks
+*.keystore
+!android-shell/debug.keystore
+*.p12
+*.pfx

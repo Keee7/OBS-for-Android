@@ -8,10 +8,10 @@
  *     尺寸用 dp 请求即可；
  *   * 这一份要替 OBSQTDisplay 的预览控件当"外部窗口面"，面必须**精确盖在控件那一块屏幕
  *     矩形上**（矩形内是 OBS 画面、矩形外还是 Qt 画的 dock/文字，两张图叠一起才算上屏），
- *     所以接口换成"控件的屏幕绝对像素矩形"，并多做一轮对齐校正。
+ *     所以接口换成"控件的窗口像素矩形"，并多做一轮对齐校正。
  *
  * 为什么要有对齐校正（这是相对 S1 新加的一段，别删）：native 传进来的是 Qt 侧
- * mapToGlobal×DPR 得到的屏幕绝对像素，但 SurfaceView 是 addContentView 进 activity 的
+ * mapToGlobal×DPR 得到的窗口像素，但 SurfaceView 是 addContentView 进 activity 的
  * content 容器，margin 是相对那个容器左上角的 —— 状态栏/标题栏/容器 padding 都会让它整体
  * 偏一截。与其去猜那个偏移，不如"先按 (x,y) 摆 → 回读实际在屏位置 → 按误差修 margin →
  * 再回读"，有限次收敛。回读只能在 UI 线程做，所以校正循环里每步都 runOnUiThread 往返一次
@@ -92,11 +92,12 @@ public final class ObsDisplayHost {
 
     private static volatile CountDownLatch sizeLatch;
 
-    /** native 请求的屏幕绝对像素矩形（目标） */
+    /** native 请求的窗口像素矩形（目标） */
     private static int reqX = -1;
     private static int reqY = -1;
     private static int reqW = -1;
     private static int reqH = -1;
+
 
     /** surfaceChanged 报回来的真实尺寸 */
     private static int surfaceWidth = -1;
@@ -254,7 +255,7 @@ public final class ObsDisplayHost {
     }
 
     /**
-     * 建（或换）那块置顶 SurfaceView，addContentView 到屏幕绝对像素矩形 (x,y,w,h)。
+     * 建（或换）那块置顶 SurfaceView，addContentView 到窗口像素矩形 (x,y,w,h)。
      * **只能在 Android UI 线程调**（要碰 view）。attach 的首次挂载和 B-8 自愈的重挂共用这一份：
      * 两处各写一遍 zOrder/format/margin，早晚漏一个 —— 漏 setZOrderOnTop 面就沉到 Qt 窗口底下，
      * 一块都看不见（S1 实测的第 2 条约束）。
@@ -291,6 +292,7 @@ public final class ObsDisplayHost {
         SurfaceHolder sh = v.getHolder();
         sh.setFormat(PixelFormat.OPAQUE);
         sh.addCallback(callbacks);
+        v.addOnLayoutChangeListener((changed, l, t, r, b, ol, ot, or, ob) -> recordMeasuredRect(v));
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, h);
         lp.gravity = Gravity.TOP | Gravity.LEFT;
         lp.leftMargin = x;
@@ -303,12 +305,13 @@ public final class ObsDisplayHost {
             lastAction = "addContentView#" + mountCount + " @(" + x + "," + y + ") " + w + "x" + h + "px";
         }
         act.addContentView(v, lp);
+        applyRequestedRect(v);
         Log.i(TAG, lastAction);
         return true;
     }
 
     /**
-     * 建一块屏幕绝对像素矩形 (x,y,w,h) 的 SurfaceView 叠到 Activity 上，等到 surface 可用
+     * 建一块窗口像素矩形 (x,y,w,h) 的 SurfaceView 叠到 Activity 上，等到 surface 可用
      * 并把它对齐到目标矩形为止。返回 false 的两种情况要分得开：视图没建起来（Activity 为
      * null / UI 线程没回话），和视图建起来了但系统没发 surface（超时）—— 两者都会打原文。
      */
@@ -394,7 +397,7 @@ public final class ObsDisplayHost {
     }
 
     /**
-     * B-3 几何同步：控件 move/resize 后把新的屏幕绝对像素矩形推给已挂着的 SurfaceView ——
+     * B-3 几何同步：控件 move/resize 后把新的窗口像素矩形推给已挂着的 SurfaceView ——
      * 改它的 LayoutParams（宽高 + margin）并 requestLayout，系统随后发 surfaceChanged 把 buffer
      * 尺寸带上新值。
      * 非阻塞：resize 很频繁，每次都等 UI 线程回话会把 GUI 线程卡成幻灯片，所以这里只 runOnUiThread
@@ -405,14 +408,59 @@ public final class ObsDisplayHost {
      * 三次 updateRect 之前 surface 就被销毁了（surfaceDestroyed#1），之后 4 分钟一个 created 都没有，
      * 预览一直黑。所以每次推几何都挂一个到点检查（armHeal），换不来对得上的 surfaceChanged 就整块重挂。
      */
-    public static boolean updateRect(final Activity act, final int x, final int y, final int w, final int h) {
-        if (act == null)
+    private static boolean applyRequestedRect(SurfaceView vv) {
+        final int x, y, w, h;
+        synchronized (ObsDisplayHost.class) {
+            if (vv != view) return false;
+            x = reqX; y = reqY; w = reqW; h = reqH;
+        }
+        if (!(vv.getParent() instanceof ViewGroup) || w <= 0 || h <= 0)
             return false;
+        ViewGroup parent = (ViewGroup) vv.getParent();
+        int[] origin = new int[2];
+        parent.getLocationInWindow(origin);
+        ViewGroup.LayoutParams p = vv.getLayoutParams();
+        if (!(p instanceof FrameLayout.LayoutParams)) return false;
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) p;
+        // Qt Android's widget coordinates are in the Activity window. Mixing
+        // them with getLocationOnScreen applies the floating-window origin a
+        // second time. Keep placement and measured alignment in window space.
+        int left = x - origin[0] - parent.getPaddingLeft() + parent.getScrollX();
+        int top = y - origin[1] - parent.getPaddingTop() + parent.getScrollY();
+        if (lp.width != w || lp.height != h || lp.leftMargin != left || lp.topMargin != top) {
+            lp.width = w; lp.height = h;
+            lp.leftMargin = left; lp.topMargin = top;
+            lp.gravity = Gravity.TOP | Gravity.LEFT;
+            vv.setLayoutParams(lp);
+            Log.i(TAG, "preview rect window=(" + x + "," + y + "," + w + "x" + h
+                    + ") parent=(" + origin[0] + "," + origin[1] + ") margin=(" + left + "," + top
+                    + ")");
+        }
+        // The next layout callback records the final position after relayout.
+        recordMeasuredRect(vv);
+        return true;
+    }
+
+    private static void recordMeasuredRect(SurfaceView vv) {
+        int[] actual = new int[2];
+        vv.getLocationOnScreen(actual);
+        synchronized (ObsDisplayHost.class) {
+            if (vv != view) return;
+            onScreenX = actual[0]; onScreenY = actual[1];
+            onScreenW = vv.getWidth(); onScreenH = vv.getHeight();
+        }
+    }
+
+    public static boolean updateRect(final Activity act, final int x, final int y, final int w, final int h) {
+        if (act == null || w <= 0 || h <= 0)
+            return false;
+        final boolean requestChanged;
         synchronized (ObsDisplayHost.class) {
             if (view == null) {
                 lastAction = "updateRect 无面（未 attach 或已 detach）(" + x + "," + y + ") " + w + "x" + h;
                 return false;
             }
+            requestChanged = reqX != x || reqY != y || reqW != w || reqH != h;
             reqX = x;
             reqY = y;
             reqW = w;
@@ -427,29 +475,16 @@ public final class ObsDisplayHost {
                 }
                 if (vv == null)
                     return;
-                ViewGroup.LayoutParams p = vv.getLayoutParams();
-                if (!(p instanceof FrameLayout.LayoutParams))
-                    return;
-                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) p;
-                if (lp.width == w && lp.height == h && lp.leftMargin == x && lp.topMargin == y) {
-                    // 没变就别惊动 relayout，但面可能已经是死的（死在这时候看不出来），照样查一次。
-                    armHeal("updateRect(几何未变)");
-                    return;
-                }
-                lp.width = w;
-                lp.height = h;
-                lp.leftMargin = x;
-                lp.topMargin = y;
-                vv.setLayoutParams(lp);
+                // Read the latest request on the UI thread: earlier queued
+                // resize jobs must not restore an obsolete rectangle.
+                if (!applyRequestedRect(vv)) return;
+                boolean stale;
                 synchronized (ObsDisplayHost.class) {
-                    onScreenX = x;
-                    onScreenY = y;
-                    onScreenW = w;
-                    onScreenH = h;
-                    lastAction = "updateRect → @(" + x + "," + y + ") " + w + "x" + h + "px";
+                    stale = surfaceWidth != reqW || surfaceHeight != reqH;
                 }
-                Log.i(TAG, lastAction);
-                armHeal("updateRect");
+                // A periodic reconciliation of the same target must not keep
+                // postponing an existing heal deadline or retrying a spent one.
+                if (stale && requestChanged) armHeal("updateRect");
             }
         });
         return true;
@@ -545,7 +580,7 @@ public final class ObsDisplayHost {
                         return;
                     }
                     int[] loc = new int[2];
-                    v.getLocationOnScreen(loc);
+                    v.getLocationInWindow(loc);
                     cur[0] = loc[0];
                     cur[1] = loc[1];
                 }
@@ -560,14 +595,12 @@ public final class ObsDisplayHost {
             }
             if (Math.abs(errX) <= ALIGN_TOL_PX && Math.abs(errY) <= ALIGN_TOL_PX) {
                 synchronized (ObsDisplayHost.class) {
-                    onScreenX = cur[0];
-                    onScreenY = cur[1];
                     SurfaceView v = view;
                     if (v != null) {
                         onScreenW = v.getWidth();
                         onScreenH = v.getHeight();
                     }
-                    lastAction = "对齐完成（第 " + (passNo + 1) + " 轮）在屏=(" + onScreenX + "," + onScreenY + ")";
+                    lastAction = "对齐完成（第 " + (passNo + 1) + " 轮）窗口=(" + cur[0] + "," + cur[1] + ")";
                 }
                 return;
             }
@@ -592,8 +625,6 @@ public final class ObsDisplayHost {
             }, UI_POST_MS);
 
             synchronized (ObsDisplayHost.class) {
-                onScreenX = cur[0] + errX;
-                onScreenY = cur[1] + errY;
                 lastAction = "对齐校正#" + (passNo + 1) + " 误差(" + errX + "," + errY + ")px → 移 margin";
             }
             try {
@@ -824,7 +855,7 @@ public final class ObsDisplayHost {
                    + changedCount + " destroyed=" + destroyedCount + " serial="
                    + (surfaceWidth > 0 ? surfaceSerial : -1) + " healStreak=" + healStreak
                    + " hiddenForModal=" + hiddenForModal + " size=" + surfaceWidth
-                   + "x" + surfaceHeight + " fmt=" + surfaceFormat + " req=(" + reqX + "," + reqY + "," + reqW + "x"
+                   + "x" + surfaceHeight + " fmt=" + surfaceFormat + " reqWindow=(" + reqX + "," + reqY + "," + reqW + "x"
                    + reqH + ") onScreen=(" + onScreenX + "," + onScreenY + "," + onScreenW + "x" + onScreenH
                    + ") last=" + lastAction;
         }

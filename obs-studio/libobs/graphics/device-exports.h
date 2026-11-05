@@ -37,6 +37,15 @@ EXPORT void device_destroy(gs_device_t *device);
 EXPORT void device_enter_context(gs_device_t *device);
 EXPORT void device_leave_context(gs_device_t *device);
 EXPORT void *device_get_device_obj(gs_device_t *device);
+#ifdef __ANDROID__
+EXPORT gs_android_encoder_surface_t *device_android_encoder_surface_create(gs_device_t *, void *);
+EXPORT bool device_android_encoder_surface_submit(gs_android_encoder_surface_t *, gs_texture_t *, int64_t);
+EXPORT void device_android_encoder_surface_destroy(gs_android_encoder_surface_t *);
+EXPORT gs_android_external_texture_t *device_android_external_texture_create(gs_device_t *, uint32_t, uint32_t);
+EXPORT uint32_t device_android_external_texture_get_id(gs_android_external_texture_t *);
+EXPORT gs_texture_t *device_android_external_texture_render(gs_android_external_texture_t *, const float *);
+EXPORT void device_android_external_texture_destroy(gs_android_external_texture_t *);
+#endif
 EXPORT gs_swapchain_t *device_swapchain_create(gs_device_t *device, const struct gs_init_data *data);
 EXPORT void device_resize(gs_device_t *device, uint32_t x, uint32_t y);
 EXPORT enum gs_color_space device_get_color_space(gs_device_t *device);

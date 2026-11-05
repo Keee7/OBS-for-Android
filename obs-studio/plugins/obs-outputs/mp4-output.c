@@ -325,7 +325,18 @@ static bool mp4_output_start(void *data)
 	/* Initialise muxer and start capture */
 	out->muxer = mp4_mux_create(out->output, &out->serializer, out->flags, out->muxer_flavor);
 	os_atomic_set_bool(&out->active, true);
-	obs_output_begin_data_capture(out->output, 0);
+	if (!obs_output_begin_data_capture(out->output, 0)) {
+		os_atomic_set_bool(&out->active, false);
+		obs_output_remove_packet_callback(out->output, mp4_pkt_callback, (void *)out);
+		if (out->enable_bpm) {
+			obs_output_remove_packet_callback(out->output, bpm_inject, NULL);
+			bpm_destroy(out->output);
+		}
+		mp4_mux_destroy(out->muxer);
+		out->muxer = NULL;
+		buffered_file_serializer_free(&out->serializer);
+		return false;
+	}
 
 	info("Writing Hybrid MP4/MOV file '%s'...", out->path.array);
 	return true;

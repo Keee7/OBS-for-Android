@@ -3558,7 +3558,8 @@ void OBSBasicSettings::SaveOutputSettings()
 	SaveCheckBox(ui->simpleNoSpace, "SimpleOutput", "FileNameWithoutSpace");
 	SaveComboData(ui->simpleOutRecFormat, "SimpleOutput", "RecFormat2");
 	SaveCheckBox(ui->simpleOutAdvanced, "SimpleOutput", "UseAdvanced");
-	SaveComboData(ui->simpleOutPreset, "SimpleOutput", presetType);
+	if (encoder != SIMPLE_ENCODER_ANDROID_MEDIACODEC && encoder != SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC)
+		SaveComboData(ui->simpleOutPreset, "SimpleOutput", presetType);
 	SaveEdit(ui->simpleOutCustom, "SimpleOutput", "x264Settings");
 	SaveComboData(ui->simpleOutRecQuality, "SimpleOutput", "RecQuality");
 	SaveComboData(ui->simpleOutRecEncoder, "SimpleOutput", "RecEncoder");
@@ -4994,6 +4995,17 @@ void OBSBasicSettings::FillSimpleRecordingValues()
 	ADD_QUALITY("Stream");
 	ADD_QUALITY("Small");
 	ADD_QUALITY("HQ");
+#ifdef __ANDROID__
+	// These rates apply only when the separate recording encoder is MediaCodec.
+	const int smallIndex = ui->simpleOutRecQuality->findData(QStringLiteral("Small"));
+	const int hqIndex = ui->simpleOutRecQuality->findData(QStringLiteral("HQ"));
+	if (smallIndex >= 0)
+		ui->simpleOutRecQuality->setItemText(smallIndex, ui->simpleOutRecQuality->itemText(smallIndex) +
+			QStringLiteral(" (MediaCodec CBR: 8 Mbps)"));
+	if (hqIndex >= 0)
+		ui->simpleOutRecQuality->setItemText(hqIndex, ui->simpleOutRecQuality->itemText(hqIndex) +
+			QStringLiteral(" (MediaCodec CBR: 12 Mbps)"));
+#endif
 #ifndef __ANDROID__
 	/* Lossless 这一档在 Android 上**必坏**：`SimpleOutput::LoadRecordingPreset_Lossless()`
 	 * (`utility/SimpleOutput.cpp:49-58`) 把 `format_name` 硬写成 `avi` —— 不是 hybrid 档 ⇒ 走
@@ -5003,6 +5015,12 @@ void OBSBasicSettings::FillSimpleRecordingValues()
 	ADD_QUALITY("Lossless");
 #endif
 
+#ifdef __ANDROID__
+	if (EncoderAvailable("android_mediacodec_h264"))
+		ui->simpleOutRecEncoder->addItem(QStringLiteral("Android MediaCodec H.264"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC));
+	if (EncoderAvailable("android_mediacodec_hevc"))
+		ui->simpleOutRecEncoder->addItem(QStringLiteral("Android MediaCodec HEVC (H.265)"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC));
+#endif
 	ui->simpleOutRecEncoder->addItem(ENCODER_STR("Software"), QString(SIMPLE_ENCODER_X264));
 	ui->simpleOutRecEncoder->addItem(ENCODER_STR("SoftwareLowCPU"), QString(SIMPLE_ENCODER_X264_LOWCPU));
 	if (EncoderAvailable("obs_qsv11")) {
@@ -5108,6 +5126,19 @@ void OBSBasicSettings::SimpleStreamingEncoderChanged()
 	ui->simpleOutPresetLabel->setVisible(true);
 	ui->simpleOutPreset->setVisible(true);
 	ui->simpleOutPreset->clear();
+	ui->simpleOutCustom->setVisible(ui->simpleOutAdvanced->isChecked());
+	ui->simpleOutCustomLabel->setVisible(ui->simpleOutAdvanced->isChecked());
+
+	if (encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC || encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC) {
+		// Android hardware AVC has bitrate/keyframe settings, not x264 speed presets.
+		// Preserve the existing x264 settings when switching between encoders.
+		ui->simpleOutAdvanced->setVisible(false);
+		ui->simpleOutPreset->setVisible(false);
+		ui->simpleOutPresetLabel->setVisible(false);
+		ui->simpleOutCustom->setVisible(false);
+		ui->simpleOutCustomLabel->setVisible(false);
+		return;
+	}
 
 	if (encoder == SIMPLE_ENCODER_QSV || encoder == SIMPLE_ENCODER_QSV_AV1) {
 		ui->simpleOutPreset->addItem("speed", "speed");

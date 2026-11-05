@@ -1,0 +1,3 @@
+<inset xmlns:android="http://schemas.android.com/apk/res/android" android:insetLeft="22dp" android:insetTop="22dp" android:insetRight="22dp" android:insetBottom="22dp">
+    <bitmap android:src="@drawable/obs_launcher" android:gravity="fill" />
+</inset>

@@ -4,7 +4,7 @@ add_library(nikon-source MODULE)
 add_library(OBS::nikon-source ALIAS nikon-source)
 
 target_sources(nikon-source PRIVATE nikon-source.c)
-target_link_libraries(nikon-source PRIVATE OBS::libobs)
+target_link_libraries(nikon-source PRIVATE OBS::libobs $<$<PLATFORM_ID:Android>:log>)
 
 if(OS_ANDROID)
   # Nikon Webcam 源的两条腿，全部来自 deps-android/prebuilt/<ABI>（交叉编译的静态库）：

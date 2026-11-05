@@ -1,7 +1,7 @@
 // 路线 B（plan.md §五 3-2③ B-1）：预览控件 → Java SurfaceView → ANativeWindow → gs_init_data
 // 的前端侧宿主桥。与 android-shell/obs_display_host.{h,cpp} 同源，两点差别：
 //   * 目标类换成前端包 com/obsproject/studio/ObsDisplayHost；
-//   * attach 收的是控件在屏幕上的**绝对像素矩形**（x,y,w,h），不再是 dp+居中 ——
+//   * attach 收的是控件在 Activity 窗口内的**像素矩形**（x,y,w,h），不再是 dp+居中 ——
 //     预览面必须精确盖住控件那一块，才算"面里 OBS 画面、面外还是 Qt"。
 #pragma once
 
@@ -25,7 +25,7 @@ struct ObsDisplaySurface {
 // 还是"等 surface 超时"。
 bool obsAndroidDisplayAttach(int x, int y, int w, int h, QString *detail);
 
-// B-3 几何同步：控件 move/resize 后把新的屏幕绝对像素矩形推给已挂着的 SurfaceView（非阻塞，
+// B-3 几何同步：控件 move/resize 后把新的窗口像素矩形推给已挂着的 SurfaceView（非阻塞，
 // 不等 surfaceChanged）。没有活动显示面时返回 false（首次建面走 attach）。
 bool obsAndroidDisplayUpdateRect(int x, int y, int w, int h, QString *detail);
 

@@ -2700,6 +2700,17 @@ static inline void obs_source_render_async_video(obs_source_t *source)
 	}
 }
 
+void obs_source_draw_async_frame(obs_source_t *source)
+{
+	if (!obs_source_valid(source, "obs_source_draw_async_frame") ||
+	    !(source->info.output_flags & OBS_SOURCE_ASYNC))
+		return;
+	if (deinterlacing_enabled(source))
+		deinterlace_render(source);
+	else
+		obs_source_render_async_video(source);
+}
+
 static inline void obs_source_render_filters(obs_source_t *source)
 {
 	obs_source_t *first_filter;

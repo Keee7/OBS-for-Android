@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.28...3.30)
+add_library(android-browser MODULE)
+add_library(OBS::android-browser ALIAS android-browser)
+target_sources(android-browser PRIVATE browser-source.c)
+target_link_libraries(android-browser PRIVATE OBS::libobs)
+set_target_properties_obs(android-browser PROPERTIES FOLDER plugins/android-browser PREFIX "")

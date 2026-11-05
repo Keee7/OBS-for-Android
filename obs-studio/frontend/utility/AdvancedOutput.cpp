@@ -828,6 +828,8 @@ bool AdvancedOutput::StartRecording()
 
 		string strPath = GetRecordingFilename(path, recFormat, noSpace, overwriteIfExists, filenameFormat,
 						      ffmpegRecording);
+		if (strPath.empty())
+			return false;
 
 		OBSDataAutoRelease settings = obs_data_create();
 		obs_data_set_string(settings, ffmpegRecording ? "url" : "path", strPath.c_str());

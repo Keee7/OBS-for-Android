@@ -347,6 +347,9 @@ struct obs_core_video_mix {
 	bool texture_converted;
 	bool using_nv12_tex;
 	bool using_p010_tex;
+	bool using_rgb_tex;
+	/* Borrowed final output texture; only used while queueing this frame. */
+	gs_texture_t *rgb_encode_texture;
 	struct deque vframe_info_buffer;
 	struct deque vframe_info_buffer_gpu;
 	gs_stagesurf_t *mapped_surfaces[NUM_CHANNELS];
@@ -1215,6 +1218,11 @@ struct keyframe_group_data {
 struct obs_output {
 	struct obs_context_data context;
 	struct obs_output_info info;
+	/* Serialize a new output session against delayed encoder-error notices. */
+	pthread_mutex_t encoder_error_mutex;
+	bool encoder_start_in_progress;
+	bool encoder_error_in_progress;
+	volatile long start_generation;
 
 	/* indicates ownership of the info.id buffer */
 	bool owns_info_id;
@@ -1391,6 +1399,11 @@ struct obs_encoder {
 
 	volatile bool active;
 	volatile bool paused;
+	/* Session identity prevents an old asynchronous GPU error stopping a
+	 * subsequently restarted encoder. Updated under init_mutex. */
+	volatile long gpu_connection_id;
+	volatile bool gpu_error_queued;
+	bool gpu_error_notifying;
 	bool initialized;
 
 	/* indicates ownership of the info.id buffer */
@@ -1472,6 +1485,8 @@ extern void obs_encoder_remove_output(struct obs_encoder *encoder, struct obs_ou
 
 extern bool start_gpu_encode(obs_encoder_t *encoder);
 extern void stop_gpu_encode(obs_encoder_t *encoder);
+extern void obs_encoder_gpu_error(obs_encoder_t *encoder);
+extern bool obs_encoder_start_checked(obs_encoder_t *encoder, encoded_callback_t new_packet, void *param);
 
 extern bool do_encode(struct obs_encoder *encoder, struct encoder_frame *frame, const uint64_t *frame_cts);
 extern void send_off_encoder_packet(obs_encoder_t *encoder, bool success, bool received, struct encoder_packet *pkt);

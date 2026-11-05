@@ -1,0 +1,5 @@
+# Keep build scripts and patches executable by Bash/patch after Windows checkout.
+*.sh text eol=lf
+# Unified diff context lines contain a required single space on blank lines.
+*.patch text eol=lf -whitespace
+*.md text eol=lf

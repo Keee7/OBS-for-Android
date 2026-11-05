@@ -399,14 +399,24 @@ static int handle_socket_read(struct rtmp_stream *stream)
 	return 0;
 }
 
+static inline void release_sent_packet(struct encoder_packet *packet, bool manually_created)
+{
+	if (manually_created)
+		bfree(packet->data);
+	else
+		obs_encoder_packet_release(packet);
+}
+
 static int send_packet(struct rtmp_stream *stream, struct encoder_packet *packet, bool is_header)
 {
 	uint8_t *data;
 	size_t size;
 	int ret = 0;
 
-	if (handle_socket_read(stream))
+	if (handle_socket_read(stream)) {
+		release_sent_packet(packet, is_header);
 		return -1;
+	}
 
 	flv_packet_mux(packet, is_header ? 0 : stream->start_dts_offset, &data, &size, is_header);
 
@@ -417,10 +427,7 @@ static int send_packet(struct rtmp_stream *stream, struct encoder_packet *packet
 	ret = RTMP_Write(&stream->rtmp, (char *)data, (int)size, 0);
 	bfree(data);
 
-	if (is_header)
-		bfree(packet->data);
-	else
-		obs_encoder_packet_release(packet);
+	release_sent_packet(packet, is_header);
 
 	stream->total_bytes_sent += size;
 	return ret;
@@ -433,8 +440,10 @@ static int send_packet_ex(struct rtmp_stream *stream, struct encoder_packet *pac
 	size_t size = 0;
 	int ret = 0;
 
-	if (handle_socket_read(stream))
+	if (handle_socket_read(stream)) {
+		release_sent_packet(packet, is_header || is_footer);
 		return -1;
+	}
 
 	if (is_header) {
 		flv_packet_start(packet, stream->video_codec[idx], &data, &size, idx);
@@ -451,10 +460,7 @@ static int send_packet_ex(struct rtmp_stream *stream, struct encoder_packet *pac
 	ret = RTMP_Write(&stream->rtmp, (char *)data, (int)size, 0);
 	bfree(data);
 
-	if (is_header || is_footer) // manually created packets
-		bfree(packet->data);
-	else
-		obs_encoder_packet_release(packet);
+	release_sent_packet(packet, is_header || is_footer);
 
 	stream->total_bytes_sent += size;
 	return ret;
@@ -466,8 +472,10 @@ static int send_audio_packet_ex(struct rtmp_stream *stream, struct encoder_packe
 	size_t size = 0;
 	int ret = 0;
 
-	if (handle_socket_read(stream))
+	if (handle_socket_read(stream)) {
+		release_sent_packet(packet, is_header);
 		return -1;
+	}
 
 	if (is_header) {
 		flv_packet_audio_start(packet, stream->audio_codec[idx], &data, &size, idx);
@@ -478,10 +486,7 @@ static int send_audio_packet_ex(struct rtmp_stream *stream, struct encoder_packe
 	ret = RTMP_Write(&stream->rtmp, (char *)data, (int)size, 0);
 	bfree(data);
 
-	if (is_header)
-		bfree(packet->data);
-	else
-		obs_encoder_packet_release(packet);
+	release_sent_packet(packet, is_header);
 
 	return ret;
 }
@@ -659,6 +664,7 @@ static void *send_thread(void *data)
 
 		if (!stream->sent_headers) {
 			if (!send_headers(stream)) {
+				obs_encoder_packet_release(&packet);
 				os_atomic_set_bool(&stream->disconnected, true);
 				break;
 			}
@@ -1085,7 +1091,13 @@ static int init_send(struct rtmp_stream *stream)
 		return OBS_OUTPUT_DISCONNECTED;
 	}
 
-	obs_output_begin_data_capture(stream->output, 0);
+	if (!obs_output_begin_data_capture(stream->output, 0)) {
+		/* The send thread owns socket cleanup and reports this failure. */
+		os_atomic_set_bool(&stream->encode_error, true);
+		stream->stop_ts = 0;
+		os_event_signal(stream->stop_event);
+		os_sem_post(stream->send_sem);
+	}
 
 	return OBS_OUTPUT_SUCCESS;
 }
@@ -1376,6 +1388,9 @@ static bool init_connect(struct rtmp_stream *stream)
 		obs_data_release(settings);
 	}
 
+	/* An output instance can reconnect or start again with different encoders.
+	 * Do not interpolate against points left over from the previous session. */
+	da_clear(stream->dbr_interpolation_table);
 	da_reserve(stream->dbr_interpolation_table, 2);
 	da_push_back_new(stream->dbr_interpolation_table);
 	struct dbr_interpolation_point *dbr_point = da_push_back_new(stream->dbr_interpolation_table);
@@ -1419,6 +1434,13 @@ static bool init_connect(struct rtmp_stream *stream)
 		}
 
 		obs_data_t *settings = obs_encoder_get_settings(enc);
+		const char *encoder_id = obs_encoder_get_id(enc);
+		if (encoder_id && (!strcmp(encoder_id, "android_mediacodec_h264") ||
+				   !strcmp(encoder_id, "android_mediacodec_hevc")) &&
+		    obs_data_get_int(settings, "rate_mode") == 0) {
+			dbr_capable = false;
+			info("Dynamic bitrate disabled. The Android MediaCodec encoder uses constant quality mode.");
+		}
 		long long bitrate = obs_data_get_int(settings, "bitrate");
 		overall_video_bitrate += bitrate;
 		dbr_point->bitrates[i] = (long)bitrate;

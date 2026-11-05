@@ -221,8 +221,11 @@ static inline bool gpu_encode_available(const struct obs_encoder *encoder)
 	struct obs_core_video_mix *video = get_mix_for_video(encoder->media);
 	if (!video)
 		return false;
-	return (encoder->info.caps & OBS_ENCODER_CAP_PASS_TEXTURE) != 0 &&
-	       (video->using_p010_tex || video->using_nv12_tex);
+	if (!(encoder->info.caps & OBS_ENCODER_CAP_PASS_TEXTURE))
+		return false;
+	if (encoder->info.caps & OBS_ENCODER_CAP_PASS_TEXTURE_RGB)
+		return encoder->info.encode_texture2 && video->using_rgb_tex;
+	return video->using_p010_tex || video->using_nv12_tex;
 }
 
 /**
@@ -242,25 +245,32 @@ static void maybe_set_up_gpu_rescale(struct obs_encoder *encoder)
 	enum video_format format;
 	enum video_colorspace space;
 	enum video_range_type range;
+	const bool rgb_input = (encoder->info.caps & OBS_ENCODER_CAP_PASS_TEXTURE_RGB) != 0;
+	enum obs_scale_type scale_type = encoder->gpu_scale_type;
 
 	if (!encoder->media)
 		return;
-	if (encoder->gpu_scale_type == OBS_SCALE_DISABLE)
+	if (encoder->gpu_scale_type == OBS_SCALE_DISABLE && !rgb_input)
 		return;
-	if (!encoder->scaled_height && !encoder->scaled_width && encoder->preferred_format == VIDEO_FORMAT_NONE &&
-	    encoder->preferred_space == VIDEO_CS_DEFAULT && encoder->preferred_range == VIDEO_RANGE_DEFAULT)
+	if (!rgb_input && !encoder->scaled_height && !encoder->scaled_width &&
+	    encoder->preferred_format == VIDEO_FORMAT_NONE && encoder->preferred_space == VIDEO_CS_DEFAULT &&
+	    encoder->preferred_range == VIDEO_RANGE_DEFAULT)
 		return;
 
 	info = video_output_get_info(encoder->media);
 	width = encoder->scaled_width ? encoder->scaled_width : info->width;
 	height = encoder->scaled_height ? encoder->scaled_height : info->height;
 	format = encoder->preferred_format != VIDEO_FORMAT_NONE ? encoder->preferred_format : info->format;
+	if (rgb_input)
+		format = VIDEO_FORMAT_RGBA;
 	space = encoder->preferred_space != VIDEO_CS_DEFAULT ? encoder->preferred_space : info->colorspace;
 	range = encoder->preferred_range != VIDEO_RANGE_DEFAULT ? encoder->preferred_range : info->range;
 
 	current_mix = get_mix_for_video(encoder->media);
 	if (!current_mix)
 		return;
+	if (scale_type == OBS_SCALE_DISABLE)
+		scale_type = current_mix->ovi.scale_type;
 
 	/* Store original video_t so it can be restored if scaling is disabled. */
 	if (!current_mix->encoder_only_mix)
@@ -273,7 +283,7 @@ static void maybe_set_up_gpu_rescale(struct obs_encoder *encoder)
 		if (current_mix->view != current->view)
 			continue;
 
-		if (current->ovi.scale_type != encoder->gpu_scale_type)
+		if (current->ovi.scale_type != scale_type)
 			continue;
 
 		if (voi->width != width || voi->height != height)
@@ -301,7 +311,7 @@ static void maybe_set_up_gpu_rescale(struct obs_encoder *encoder)
 
 	ovi.output_height = height;
 	ovi.output_width = width;
-	ovi.scale_type = encoder->gpu_scale_type;
+	ovi.scale_type = scale_type;
 
 	ovi.gpu_conversion = true;
 
@@ -322,7 +332,7 @@ static void maybe_set_up_gpu_rescale(struct obs_encoder *encoder)
 		if (current->view != current_mix->view)
 			continue;
 
-		if (current->ovi.scale_type != encoder->gpu_scale_type)
+		if (current->ovi.scale_type != scale_type)
 			continue;
 
 		if (voi->width != width || voi->height != height)
@@ -366,8 +376,10 @@ static int lcm(int a, int b)
 	return (a / gcd(a, b)) * b;
 }
 
-static void add_connection(struct obs_encoder *encoder)
+static bool add_connection(struct obs_encoder *encoder)
 {
+	os_atomic_inc_long(&encoder->gpu_connection_id);
+	os_atomic_store_bool(&encoder->gpu_error_queued, false);
 	if (encoder->info.type == OBS_ENCODER_AUDIO) {
 		struct audio_convert_info audio_info = {0};
 		get_audio_info(encoder, &audio_info);
@@ -378,7 +390,10 @@ static void add_connection(struct obs_encoder *encoder)
 		get_video_info(encoder, &info);
 
 		if (gpu_encode_available(encoder)) {
-			start_gpu_encode(encoder);
+			if (!start_gpu_encode(encoder)) {
+				obs_encoder_set_last_error(encoder, "Cannot allocate GPU encoding resources");
+				return false;
+			}
 		} else {
 			start_raw_video(encoder->media, &info, encoder->frame_rate_divisor, receive_video, encoder);
 		}
@@ -407,10 +422,14 @@ static void add_connection(struct obs_encoder *encoder)
 	}
 
 	set_encoder_active(encoder, true);
+	return true;
 }
 
 void obs_encoder_group_actually_destroy(obs_encoder_group_t *group);
-static void remove_connection(struct obs_encoder *encoder, bool shutdown)
+
+/* Stop input separately from teardown so a texture encoder can drain its
+ * remaining packets while the final output callback is still connected. */
+static void remove_encoder_input(struct obs_encoder *encoder)
 {
 	if (encoder->info.type == OBS_ENCODER_AUDIO) {
 		audio_output_disconnect(encoder->media, encoder->mixer_idx, receive_audio, encoder);
@@ -421,7 +440,10 @@ static void remove_connection(struct obs_encoder *encoder, bool shutdown)
 			stop_raw_video(encoder->media, receive_video, encoder);
 		}
 	}
+}
 
+static void finish_remove_connection(struct obs_encoder *encoder, bool shutdown)
+{
 	if (encoder->encoder_group) {
 		struct obs_encoder_group *group = encoder->encoder_group;
 		pthread_mutex_lock(&group->mutex);
@@ -448,6 +470,12 @@ static void remove_connection(struct obs_encoder *encoder, bool shutdown)
 	encoder->initialized = false;
 
 	set_encoder_active(encoder, false);
+}
+
+static void remove_connection(struct obs_encoder *encoder, bool shutdown)
+{
+	remove_encoder_input(encoder);
+	finish_remove_connection(encoder, shutdown);
 }
 
 static inline void free_audio_buffers(struct obs_encoder *encoder)
@@ -672,6 +700,8 @@ static THREAD_LOCAL bool can_reroute = false;
 
 static inline bool obs_encoder_initialize_internal(obs_encoder_t *encoder)
 {
+	if (encoder->gpu_error_notifying)
+		return false;
 	if (!encoder->media) {
 		blog(LOG_ERROR, "obs_encoder_initialize_internal: encoder '%s' has no media set",
 		     encoder->context.name);
@@ -686,6 +716,10 @@ static inline bool obs_encoder_initialize_internal(obs_encoder_t *encoder)
 	obs_encoder_shutdown(encoder);
 
 	maybe_set_up_gpu_rescale(encoder);
+	if ((encoder->orig_info.caps & OBS_ENCODER_CAP_PASS_TEXTURE_RGB) && !gpu_encode_available(encoder)) {
+		obs_encoder_set_last_error(encoder, "Cannot create the required RGB GPU encoding mix");
+		return false;
+	}
 
 	if (encoder->orig_info.create) {
 		can_reroute = true;
@@ -806,13 +840,13 @@ void pause_reset(struct pause_data *pause)
 	pthread_mutex_unlock(&pause->mutex);
 }
 
-static inline void obs_encoder_start_internal(obs_encoder_t *encoder, encoded_callback_t new_packet, void *param)
+static inline bool obs_encoder_start_internal(obs_encoder_t *encoder, encoded_callback_t new_packet, void *param)
 {
 	struct encoder_callback cb = {false, new_packet, param};
 	bool first = false;
 
-	if (!encoder->context.data || !encoder->media)
-		return;
+	if (encoder->gpu_error_notifying || !encoder->context.data || !encoder->media)
+		return false;
 
 	pthread_mutex_lock(&encoder->callbacks_mutex);
 
@@ -829,25 +863,37 @@ static inline void obs_encoder_start_internal(obs_encoder_t *encoder, encoded_ca
 		pause_reset(&encoder->pause);
 
 		encoder->cur_pts = 0;
-		add_connection(encoder);
+		if (!add_connection(encoder)) {
+			pthread_mutex_lock(&encoder->callbacks_mutex);
+			size_t failed_idx = get_callback_idx(encoder, new_packet, param);
+			if (failed_idx != DARRAY_INVALID)
+				da_erase(encoder->callbacks, failed_idx);
+			pthread_mutex_unlock(&encoder->callbacks_mutex);
+			return false;
+		}
 	}
+	return true;
+}
+
+bool obs_encoder_start_checked(obs_encoder_t *encoder, encoded_callback_t new_packet, void *param)
+{
+	if (!obs_encoder_valid(encoder, "obs_encoder_start") || !obs_ptr_valid(new_packet, "obs_encoder_start"))
+		return false;
+	pthread_mutex_lock(&encoder->init_mutex);
+	bool started = obs_encoder_start_internal(encoder, new_packet, param);
+	pthread_mutex_unlock(&encoder->init_mutex);
+	return started;
 }
 
 void obs_encoder_start(obs_encoder_t *encoder, encoded_callback_t new_packet, void *param)
 {
-	if (!obs_encoder_valid(encoder, "obs_encoder_start"))
-		return;
-	if (!obs_ptr_valid(new_packet, "obs_encoder_start"))
-		return;
-
-	pthread_mutex_lock(&encoder->init_mutex);
-	obs_encoder_start_internal(encoder, new_packet, param);
-	pthread_mutex_unlock(&encoder->init_mutex);
+	(void)obs_encoder_start_checked(encoder, new_packet, param);
 }
 
 void obs_encoder_stop(obs_encoder_t *encoder, encoded_callback_t new_packet, void *param)
 {
 	bool last = false;
+	bool flush_texture = false;
 	size_t idx;
 
 	if (!obs_encoder_valid(encoder, "obs_encoder_stop"))
@@ -860,16 +906,57 @@ void obs_encoder_stop(obs_encoder_t *encoder, encoded_callback_t new_packet, voi
 
 	idx = get_callback_idx(encoder, new_packet, param);
 	if (idx != DARRAY_INVALID) {
-		da_erase(encoder->callbacks, idx);
-		last = (encoder->callbacks.num == 0);
+		last = (encoder->callbacks.num == 1);
+		flush_texture = last && encoder->info.type == OBS_ENCODER_VIDEO && gpu_encode_available(encoder) &&
+				encoder->info.encode_texture_flush;
+		if (!flush_texture)
+			da_erase(encoder->callbacks, idx);
 	}
 
 	pthread_mutex_unlock(&encoder->callbacks_mutex);
 
-	encoder->encoder_packet_times.num = 0;
-
 	if (last) {
-		remove_connection(encoder, true);
+		/* Waiting for GPU input to stop must not hold callbacks_mutex:
+		 * the in-flight GPU frame may still deliver a packet. */
+		remove_encoder_input(encoder);
+
+		if (flush_texture) {
+			/* The implementation signals EOS on its first call and returns
+			 * received=false at EOS. Bound the number of returned packets;
+			 * implementations must also bound any internal waits. */
+			const size_t max_flush_packets = 16384;
+			const uint64_t deadline = os_gettime_ns() + 5ULL * 1000000000ULL;
+			bool done = false;
+			for (size_t i = 0; i < max_flush_packets && os_gettime_ns() < deadline; i++) {
+				struct encoder_packet pkt = {0};
+				bool received = false;
+				pkt.timebase_num = encoder->timebase_num * encoder->frame_rate_divisor;
+				pkt.timebase_den = encoder->timebase_den;
+				pkt.encoder = encoder;
+				if (!encoder->info.encode_texture_flush(encoder->context.data, &pkt, &received)) {
+					blog(LOG_ERROR, "Error draining texture encoder '%s'", encoder->context.name);
+					done = true;
+					break;
+				}
+				if (!received) {
+					done = true;
+					break;
+				}
+				/* A failure here must not call full_stop while init_mutex is held. */
+				send_off_encoder_packet(encoder, true, true, &pkt);
+			}
+			if (!done)
+				blog(LOG_ERROR, "Texture encoder '%s' exceeded the drain limit", encoder->context.name);
+		}
+
+		pthread_mutex_lock(&encoder->callbacks_mutex);
+		idx = get_callback_idx(encoder, new_packet, param);
+		if (idx != DARRAY_INVALID)
+			da_erase(encoder->callbacks, idx);
+		pthread_mutex_unlock(&encoder->callbacks_mutex);
+
+		encoder->encoder_packet_times.num = 0;
+		finish_remove_connection(encoder, true);
 		pthread_mutex_unlock(&encoder->init_mutex);
 
 		struct obs_encoder_group *group = encoder->encoder_group;
@@ -1389,6 +1476,113 @@ void full_stop(struct obs_encoder *encoder)
 
 		remove_connection(encoder, false);
 	}
+}
+
+struct gpu_encoder_error {
+	obs_encoder_t *encoder;
+	long connection_id;
+};
+
+struct gpu_error_output {
+	obs_output_t *output;
+	long generation;
+};
+
+static void handle_gpu_encoder_error(void *param)
+{
+	struct gpu_encoder_error *error = param;
+	obs_encoder_t *encoder = error->encoder;
+	DARRAY(struct gpu_error_output) outputs;
+	bool owns_notification = false;
+	da_init(outputs);
+
+	pthread_mutex_lock(&encoder->init_mutex);
+	if (encoder_active(encoder) && os_atomic_load_long(&encoder->gpu_connection_id) == error->connection_id) {
+		/* Disconnect exactly once under the same lock used by normal stop.
+		 * Unlike full_stop(), this never waits for the GPU thread from that
+		 * thread itself. Retain outputs while releasing encoder locks before
+		 * invoking their stop callbacks. */
+		encoder->gpu_error_notifying = true;
+		owns_notification = true;
+		pthread_mutex_lock(&encoder->outputs_mutex);
+		for (size_t i = 0; i < encoder->outputs.num; ++i) {
+			obs_output_t *candidate = encoder->outputs.array[i];
+			bool duplicate = false;
+			for (size_t j = 0; j < outputs.num; ++j)
+				if (outputs.array[j].output == candidate) {
+					duplicate = true;
+					break;
+				}
+			if (duplicate)
+				continue;
+			obs_output_t *output = obs_output_get_ref(candidate);
+			if (output) {
+				struct gpu_error_output entry = {output,
+								 os_atomic_load_long(&output->start_generation)};
+				da_push_back(outputs, &entry);
+			}
+		}
+		pthread_mutex_unlock(&encoder->outputs_mutex);
+	}
+	pthread_mutex_unlock(&encoder->init_mutex);
+
+	/* Output start acquires this mutex before taking any encoder init lock.
+	 * Respect that order, then revalidate the encoder session after waiting. */
+	for (size_t i = 0; i < outputs.num; ++i) {
+		pthread_mutex_lock(&outputs.array[i].output->encoder_error_mutex);
+		outputs.array[i].output->encoder_error_in_progress = true;
+	}
+	bool stopped = false;
+	pthread_mutex_lock(&encoder->init_mutex);
+	if (encoder_active(encoder) && os_atomic_load_long(&encoder->gpu_connection_id) == error->connection_id) {
+		encoder->gpu_error_notifying = true;
+		pthread_mutex_lock(&encoder->callbacks_mutex);
+		da_free(encoder->callbacks);
+		pthread_mutex_unlock(&encoder->callbacks_mutex);
+		remove_connection(encoder, false);
+		encoder->encoder_packet_times.num = 0;
+		stopped = true;
+	}
+	pthread_mutex_unlock(&encoder->init_mutex);
+
+	for (size_t i = 0; i < outputs.num; ++i) {
+		obs_output_t *output = outputs.array[i].output;
+		if (stopped && os_atomic_load_long(&output->start_generation) == outputs.array[i].generation &&
+		    obs_output_active(output)) {
+			obs_output_force_stop(output);
+			pthread_mutex_lock(&output->interleaved_mutex);
+			output->info.encoded_packet(output->context.data, NULL);
+			pthread_mutex_unlock(&output->interleaved_mutex);
+		}
+	}
+	pthread_mutex_lock(&encoder->init_mutex);
+	if (owns_notification && os_atomic_load_long(&encoder->gpu_connection_id) == error->connection_id)
+		encoder->gpu_error_notifying = false;
+	pthread_mutex_unlock(&encoder->init_mutex);
+	for (size_t i = outputs.num; i > 0; --i) {
+		obs_output_t *output = outputs.array[i - 1].output;
+		output->encoder_error_in_progress = false;
+		pthread_mutex_unlock(&output->encoder_error_mutex);
+		obs_output_release(output);
+	}
+	da_free(outputs);
+	obs_encoder_release(encoder);
+	bfree(error);
+}
+
+void obs_encoder_gpu_error(obs_encoder_t *encoder)
+{
+	if (os_atomic_exchange_bool(&encoder->gpu_error_queued, true))
+		return;
+	struct gpu_encoder_error *error = bzalloc(sizeof(*error));
+	error->encoder = obs_encoder_get_ref(encoder);
+	error->connection_id = os_atomic_load_long(&encoder->gpu_connection_id);
+	if (!error->encoder) {
+		bfree(error);
+		return;
+	}
+	blog(LOG_ERROR, "Error encoding with GPU encoder '%s'; stopping asynchronously", encoder->context.name);
+	obs_queue_task(OBS_TASK_DESTROY, handle_gpu_encoder_error, error, false);
 }
 
 void send_off_encoder_packet(obs_encoder_t *encoder, bool success, bool received, struct encoder_packet *pkt)

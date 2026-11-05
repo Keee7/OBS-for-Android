@@ -24,6 +24,9 @@
 #include <qt-wrappers.hpp>
 
 #include <QCheckBox>
+#ifdef __ANDROID__
+#include "OBSAndroidPath.hpp"
+#endif
 
 #define REPLAY_BUFFER_START "==== Replay Buffer Start ==========================================="
 #define REPLAY_BUFFER_STOP "==== Replay Buffer Stop ============================================"
@@ -90,6 +93,13 @@ void OBSBasic::StartReplayBuffer()
 		DiskSpaceMessage();
 		return;
 	}
+#ifdef __ANDROID__
+	if (obsAndroidStorageManaged(QString::fromUtf8(GetCurrentOutputPath()))) {
+		OBSMessageBox::warning(this, QTStr("Output.StartReplayFailed"),
+			QStringLiteral("此测试版暂不支持把回放缓存保存到共享文档目录，请使用普通录像。"));
+		return;
+	}
+#endif
 
 	OnEvent(OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTING);
 

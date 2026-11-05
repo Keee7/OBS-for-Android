@@ -19,6 +19,10 @@
 #include "media-playback.h"
 #include "media.h"
 #include <libavutil/mastering_display_metadata.h>
+#include <libavutil/pixdesc.h>
+#ifdef __ANDROID__
+#include <obs-android.h>
+#endif
 
 enum AVHWDeviceType hw_priority[] = {
 	AV_HWDEVICE_TYPE_CUDA,  AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_DXVA2,        AV_HWDEVICE_TYPE_VAAPI,
@@ -65,7 +69,7 @@ static void init_hw_decoder(struct mp_decode *d, AVCodecContext *c)
 	}
 }
 
-static int mp_open_codec(struct mp_decode *d, bool hw)
+static int mp_open_codec(struct mp_decode *d, bool hw, const char *codec_name)
 {
 	AVCodecContext *c;
 	int ret;
@@ -89,7 +93,16 @@ static int mp_open_codec(struct mp_decode *d, bool hw)
 	    c->codec_id != AV_CODEC_ID_JPEG2000 && c->codec_id != AV_CODEC_ID_MPEG4 && c->codec_id != AV_CODEC_ID_WEBP)
 		c->thread_count = 0;
 
-	ret = avcodec_open2(c, d->codec, NULL);
+	AVDictionary *options = NULL;
+	if (codec_name) {
+		av_dict_set(&options, "codec_name", codec_name, 0);
+		av_dict_set(&options, "ndk_codec", "1", 0);
+	}
+	ret = avcodec_open2(c, d->codec, &options);
+	/* Do not claim a hardware selection if FFmpeg ignored our option. */
+	if (ret >= 0 && codec_name && av_dict_get(options, "codec_name", NULL, 0))
+		ret = AVERROR_OPTION_NOT_FOUND;
+	av_dict_free(&options);
 	if (ret < 0)
 		goto fail;
 
@@ -169,12 +182,53 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 		return false;
 	}
 
-	ret = mp_open_codec(d, hw);
+#ifdef __ANDROID__
+	/* MediaCodec's byte-buffer mode returns CPU-readable frames; it is a
+	 * separate decoder, not an AVHWDevice-backed version of the SW codec. */
+	if (hw && type == AVMEDIA_TYPE_VIDEO) {
+		const char *name = NULL;
+		const char *mime = NULL;
+		switch (id) {
+		case AV_CODEC_ID_H264: name = "h264_mediacodec"; mime = "video/avc"; break;
+		case AV_CODEC_ID_HEVC: name = "hevc_mediacodec"; mime = "video/hevc"; break;
+		case AV_CODEC_ID_VP8: name = "vp8_mediacodec"; mime = "video/x-vnd.on2.vp8"; break;
+		case AV_CODEC_ID_VP9: name = "vp9_mediacodec"; mime = "video/x-vnd.on2.vp9"; break;
+		case AV_CODEC_ID_AV1: name = "av1_mediacodec"; mime = "video/av01"; break;
+		default: break;
+		}
+		/* Preserve alpha-aware libvpx for VP8/VP9. */
+		if (name && strncmp(d->codec->name, "libvpx", 6) != 0) {
+			const AVCodec *software = d->codec;
+			const AVCodec *hardware = avcodec_find_decoder_by_name(name);
+			char component[256];
+			if (hardware && obs_android_find_hardware_decoder(mime, component, sizeof(component))) {
+				d->codec = hardware;
+				ret = mp_open_codec(d, false, component);
+				if (ret >= 0) {
+					d->android_hw_first_frame_pending = true;
+					strncpy(d->android_hw_component, component, sizeof(d->android_hw_component) - 1);
+					d->android_hw_component[sizeof(d->android_hw_component) - 1] = '\0';
+					blog(LOG_INFO, "MP: hardware MediaCodec decoder opened: %s (%s)", name, component);
+					goto codec_opened;
+				}
+				blog(LOG_WARNING, "MP: hardware decoder %s failed to open (%s); falling back to software",
+				     component, av_err2str(ret));
+				d->codec = software;
+			} else {
+				blog(LOG_INFO, "MP: no hardware MediaCodec decoder available for %s; using software", mime);
+			}
+		}
+	}
+#endif
+	ret = mp_open_codec(d, hw, NULL);
 	if (ret < 0) {
 		blog(LOG_WARNING, "MP: Failed to open %s decoder: %s", av_get_media_type_string(type), av_err2str(ret));
 		return false;
 	}
 
+#ifdef __ANDROID__
+codec_opened:
+#endif
 	d->sw_frame = av_frame_alloc();
 	if (!d->sw_frame) {
 		blog(LOG_WARNING, "MP: Failed to allocate %s frame", av_get_media_type_string(type));
@@ -298,6 +352,20 @@ static int decode_packet(struct mp_decode *d, int *got_frame)
 		*got_frame = 1;
 	}
 
+#ifdef __ANDROID__
+	if (*got_frame && d->android_hw_first_frame_pending) {
+		const char *pixel_format = av_get_pix_fmt_name(d->in_frame->format);
+		blog(LOG_INFO, "MP: hardware decoder first frame: decoder=%s component=%s hardware=true "
+			       "width=%d height=%d coded=%dx%d linesize=%d,%d,%d "
+			       "crop=%zu,%zu,%zu,%zu pixfmt=%s",
+		     d->codec->name, d->android_hw_component, d->in_frame->width, d->in_frame->height,
+		     d->decoder->coded_width, d->decoder->coded_height, d->in_frame->linesize[0],
+		     d->in_frame->linesize[1], d->in_frame->linesize[2], d->in_frame->crop_top,
+		     d->in_frame->crop_bottom, d->in_frame->crop_left, d->in_frame->crop_right,
+		     pixel_format ? pixel_format : "unknown");
+		d->android_hw_first_frame_pending = false;
+	}
+#endif
 	if (*got_frame && d->hw) {
 		if (d->hw_frame->format != d->hw_format) {
 			d->frame = d->hw_frame;

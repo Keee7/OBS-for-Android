@@ -69,6 +69,8 @@ if(OS_ANDROID)
   add_subdirectory(android-capture)
   add_subdirectory(android-camera)
   add_subdirectory(android-screen)
+  add_subdirectory(android-mediacodec)
+  add_subdirectory(android-browser)
   #   nikon-source     —— Nikon Webcam 采集源（Z 系列，自实现 PTP/MTP 客户端经 libusb 拉
   #                       Live View JPEG，turbojpeg 解 BGRA 推异步帧）。依赖面与 android-capture
   #                       同一档：静态链 deps 的 libusb-1.0.a + libturbojpeg.a，不链 libandroid，

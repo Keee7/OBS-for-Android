@@ -26,6 +26,9 @@
 #include "plugin-manager/PluginManager.hpp"
 
 #ifdef __ANDROID__
+#include <utility/AndroidCodecCapabilities.hpp>
+#include "OBSAndroidBrowser.hpp"
+#include "OBSAndroidPath.hpp"
 #include "OBSAndroidDisplay.hpp" // 3-4 校形探针日志（logcat tag OBS-display）
 #include "OBSAndroidKeepAlive.hpp"
 #include "OBSAndroidPermissions.hpp"
@@ -741,6 +744,11 @@ bool OBSBasic::InitBasicConfigDefaults()
 	cx *= devicePixelRatioF();
 	cy *= devicePixelRatioF();
 
+#ifdef __ANDROID__
+	// New profiles target a landscape 1080p canvas; explicit profile values are retained below.
+	cx = 1920;
+	cy = 1080;
+#endif
 	bool oldResolutionDefaults = config_get_bool(App()->GetUserConfig(), "General", "Pre19Defaults");
 
 	/* use 1920x1080 for new default base res if main monitor is above
@@ -959,6 +967,10 @@ bool OBSBasic::InitBasicConfigDefaults()
 		scale_cy = uint32_t(double(cy) / scale);
 	}
 
+#ifdef __ANDROID__
+	scale_cx = 1920;
+	scale_cy = 1080;
+#endif
 	config_set_default_uint(activeConfiguration, "Video", "OutputCX", scale_cx);
 	config_set_default_uint(activeConfiguration, "Video", "OutputCY", scale_cy);
 
@@ -972,7 +984,11 @@ bool OBSBasic::InitBasicConfigDefaults()
 	}
 
 	config_set_default_uint(activeConfiguration, "Video", "FPSType", 0);
+#ifdef __ANDROID__
+	config_set_default_string(activeConfiguration, "Video", "FPSCommon", "60");
+#else
 	config_set_default_string(activeConfiguration, "Video", "FPSCommon", "30");
+#endif
 	config_set_default_uint(activeConfiguration, "Video", "FPSInt", 30);
 	config_set_default_uint(activeConfiguration, "Video", "FPSNum", 30);
 	config_set_default_uint(activeConfiguration, "Video", "FPSDen", 1);
@@ -1041,13 +1057,23 @@ bool OBSBasic::InitBasicConfigDefaults()
 
 void OBSBasic::InitBasicConfigDefaults2()
 {
+#ifndef __ANDROID__
 	bool oldEncDefaults = config_get_bool(App()->GetUserConfig(), "General", "Pre23Defaults");
 	bool useNV = EncoderAvailable("ffmpeg_nvenc") && !oldEncDefaults;
+#endif
 
-	config_set_default_string(activeConfiguration, "SimpleOutput", "StreamEncoder",
-				  useNV ? SIMPLE_ENCODER_NVENC : SIMPLE_ENCODER_X264);
-	config_set_default_string(activeConfiguration, "SimpleOutput", "RecEncoder",
-				  useNV ? SIMPLE_ENCODER_NVENC : SIMPLE_ENCODER_X264);
+#ifdef __ANDROID__
+	uint32_t fpsNum = 0, fpsDen = 0;
+	GetConfigFPS(fpsNum, fpsDen);
+	const bool useAndroid = EncoderAvailable("android_mediacodec_h264") &&
+		OBSAndroidAvcAvailable(uint32_t(config_get_uint(activeConfiguration, "Video", "OutputCX")),
+				       uint32_t(config_get_uint(activeConfiguration, "Video", "OutputCY")), fpsNum, fpsDen);
+	const char *defaultEncoder = useAndroid ? SIMPLE_ENCODER_ANDROID_MEDIACODEC : SIMPLE_ENCODER_X264;
+#else
+	const char *defaultEncoder = useNV ? SIMPLE_ENCODER_NVENC : SIMPLE_ENCODER_X264;
+#endif
+	config_set_default_string(activeConfiguration, "SimpleOutput", "StreamEncoder", defaultEncoder);
+	config_set_default_string(activeConfiguration, "SimpleOutput", "RecEncoder", defaultEncoder);
 
 	const char *aac_default = "ffmpeg_aac";
 	if (EncoderAvailable("CoreAudio_AAC")) {
@@ -1214,6 +1240,12 @@ void OBSBasic::OBSInit()
      */
 	RefreshSceneCollections(true);
 
+#ifdef __ANDROID__
+	OBSAndroidRegisterCodecQuery();
+	obsAndroidStorageInit();
+	if (!OBSAndroidBrowserInit())
+		blog(LOG_WARNING, "Android browser host registration failed");
+#endif
 	App()->loadAppModules(mfi);
 
 	BPtr<char *> failed_modules = mfi.failed_modules;

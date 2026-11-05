@@ -150,8 +150,11 @@ static bool obs_init_gpu_conversion(struct obs_core_video_mix *video)
 
 	video->using_nv12_tex = info->format == VIDEO_FORMAT_NV12 ? gs_nv12_available() : false;
 	video->using_p010_tex = info->format == VIDEO_FORMAT_P010 ? gs_p010_available() : false;
+	video->using_rgb_tex = info->format == VIDEO_FORMAT_RGBA;
 
 	if (!video->conversion_needed) {
+		if (video->using_rgb_tex)
+			blog(LOG_INFO, "RGB texture encoding available without YUV conversion");
 		blog(LOG_INFO, "GPU conversion not available for format: %u", (unsigned int)info->format);
 		video->gpu_conversion = false;
 		video->using_nv12_tex = false;

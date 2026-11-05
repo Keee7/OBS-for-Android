@@ -1,6 +1,6 @@
 #!/bin/bash
 # 下载依赖源码包到 deps-android/src/
-# 运行环境：Windows Git Bash（因为 github 只有 Windows 侧代理可达）
+# 运行环境：Bash + curl（WSL/Linux 或 Windows Git Bash）。
 #
 #   ./fetch.sh                 下载全部批次
 #   ./fetch.sh core            下载某个批次
@@ -11,7 +11,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=versions.sh
 source "$HERE/versions.sh"
 
-PROXY="${OBS_PROXY:-http://127.0.0.1:7892}"
+PROXY="${OBS_PROXY:-}"
 SRC="$HERE/src"
 mkdir -p "$SRC"
 
@@ -41,13 +41,12 @@ for d in $TARGETS; do
     echo "[CACHE] $d ($ver) 已存在"
     continue
   fi
-  prox=""
+  curl_args=(-fL --retry 3 --retry-delay 2 -C - -sS)
   case "$url" in
-    *github.com*) prox="-x $PROXY" ;;
+    *github.com*) [ -z "$PROXY" ] || curl_args+=(-x "$PROXY") ;;
   esac
   echo "[GET ] $d $ver -> $fn"
-  # shellcheck disable=SC2086
-  if ! curl -fL --retry 3 --retry-delay 2 -C - -sS $prox -o "$out.part" "$url"; then
+  if ! curl "${curl_args[@]}" -o "$out.part" "$url"; then
     echo "[FAIL] $d 下载失败：$url"
     rm -f "$out.part"; FAIL="$FAIL $d"; continue
   fi

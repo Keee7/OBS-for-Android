@@ -31,6 +31,7 @@ class OBSBasicStats : public QFrame {
 	QTimer timer;
 	QTimer recTimeLeft;
 	uint64_t num_bytes = 0;
+	bool diskSpaceKnown = true;
 	std::vector<long double> bitrates;
 
 	struct OutputLabels {

@@ -300,6 +300,24 @@ typedef struct gs_effect_pass gs_epass_t;
 typedef struct gs_effect_param gs_eparam_t;
 typedef struct gs_device gs_device_t;
 typedef void gs_sync_t;
+
+#ifdef __ANDROID__
+typedef void gs_android_encoder_surface_t;
+typedef void gs_android_external_texture_t;
+/* Create/destroy and all external-texture operations require a graphics
+ * context. Submit manages short context acquisitions itself and must be called
+ * without the graphics lock: a stalled codec must not stall scene rendering. */
+EXPORT gs_android_encoder_surface_t *gs_android_encoder_surface_create(void *native_window);
+EXPORT bool gs_android_encoder_surface_submit(gs_android_encoder_surface_t *surface, gs_texture_t *texture,
+					      int64_t timestamp_ns);
+EXPORT void gs_android_encoder_surface_destroy(gs_android_encoder_surface_t *surface);
+EXPORT gs_android_external_texture_t *gs_android_external_texture_create(uint32_t width, uint32_t height);
+EXPORT uint32_t gs_android_external_texture_get_id(gs_android_external_texture_t *texture);
+/* The returned texture belongs to the external-texture handle. */
+EXPORT gs_texture_t *gs_android_external_texture_render(gs_android_external_texture_t *texture,
+							const float transform[16]);
+EXPORT void gs_android_external_texture_destroy(gs_android_external_texture_t *texture);
+#endif
 typedef struct graphics_subsystem graphics_t;
 
 /* ---------------------------------------------------
