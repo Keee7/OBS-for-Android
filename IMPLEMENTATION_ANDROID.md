@@ -12,6 +12,9 @@
 
 ## 已执行的验证
 
+最新 `0.1.12-uvc60-test` / 13：针对 USB 5Gbps YUYV/NV12 1080p60 → MediaCodec H.264，新增独立 libusb bulk 接收泵和预分配有界缓冲所有权交接，过载序号缺口丢弃半帧；标准 raw payload 路径避免像素扫描和中间流缓冲拷贝，修正 PROBE 帧长/最大payload字段为18/22；旧设备解析改为指针消费、追加时才压实。默认开启的 YUV 低延迟选项只在明确选择 raw YUV 时生效，核对设备模式、禁止静默降分辨率/切MJPEG，OBS async优先最新帧；重协商前取消排干旧泵，新增独立采集帧率/USB错误/队列丢块/交付耗时指标。完整1080p YUYV/NV12伪头像素保真、收包生命周期/过载、生产模式/PROBE/平面与时间戳回归通过，完整APK构建、签名、ZIP16KB与原生入包一致性检查通过。APK `releases/OBS-Android-arm64-hwcodec-browser-20261105-2029.apk`，SHA-256 `72633b64511b31b97b5cb8f25b2651cca62db96ce86f46a2d8d00b354f9febf1`。未连接实际采集卡验证吞吐或延迟，参见 scripts/UVC_1080P60_TEST.md。
+
+
 最新 `0.1.11-capture-alpha-test` / 12：屏幕源新增兼容、直 Alpha、预乘输入三种透明度处理。默认保持原绘制方式；GPU 使用默认 effect 与独立混合状态，CPU 仅显式预乘模式执行反预乘转换。公共 OES 着色器和浏览器源不变，GPU 不增加像素读回，仍默认开启、失败重试且不自动回退 CPU。接入 Android 14+ onCapturedContentResize，内容尺寸用于下一次采集面重接，避免单应用窗口仍按整屏比例采集；同一授权仍只创建一次 VirtualDisplay。主机生命周期/尺寸、CPU Alpha 与小窗坐标测试通过；ANGLE 等价 GLSL 覆盖 Alpha 0/128/255 在三种背景透明度下的 RGB/Alpha 合成。完整原生/Qt/Java/APK 构建、签名、ZIP16KB、包版本/代码入包与原生库一致性检查通过。最终包 `releases/OBS-Android-arm64-hwcodec-browser-20261102-2212.apk`，SHA-256 `25ce0a31a281170b54c76f604186a68b42f0166fb2cdb037c1ca593b4164dc61`。尚未验证 VTube Studio 的设备端透明帧，详见 scripts/TRANSPARENT_CAPTURE_TEST.md。
 
 最新 0.1.10-window-stream-test / 11：USB 复现 0.1.9 小窗错位，Qt 窗口内目标与 Android 屏幕坐标混用。将父容器位置和初始测量校正统一到 getLocationInWindow，删除模式分支与增量缓存；截图验证全屏→小窗、移动、缩放和返回全屏均保持对齐。推流修复包括重连清空动态码率表、CQ 关闭无效动态码率，以及 headers/socket 读取失败早退路径释放出队包。故障注入回归验证各包恰好释放一次。完整构建/签名/ZIP16KB/包检查通过，最终包 releases/OBS-Android-arm64-hwcodec-browser-20261102-2022.apk，SHA-256 9b5a362f5323a58bb538a23a9e2b96277a75c3b9e92f3832dc1b67393d093c56。用户手动解锁后完成 USB localhost RTMP 实测：正常接收88.6秒、5317帧、60fps，完整解码无错；主动断线约1.267秒自动重连；限速2Mbps时实际编码输出5秒窗口最低1711kbps，解除后回升到约6Mbps。正常/重连/限速接收文件均首关键帧、DTS单调且最大间隔17ms。恢复原配置并逐字节核对，临时profile与USB转发删除。详细范围见 scripts/DEVICE_VALIDATION_WINDOW_STREAM.md；未测真实直播平台、Wi‑Fi丢包或长期温控。

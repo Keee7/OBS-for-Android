@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28...3.30)
 add_library(android-capture MODULE)
 add_library(OBS::android-capture ALIAS android-capture)
 
-target_sources(android-capture PRIVATE uvc-input.c)
+target_sources(android-capture PRIVATE uvc-input.c uvc-bulk-pump.c)
 target_link_libraries(android-capture PRIVATE OBS::libobs $<$<PLATFORM_ID:Android>:log>)
 
 if(OS_ANDROID)

@@ -181,8 +181,8 @@ set_target_properties(
     # 清单与 FileProvider 的 paths 都在 cmake/android/ 下自带；一旦设了这个变量，
     # androiddeployqt 就不再拿自己的模板覆盖清单（同 android-shell 的做法）。
     QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/android"
-    QT_ANDROID_VERSION_NAME "0.1.11-capture-alpha-test"
-    QT_ANDROID_VERSION_CODE 12
+    QT_ANDROID_VERSION_NAME "0.1.12-uvc60-test"
+    QT_ANDROID_VERSION_CODE 13
     QT_ANDROID_COMPILE_SDK_VERSION 35
     QT_ANDROID_TARGET_SDK_VERSION 35
     QT_ANDROID_MIN_SDK_VERSION 29)

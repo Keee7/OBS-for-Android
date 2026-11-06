@@ -1,11 +1,11 @@
-# 玄戒 O1 实机测试
+# Android 测试包与实机记录
 
-测试包：`releases/OBS-Android-arm64-hwcodec-browser-20261102-2212.apk`
+测试包：`releases/OBS-Android-arm64-hwcodec-browser-20261105-2029.apk`
 
-- 应用版本：`0.1.11-capture-alpha-test`，versionCode `12`。
+- 应用版本：`0.1.12-uvc60-test`，versionCode `13`。
 - 包名：`com.obsproject.studio`；arm64-v8a；最低 Android 10，目标 API 35。
-- 文件大小：97,624,094 字节。
-- SHA-256：`25ce0a31a281170b54c76f604186a68b42f0166fb2cdb037c1ca593b4164dc61`。
+- 文件大小：97,640,478 字节。
+- SHA-256：`72633b64511b31b97b5cb8f25b2651cca62db96ce86f46a2d8d00b354f9febf1`。
 - 使用仓库标准开发测试密钥，保留 debuggable 以便提取日志。
 
 ## 安装
@@ -13,12 +13,18 @@
 将 APK 复制到平板，点击安装；也可以使用本次工作区的 `../build-tools/android-sdk/platform-tools/adb.exe`：
 
 ```text
-adb install -r OBS-Android-arm64-hwcodec-browser-20261102-2212.apk
+adb install -r OBS-Android-arm64-hwcodec-browser-20261105-2029.apk
 ```
 
 如系统报告签名不兼容，应先备份旧版配置/推流设置，再处理旧版安装；不要为更新测试包直接删除尚未备份的数据。
 
-## 本次：屏幕源透明合成
+## 本次：1080p60 YUV 采集卡推流优化
+
+面向 USB 5 Gbps UVC bulk 采集卡的 YUYV/NV12 → MediaCodec H.264 路径。USB 接收与解析/OBS 交付分线程，预分配缓冲池通过所有权交接重提交；有界过载与序号缺口保护半帧。标准 payload 路径修正 PROBE 帧长/最大 payload 字段偏移，按 USB payload 直接重组 raw YUV；兼容路径改为延迟压实。源属性新增默认开启、仅对明确 YUYV/NV12 生效的“YUV 低延迟推流模式”，保持所选格式/尺寸/帧率并优先最新帧；重协商前停止排干旧泵，新增五秒聚合指标。
+
+请选 YUYV 或 NV12、1920×1080、60 fps，编码器选 MediaCodec H.264。主机收包/取消/过载/重组/完整 1080p 图像、生产模式/PROBE/平面/时间戳回归通过；完整 Android 原生/Qt/Java/APK 构建、签名、16KB 对齐及包内新功能/原生库一致性核查通过。本版没有连接采集卡，不能据此认定 1080p60 吞吐或端到端延迟达标。详细设置、带宽计算、标准/兼容路径与实机步骤见 [专项测试说明](UVC_1080P60_TEST.md)。
+
+## 上版：屏幕源透明合成
 
 屏幕源属性新增“透明度处理”：兼容（默认）、保留 Alpha（直通）、保留 Alpha（预乘输入）。先保持 GPU 开启，选择预乘输入，系统共享授权选择单个应用 VTube Studio；在 OBS 屏幕源下放颜色或图片背景检查透明效果。新接入 Android 14+ 内容尺寸回调，单应用窗口变化不再一直沿用整屏比例；GPU 默认开启、失败重试且不自动切换 CPU。
 

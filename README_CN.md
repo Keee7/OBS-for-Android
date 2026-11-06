@@ -6,7 +6,7 @@
 
 本项目基于 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android)，原移植基于 [OBS Studio 32.2.1](https://github.com/obsproject/obs-studio)。这是社区移植，并非 OBS Project 官方 Android 发行版。保留原作者、许可证声明和提交历史。
 
-**当前测试版本：** `0.1.11-capture-alpha-test`，versionCode `12`。包名 `com.obsproject.studio`，**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。Qt 界面主要面向横屏平板。开发测试包使用公开 debug 密钥，保留调试能力。
+**当前测试版本：** `0.1.12-uvc60-test`，versionCode `13`。包名 `com.obsproject.studio`，**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。Qt 界面主要面向横屏平板。开发测试包使用公开 debug 密钥，保留调试能力。
 
 ## 功能与验证状态
 
@@ -24,6 +24,7 @@
 | 共享目录录像 | MediaStore / SAF 写入 `Download/obs` 等可 seek 本地目录，修复路径容量查询失败被误报为“磁盘空间不足”。先使用混合 MP4/MOV；目录/提供者组合仍需实机测试。 |
 | 小窗预览 | 统一 Qt/Android 窗口坐标，已检查进入小窗、移动、缩放和返回全屏的预览对齐。 |
 | RTMP 推流 | 修复重连状态重置、CBR/VBR 动态码率及发送失败包释放。本地实机测试覆盖正常推流、主动断线与带宽限制。 |
+| 1080p60 YUV 采集卡路径 | 独立 USB 收包、有界缓冲交接、标准 raw payload 重组、减少拷贝与 YUYV/NV12 低延迟模式。主机测试及构建检查通过，采集卡实际吞吐尚待验证。[专项说明](scripts/UVC_1080P60_TEST.md)。 |
 | 相机与 USB 采集 | 保留原项目 Camera2、系统内录、Nikon PTP 和 UVC。原项目公开的设备结果属于上游验证，本分支未重复全部测试。 |
 
 硬编初始化失败会明确报错，不静默替换为软件编码器。媒体源硬解可以在**初始化失败时**回退软件，与屏幕采集的 GPU 重试策略独立。

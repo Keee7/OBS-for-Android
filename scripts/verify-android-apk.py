@@ -26,9 +26,11 @@ REQUIRED = {
     'android-mediacodec.so': {'obs_module_load'},
     'android-browser.so': {'obs_module_load'},
     'android-screen.so': {'obs_module_load'},
+    'android-capture.so': {'obs_module_load'},
     'obs-ffmpeg.so': {'obs_module_load'},
 }
 IMPORTED = {
+    'android-capture.so': {'obs_source_output_video', 'obs_source_set_async_unbuffered'},
     'obs-ffmpeg.so': {'obs_android_find_hardware_decoder', 'obs_android_storage_open'},
     'libobs_arm64-v8a.so': {'obs_android_set_storage_open'},
     'android-screen.so': {'obs_android_screen_capture_error', 'obs_source_draw_async_frame',
@@ -114,6 +116,8 @@ def main():
                     errors.append('FFmpeg named MediaCodec decoder patch missing from APK')
                 if short == 'android-screen.so' and b'alpha_mode' not in payload:
                     errors.append('screen capture Alpha modes missing from APK')
+                if short == 'android-capture.so' and b'yuv_low_latency' not in payload:
+                    errors.append('UVC YUV low-latency mode missing from APK')
                 digest = hashlib.sha256(payload).hexdigest()
                 print(f'{path} SHA-256 {digest}')
                 if not check_elf_header(payload):

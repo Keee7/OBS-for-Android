@@ -1,6 +1,6 @@
 # Building OBS for Android / 构建说明
 
-The current test APK is `0.1.11-capture-alpha-test` (12), arm64-v8a, minSdk 29 / targetSdk 35. Full native/Qt/Java/APK builds were completed on Windows for this version. WSL/Linux is the original port's build route; the additional WSL script preparation changes below have host checks, not a new full Linux build.
+The current test APK is `0.1.12-uvc60-test` (13), arm64-v8a, minSdk 29 / targetSdk 35. Full native/Qt/Java/APK builds were completed on Windows for this version. WSL/Linux is the original port's build route; the additional WSL script preparation changes below have host checks, not a new full Linux build.
 
 当前测试包已完成 Windows 全量构建。下面分别说明 Windows 工具布局和原项目的 WSL 构建路径；工具链和依赖源码不随仓库提供，需要自行安装/下载。
 
@@ -133,6 +133,7 @@ Windows checks with the expected adjacent tool layout:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-android-screen.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-android-uvc.ps1
 python scripts/test-android-display-rect.py
 python scripts/test-android-interop-shaders.py --egl-dir <directory-containing-ANGLE-DLLs>
 ```
