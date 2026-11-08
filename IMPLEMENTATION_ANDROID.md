@@ -12,7 +12,8 @@
 
 ## 已执行的验证
 
-最新 `0.1.18-alpha-vsync-fix` / 19：修复 Java USB 同设备借用互相关闭、断开后旧 fd 归还影响新连接的生命周期；统一无有效帧恢复，排干 USB 后重新协商，失败使用跨会话限频 reset 并完整关闭重枚举。协商保留真实错误、拔线与权限/参数错误快速退出。标准 raw payload 兼容缺少 EOH 和额外头填充；新增分类传输诊断、生产协商/Java借用和假时钟恢复测试。Windows完整构建、签名v3、ZIP16KB和原生库一致性验证通过。APK `releases/OBS-Android-arm64-hwcodec-browser-20261106-2313.apk`，SHA-256 `603f979edd39e55f13e55957af9f6eee882258ab8d58af947ad7790a1fccb4ba`。实际设备复测记录见 scripts/UVC_1080P60_TEST.md。
+最新 `0.1.19-alpha-stability` / 20：MediaCodec 新增高稳定降载闸门。实机日志显示 `eglSwapBuffers` 提交耗时从 1.7-2.2ms 恶化到 36-44ms 并持续一分钟，而 pending 输入始终停在 0-2 帧，最后直跳硬限导致`pending input exceeded its frame limit` 断流。现在按提交耗时与待编码深度主动丢帧保持连接，降载期间仍继续 `take_packet` 排空编码器输出并保留停滞看门狗，新增 `event=shedding|recovered` 转换日志与 `dropped_load` 计数；同时修正 `max_pending` 夹紧方向，并用 `da_erase_range` 修掉上游丢帧时`encoder_packet_times` 的无界增长。
+前版 `0.1.18-alpha-vsync-fix` / 19：修复 Java USB 同设备借用互相关闭、断开后旧 fd 归还影响新连接的生命周期；统一无有效帧恢复，排干 USB 后重新协商，失败使用跨会话限频 reset 并完整关闭重枚举。协商保留真实错误、拔线与权限/参数错误快速退出。标准 raw payload 兼容缺少 EOH 和额外头填充；新增分类传输诊断、生产协商/Java借用和假时钟恢复测试。Windows完整构建、签名v3、ZIP16KB和原生库一致性验证通过。APK `releases/OBS-Android-arm64-hwcodec-browser-20261106-2313.apk`，SHA-256 `603f979edd39e55f13e55957af9f6eee882258ab8d58af947ad7790a1fccb4ba`。实际设备复测记录见 scripts/UVC_1080P60_TEST.md。
 
 前版 `0.1.12-uvc60-test` / 13：针对 USB 5Gbps YUYV/NV12 1080p60 → MediaCodec H.264，新增独立 libusb bulk 接收泵和预分配有界缓冲所有权交接，过载序号缺口丢弃半帧；标准 raw payload 路径避免像素扫描和中间流缓冲拷贝，修正 PROBE 帧长/最大payload字段为18/22；旧设备解析改为指针消费、追加时才压实。默认开启的 YUV 低延迟选项只在明确选择 raw YUV 时生效，核对设备模式、禁止静默降分辨率/切MJPEG，OBS async优先最新帧；重协商前取消排干旧泵，新增独立采集帧率/USB错误/队列丢块/交付耗时指标。完整1080p YUYV/NV12伪头像素保真、收包生命周期/过载、生产模式/PROBE/平面与时间戳回归通过，完整APK构建、签名、ZIP16KB与原生入包一致性检查通过。APK `releases/OBS-Android-arm64-hwcodec-browser-20261105-2029.apk`，SHA-256 `72633b64511b31b97b5cb8f25b2651cca62db96ce86f46a2d8d00b354f9febf1`。未连接实际采集卡验证吞吐或延迟，参见 scripts/UVC_1080P60_TEST.md。
 

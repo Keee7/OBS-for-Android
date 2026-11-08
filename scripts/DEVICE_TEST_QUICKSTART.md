@@ -2,7 +2,7 @@
 
 测试包：`releases/OBS-Android-arm64-hwcodec-browser-20261107-2022.apk`
 
-- 应用版本：`0.1.18-alpha-vsync-fix`，versionCode `19`。
+- 应用版本：`0.1.19-alpha-stability`，versionCode `20`。
 - 包名：`com.obsproject.studio`；arm64-v8a；最低 Android 10，目标 API 35。
 - 文件大小：97,673,246 字节。
 - SHA-256：`51dedc66751af38e977feb27e04e889c3ace11cd526fbbae4adaec830dfcff21`。

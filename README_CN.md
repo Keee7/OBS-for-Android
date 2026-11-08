@@ -6,7 +6,7 @@
 
 本项目基于 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android)，原移植基于 [OBS Studio 32.2.1](https://github.com/obsproject/obs-studio)。这是社区移植，并非 OBS Project 官方 Android 发行版。保留原作者、许可证声明和提交历史。
 
-**当前测试版本：** `0.1.18-alpha-vsync-fix`，versionCode `19`。包名 `com.obsproject.studio`，**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。Qt 界面主要面向横屏平板。开发测试包使用公开 debug 密钥，保留调试能力。
+**当前测试版本：** `0.1.19-alpha-stability`，versionCode `20`。包名 `com.obsproject.studio`，**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。Qt 界面主要面向横屏平板。开发测试包使用公开 debug 密钥，保留调试能力。
 
 ## 功能与验证状态
 

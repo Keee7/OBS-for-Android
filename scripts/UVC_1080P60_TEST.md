@@ -1,6 +1,6 @@
 # USB 5 Gbps YUV → H.264 硬编推流
 
-适用版本：`0.1.18-alpha-vsync-fix` / versionCode `19`。目标是 **UVC bulk 采集卡、1920×1080、60 fps、YUYV 或 NV12 → OBS 合成 → MediaCodec H.264 Surface 编码 → RTMP**。
+适用版本：`0.1.19-alpha-stability` / versionCode `20`。目标是 **UVC bulk 采集卡、1920×1080、60 fps、YUYV 或 NV12 → OBS 合成 → MediaCodec H.264 Surface 编码 → RTMP**。
 
 x264 是软件编码器。本路径使用 Android MediaCodec H.264 硬件编码，保留 OBS 场景、叠加、滤镜和预览功能。
 
