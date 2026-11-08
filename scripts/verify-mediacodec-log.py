@@ -10,8 +10,8 @@ MARKER = '[android-mediacodec]'
 UINT = re.compile(r'^[0-9]+$')
 MAX_U64 = (1 << 64) - 1
 COUNTERS = ('submitted', 'output', 'delivered', 'bytes', 'keyframes',
-            'queue', 'queue_bytes', 'peak_queue_bytes', 'elapsed_ms', 'failed')
-MONOTONIC = ('submitted', 'output', 'delivered', 'bytes', 'keyframes', 'peak_queue_bytes', 'elapsed_ms')
+            'queue', 'queue_bytes', 'peak_queue_bytes', 'dropped_load', 'elapsed_ms', 'failed')
+MONOTONIC = ('submitted', 'output', 'delivered', 'bytes', 'keyframes', 'peak_queue_bytes', 'dropped_load', 'elapsed_ms')
 
 
 def parse_log(text):
@@ -42,7 +42,7 @@ def parse_log(text):
                 duplicate = True
             fields[key] = value
         event = fields.get('event')
-        if event not in ('started', 'first-packet', 'progress', 'summary', 'format', 'error'):
+        if event not in ('started', 'first-packet', 'progress', 'summary', 'format', 'error', 'shedding', 'recovered'):
             continue
         sid = fields.get('session', '')
         if not UINT.fullmatch(sid) or int(sid) > MAX_U64:
@@ -72,7 +72,9 @@ def evaluate(text, codec=None, session=None):
             raise ValueError('no matching MediaCodec session found')
         selected = matching[-1]  # first appearance determines session order, not last interleaved event
     events = sessions[selected]
-    starts, first, snapshots = [], [], []
+    starts, first, snapshots, edges = [], [], [], []
+    dropped_seen = 0
+
     actual_codec = None
     component = None
     for line, fields, duplicate in events:
@@ -107,6 +109,21 @@ def evaluate(text, codec=None, session=None):
             if fields.get('headers') != 'valid' or fields.get('keyframe') != '1' or number(fields, 'bytes', line) == 0:
                 raise ValueError(f'line {line}: invalid first packet evidence')
             first.append(fields)
+        elif event in ('shedding', 'recovered'):
+            # Edge lines carry no component and can precede the first 5-second
+            # progress line, so only the drop counter is checked here.
+            if not starts:
+                raise ValueError(f'line {line}: {event} event before the start event')
+            dropped = number(fields, 'dropped_load', line)
+            if event == 'recovered':
+                if edges and edges[-1][0] == 'recovered':
+                    raise ValueError(f'line {line}: duplicate recovered event')
+                if dropped != dropped_seen:
+                    raise ValueError(f'line {line}: recovered edge moved dropped_load')
+            elif dropped <= dropped_seen:
+                raise ValueError(f'line {line}: shedding edge without new dropped frames')
+            dropped_seen = dropped
+            edges.append((event, dropped))
         elif event in ('progress', 'summary'):
             if fields.get('component') != component or component is None:
                 raise ValueError(f'line {line}: missing start or component mismatch')
@@ -115,6 +132,7 @@ def evaluate(text, codec=None, session=None):
                 raise ValueError(f'line {line}: session reports failed={values["failed"]}')
             if snapshots and any(values[k] < snapshots[-1][k] for k in MONOTONIC):
                 raise ValueError(f'line {line}: session counters or elapsed time decreased')
+            dropped_seen = values['dropped_load']
             snapshots.append(values)
     if not starts or not first or len(snapshots) < 2:
         raise ValueError(f'session {selected}: insufficient started, first-packet or progress evidence')

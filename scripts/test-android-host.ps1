@@ -20,7 +20,8 @@ $failed = @()
 $scripts = @(
     'test-android-reader-ctx.ps1',
     'test-android-uvc.ps1',
-    'test-android-screen.ps1'
+    'test-android-screen.ps1',
+    'test-android-mediacodec.ps1'
 )
 
 foreach ($name in $scripts) {

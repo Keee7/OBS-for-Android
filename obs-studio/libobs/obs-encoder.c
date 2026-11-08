@@ -1608,9 +1608,9 @@ void send_off_encoder_packet(obs_encoder_t *encoder, bool success, bool received
 		pkt->sys_dts_usec += encoder->pause.ts_offset / 1000;
 		pthread_mutex_unlock(&encoder->pause.mutex);
 
-		/* Find the encoder packet timing entry in the encoder
-		 * timing array with the corresponding PTS value, then remove
-		 * the entry from the array to ensure it doesn't continuously fill.
+		/* Find the encoder packet timing entry for this PTS and discard
+		 * it together with every older entry, so the array cannot grow
+		 * without bound when frames are dropped upstream.
 		 */
 		struct encoder_packet_time ept_local;
 		struct encoder_packet_time *ept = NULL;
@@ -1620,7 +1620,14 @@ void send_off_encoder_packet(obs_encoder_t *encoder, bool success, bool received
 				ept = &encoder->encoder_packet_times.array[i - 1];
 				if (ept->pts == pkt->pts) {
 					ept_local = *ept;
-					da_erase(encoder->encoder_packet_times, i - 1);
+					/* Drop everything older than the match, not just the match
+					 * itself. An encoder that accepts a frame without producing
+					 * a packet leaves its timing entry behind -- the MediaCodec
+					 * load-shedding path does exactly that -- and those stale
+					 * entries would otherwise accumulate for the whole stream.
+					 * Video PTS is strictly monotonic here (no B frames), so any
+					 * earlier entry is either already reported or unreachable. */
+					da_erase_range(encoder->encoder_packet_times, 0, i);
 					found_ept = true;
 					break;
 				}

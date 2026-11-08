@@ -20,6 +20,7 @@
 #include "avc-utils.h"
 #include "hevc-utils.h"
 #include "encoder-health.h"
+#include "shed-policy.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("android-mediacodec", "en-US")
@@ -30,6 +31,8 @@ MODULE_EXPORT const char *obs_module_description(void)
 #define CODEC_ID "android_mediacodec_h264"
 #define CODEC_HEVC_ID "android_mediacodec_hevc"
 #define MAX_QUEUED 120
+/* High-stability policy (load shedding) lives in shed-policy.h so the host
+ * regression test compiles the real decision logic instead of a copy. */
 #define MAX_QUEUE_BYTES (32u * 1024u * 1024u)
 #define MAX_ACCESS_UNIT (16u * 1024u * 1024u)
 #define NO_OUTPUT_NS 5000000000ULL
@@ -88,9 +91,26 @@ struct encoder {
 	 * 表现为帧率掉一半、随后追帧把码率顶出尖峰。 */
 	uint64_t swap_us_sum, swap_max_us;
 	uint32_t swap_samples;
+	/* High-stability policy: when input backs up, drop frames proactively
+	 * instead of waiting for the hard limit and tearing the stream down.
+	 * dropped_load counts frames skipped for this reason;
+	 * submit_budget_us is the per-frame submit time budget, adapted from
+	 * the measured swap cost. */
+	uint64_t dropped_load;
+	uint64_t submit_budget_us;
+	/* 0 = healthy; rises when a submit exceeds the budget, falls when it is
+	 * comfortably below. >=2 collapses the soft limit to the floor.
+	 * degraded_until_ns bounds the collapse: while shedding we never submit,
+	 * so the only way out is a time decay (see encode()). */
+	int degraded;
+	uint64_t degraded_until_ns;
+	/* Current shedding state. Tracked only so each edge emits one
+	 * transition log line, instead of leaving "did we drop quality?"
+	 * answerable solely from the 5-second progress line. */
+	bool shedding;
 };
 
-#define PROGRESS_FORMAT(event) "[android-mediacodec] session=%llu event=" event " codec=%s component=%s submitted=%llu output=%llu delivered=%llu bytes=%llu keyframes=%llu queue=%zu queue_bytes=%zu peak_queue_bytes=%zu swap_avg_us=%llu swap_max_us=%llu elapsed_ms=%llu failed=%d"
+#define PROGRESS_FORMAT(event) "[android-mediacodec] session=%llu event=" event " codec=%s component=%s submitted=%llu output=%llu delivered=%llu bytes=%llu keyframes=%llu queue=%zu queue_bytes=%zu peak_queue_bytes=%zu swap_avg_us=%llu swap_max_us=%llu dropped_load=%llu elapsed_ms=%llu failed=%d"
 static void progress(struct encoder *e, bool final)
 {
 	const uint64_t now = os_gettime_ns();
@@ -111,7 +131,7 @@ static void progress(struct encoder *e, bool final)
 	     (unsigned long long)e->flow.output, (unsigned long long)e->delivered_frames,
 	     (unsigned long long)e->output_bytes, (unsigned long long)e->keyframes, e->queued, e->queue_bytes,
 	     e->peak_queue_bytes, (unsigned long long)swap_avg_us, (unsigned long long)swap_max_us,
-	     (unsigned long long)elapsed_ms, e->failed);
+	     (unsigned long long)e->dropped_load, (unsigned long long)elapsed_ms, e->failed);
 	pthread_mutex_unlock(&e->mutex);
 }
 static void fail(struct encoder *e, const char *message)
@@ -570,9 +590,23 @@ static void *create(obs_data_t *s, obs_encoder_t *obs)
 	e->fps_num = (int)base->fps_num;
 	e->fps_den = (int)actual->fps_den;
 	int query_num = (int)actual->fps_num;
+	/* Two-frame-time submit budget: exceeding it means eglSwapBuffers is
+	 * costing more than the frame interval, i.e. the codec cannot keep up.
+	 * Used to shrink the soft limit adaptively (see encode()). */
+	e->submit_budget_us = (uint64_t)e->fps_den * 2000000ULL / (uint64_t)query_num;
+	if (e->submit_budget_us < 4000)
+		e->submit_budget_us = 4000;
+	/* Hard abort depth: 5 seconds of unconsumed frames. Capped at
+	 * MAX_QUEUED because the output packet queue cannot absorb more -- a
+	 * deeper input backlog could only ever overflow the output queue,
+	 * which aborts with a different and far more confusing error. Kept
+	 * well above the soft limit so shedding, not aborting, is the first
+	 * thing that happens. */
 	e->max_pending = ((uint64_t)query_num * 5 + e->fps_den - 1) / e->fps_den;
-	if (e->max_pending < MAX_QUEUED)
+	if (e->max_pending > MAX_QUEUED)
 		e->max_pending = MAX_QUEUED;
+	if (e->max_pending < (uint64_t)MC_SHED_SOFT_PENDING * 2)
+		e->max_pending = (uint64_t)MC_SHED_SOFT_PENDING * 2;
 	e->input_gap_ns = (uint64_t)e->fps_den * 5000000000ULL / query_num;
 	if (e->input_gap_ns < 1000000000ULL)
 		e->input_gap_ns = 1000000000ULL;
@@ -730,6 +764,62 @@ static bool encode(void *data, struct encoder_texture *t, int64_t pts, uint64_t 
 		publish_failure(e);
 		return false;
 	}
+	/* High-stability gate: if the codec is already behind, submitting one more
+	 * frame would block inside eglSwapBuffers and push the pending backlog
+	 * toward the hard limit that tears the stream down. Dropping this frame
+	 * keeps the connection alive and lets the encoder catch up. The hard
+	 * limit below stays as a last resort only. */
+	const uint64_t gate_now = os_gettime_ns();
+	pthread_mutex_lock(&e->mutex);
+	/* While shedding we do not submit, so `degraded` can never decay through
+	 * the normal "submit was fast" path; the retry window is the only exit. */
+	mc_shed_tick(&e->degraded, &e->degraded_until_ns, gate_now);
+	const uint64_t pending_now = e->flow.submitted > e->flow.output ? e->flow.submitted - e->flow.output : 0;
+	/* See shed-policy.h for why the soft limit is an absolute depth and why
+	 * the decision has a second, submit-cost arm: on the 25053RP5CC the
+	 * backlog sat at 0-2 frames for a full minute while eglSwapBuffers was
+	 * already 36-44ms, and then jumped straight to the hard limit. */
+	const uint64_t soft_limit = mc_shed_soft_limit(e->degraded);
+	const bool shed = mc_shed_decide(pending_now, e->degraded, soft_limit);
+	if (shed)
+		e->dropped_load++;
+	const bool shed_changed = e->shedding != shed;
+	e->shedding = shed;
+	const uint64_t shed_dropped = e->dropped_load;
+	const int shed_degraded = e->degraded;
+	pthread_mutex_unlock(&e->mutex);
+	/* One line per state edge, so "did we drop quality, and when" is
+	 * answerable from the log without diffing two 5-second progress lines. */
+	if (shed_changed)
+		mc_log(shed ? LOG_WARNING : LOG_INFO,
+			"[android-mediacodec] session=%llu event=%s codec=%s pending=%llu degraded=%d dropped_load=%llu",
+			(unsigned long long)e->session_id, shed ? "shedding" : "recovered",
+			e->hevc ? "hevc" : "h264", (unsigned long long)pending_now, shed_degraded,
+			(unsigned long long)shed_dropped);
+	if (shed) {
+		/* Keep draining while shedding: the codec is still producing packets
+		 * for frames submitted before the backlog appeared. Skipping
+		 * take_packet() here would strand them in e->head until the output
+		 * queue hit MAX_QUEUED (a different, and worse, abort), and would
+		 * leave the watchdog below unreachable, turning a dead codec into a
+		 * silent frozen stream instead of an error. */
+		pthread_mutex_lock(&e->mutex);
+		const uint64_t shed_now = os_gettime_ns();
+		const bool shed_stalled = mc_flow_stalled(&e->flow, shed_now, NO_OUTPUT_NS);
+		const bool shed_backlogged = mc_flow_backlogged(&e->flow, e->max_pending);
+		pthread_mutex_unlock(&e->mutex);
+		if (shed_stalled || shed_backlogged) {
+			fail(e, shed_stalled
+					? "MediaCodec produced no video for 5 seconds while input is active"
+					: "MediaCodec pending input exceeded its frame limit (5 seconds, minimum 120 frames)");
+			publish_failure(e);
+			return false;
+		}
+		const bool shed_result = take_packet(e, packet, received, false);
+		progress(e, false);
+		return shed_result;
+	}
+
 	const uint64_t submit_start_ns = os_gettime_ns();
 	bool ok = gs_android_encoder_surface_submit(e->surface, t->tex[0], ns);
 	const uint64_t submit_us = (os_gettime_ns() - submit_start_ns) / 1000ULL;
@@ -738,6 +828,11 @@ static bool encode(void *data, struct encoder_texture *t, int64_t pts, uint64_t 
 	if (submit_us > e->swap_max_us)
 		e->swap_max_us = submit_us;
 	e->swap_samples++;
+	/* Adaptive shedding: once a single submit costs more than the budget the
+	 * codec is behind and every further submit will block again, so remember
+	 * the degraded state and let the gate collapse to the floor. */
+	mc_shed_note_submit(submit_us, e->submit_budget_us, &e->degraded,
+			&e->degraded_until_ns, os_gettime_ns());
 	pthread_mutex_unlock(&e->mutex);
 	if (!ok) {
 		fail(e, "Submitting texture to MediaCodec Surface failed");
