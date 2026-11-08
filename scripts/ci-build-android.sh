@@ -216,6 +216,7 @@ build_deps() {
     # 缺任何一个都说明缓存不完整，重新构建（deps 脚本自己会按依赖名跳过已完成的）。
     if [ -f "$PREFIX/lib/libavcodec.a" ] && [ -f "$PREFIX/lib/libusb-1.0.a" ]; then
         echo "依赖产物已在位：$PREFIX（缓存命中，跳过源码构建）"
+        install_nlohmann_json
         return
     fi
     log "拉取依赖源码"
@@ -225,6 +226,67 @@ build_deps() {
     for lib in libavcodec.a libusb-1.0.a libturbojpeg.a; do
         [ -f "$PREFIX/lib/$lib" ] || { echo "FATAL: 依赖缺失：$PREFIX/lib/$lib" >&2; exit 1; }
     done
+    install_nlohmann_json
+}
+
+# frontend/CMakeLists.txt:73 会**无条件** include feature-plugin-manager.cmake，
+# 而那里面第一行就是 find_package(nlohmann_json 3.11 REQUIRED)。
+# 它不是 deps-android 清单里的包（那份清单是给 libobs/插件的），所以早期 CI 会在这里失败：
+#   CMake Error ... Could not find a package configuration file provided by "nlohmann_json"
+# 本仓的 Windows 构建之所以没暴露这个问题，是因为开发机上**恰好**装了 conda 的 nlohmann_json
+#（CMakeCache 里 nlohmann_json_DIR 指向 miniconda3）。这种"靠机器上的偶发条件"不能在 CI 复现，
+# 所以这里显式装一份：官方 release 的 header-only 包 + CMake config，装进依赖前缀
+#（$PREFIX 已经在一个 CMAKE_PREFIX_PATH 里，find_package 自然找得到）。
+install_nlohmann_json() {
+    local ver=3.11.3
+    if [ -f "$PREFIX/share/cmake/nlohmann_json/nlohmann_jsonConfig.cmake" ]; then
+        echo "nlohmann_json 已就位（$PREFIX/share/cmake/nlohmann_json）"
+        return
+    fi
+    log "安装 nlohmann_json $ver（前端 find_package 需要，header-only）"
+    mkdir -p "$DL_ROOT"
+    local tb="$DL_ROOT/json.tar.xz"
+    [ -s "$tb" ] || curl -fL --retry 3 --retry-delay 5 -o "$tb" \
+        "https://github.com/nlohmann/json/releases/download/v$ver/json.tar.xz"
+    local tmp="$DL_ROOT/json-extract"
+    rm -rf "$tmp"; mkdir -p "$tmp"
+    tar -xJf "$tb" -C "$tmp"
+    [ -d "$tmp/json" ] || { echo "FATAL: json.tar.xz 解包后没有 json/ 目录" >&2; exit 1; }
+    # 头文件 → $PREFIX/include；CMake 包 → $PREFIX/share/cmake（官方布局）
+    mkdir -p "$PREFIX/include/nlohmann" "$PREFIX/share/cmake"
+    cp -f "$tmp/json/single_include/nlohmann/json.hpp" "$PREFIX/include/nlohmann/"
+    rm -rf "$PREFIX/share/cmake/nlohmann_json"
+    cp -r "$tmp/json/cmake" "$PREFIX/share/cmake/nlohmann_json" 2>/dev/null || true
+    # 官方 release 里带的是 *.in 模板（给 install 用的），find_package 需要的是生成好的
+    # Config + ConfigVersion + Targets 三件。这里手写一份最小可用的（header-only 目标）——
+    # 比拉起 CMake 的 install 快得多，且行为等价：一个 INTERFACE 目标 + include 目录。
+    local d="$PREFIX/share/cmake/nlohmann_json"
+    mkdir -p "$d"
+    cat > "$d/nlohmann_jsonConfig.cmake" <<EOF
+# 最小可用的 nlohmann_json 包配置（header-only）。由 scripts/ci-build-android.sh 生成。
+if(TARGET nlohmann_json::nlohmann_json)
+  return()
+endif()
+add_library(nlohmann_json::nlohmann_json INTERFACE IMPORTED)
+set_target_properties(nlohmann_json::nlohmann_json PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "$PREFIX/include")
+set(nlohmann_json_VERSION "$ver")
+set(nlohmann_json_FOUND TRUE)
+EOF
+    cat > "$d/nlohmann_jsonConfigVersion.cmake" <<EOF
+set(PACKAGE_VERSION "$ver")
+if(PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION)
+  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+else()
+  set(PACKAGE_VERSION_COMPATIBLE TRUE)
+  if(PACKAGE_FIND_VERSION STREQUAL PACKAGE_VERSION)
+    set(PACKAGE_VERSION_EXACT TRUE)
+  endif()
+endif()
+EOF
+    rm -rf "$tmp"
+    [ -f "$d/nlohmann_jsonConfig.cmake" ] || { echo "FATAL: nlohmann_json 配置没写成" >&2; exit 1; }
+    echo "  已安装：$PREFIX/include/nlohmann/json.hpp + $d"
 }
 
 # ---------------------------------------------------------------- OBS
