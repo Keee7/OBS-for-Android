@@ -10,14 +10,16 @@
 #include <sys/time.h>
 
 #define XFER_COUNT UVC_BULK_IN_FLIGHT
-#define BUFFER_COUNT (XFER_COUNT * 2)
-#define CHUNK_SIZE UVC_BULK_CHUNK_SIZE
+#define READY_BUDGET (4U * 1024U * 1024U)
+#define READY_MAX 256U
+#define BUFFER_MAX (XFER_COUNT + READY_MAX)
 #define ERROR_LIMIT 20U
 #define BAD_SECONDS_LIMIT 5U
 
 struct slot {
 	struct libusb_transfer *x;
 	struct uvc_bulk_pump *pump;
+	unsigned buffer_id;
 	bool active, needs_retry;
 };
 struct ready_block {
@@ -36,10 +38,10 @@ struct uvc_bulk_pump {
 	int fatal;
 	unsigned active, waiters;
 	struct slot slots[XFER_COUNT];
-	uint8_t *buffers[BUFFER_COUNT];
-	unsigned free_ids[BUFFER_COUNT], free_count;
-	struct ready_block ready[XFER_COUNT];
-	unsigned ready_head, ready_count;
+	uint8_t *buffers[BUFFER_MAX];
+	unsigned free_ids[BUFFER_MAX], free_count;
+	struct ready_block ready[READY_MAX];
+	unsigned ready_head, ready_count, ready_capacity, buffer_count;
 	int borrowed;
 	uint64_t sequence, win_start;
 	unsigned win_errors, bad_seconds;
@@ -51,14 +53,6 @@ static uint64_t now_ns(void)
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-/* Protected by mutex. The buffer identities never change during a session. */
-static unsigned buffer_id(struct uvc_bulk_pump *p, const uint8_t *data)
-{
-	for (unsigned i = 0; i < BUFFER_COUNT; i++)
-		if (p->buffers[i] == data)
-			return i;
-	abort();
 }
 static void set_fatal_locked(struct uvc_bulk_pump *p, int err)
 {
@@ -108,22 +102,33 @@ static void LIBUSB_CALL on_transfer(struct libusb_transfer *x)
 				replacement = old->buffer;
 				p->stats.dropped_blocks++;
 				p->stats.dropped_bytes += old->size;
-				p->ready_head = (p->ready_head + 1) % XFER_COUNT;
+				p->ready_head = (p->ready_head + 1) % p->ready_capacity;
 				p->ready_count--;
 			}
-			unsigned tail = (p->ready_head + p->ready_count) % XFER_COUNT;
-			p->ready[tail] = (struct ready_block){buffer_id(p, x->buffer), (size_t)x->actual_length,
+			unsigned tail = (p->ready_head + p->ready_count) % p->ready_capacity;
+			p->ready[tail] = (struct ready_block){slot->buffer_id, (size_t)x->actual_length,
 							      p->sequence++, started};
 			p->ready_count++;
 			if (p->ready_count > p->stats.ready_high_water)
 				p->stats.ready_high_water = p->ready_count;
 			x->buffer = p->buffers[replacement];
-			pthread_cond_signal(&p->cond);
+			slot->buffer_id = replacement;
+			/* A running consumer will observe ready_count under the mutex;
+			 * only sleepers need a futex wake-up. */
+			if (p->waiters)
+				pthread_cond_signal(&p->cond);
 		}
 		submit = true;
 	} else if (x->status != LIBUSB_TRANSFER_CANCELLED) {
 		p->sequence++; /* Any error may have lost bytes, including a partial transfer. */
 		p->stats.errors++;
+		switch (x->status) {
+		case LIBUSB_TRANSFER_TIMED_OUT: p->stats.timeouts++; break;
+		case LIBUSB_TRANSFER_STALL: p->stats.stalls++; break;
+		case LIBUSB_TRANSFER_OVERFLOW: p->stats.overflows++; break;
+		case LIBUSB_TRANSFER_ERROR: p->stats.io_errors++; break;
+		default: break;
+		}
 		p->win_errors++;
 		if (x->status == LIBUSB_TRANSFER_NO_DEVICE)
 			set_fatal_locked(p, LIBUSB_ERROR_NO_DEVICE);
@@ -224,17 +229,17 @@ static void destroy_pump(struct uvc_bulk_pump *p)
 	for (unsigned i = 0; i < XFER_COUNT; i++)
 		if (p->slots[i].x)
 			libusb_free_transfer(p->slots[i].x);
-	for (unsigned i = 0; i < BUFFER_COUNT; i++)
+	for (unsigned i = 0; i < p->buffer_count; i++)
 		free(p->buffers[i]);
 	pthread_cond_destroy(&p->cond);
 	pthread_mutex_destroy(&p->mutex);
 	free(p);
 }
-struct uvc_bulk_pump *uvc_bulk_pump_start_sized(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
-						unsigned transfer_size, int *error_out)
+static struct uvc_bulk_pump *pump_start_sized(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
+					      unsigned transfer_size, int *error_out)
 {
 	int err = LIBUSB_ERROR_NO_MEM;
-	if (!transfer_size || transfer_size > UVC_BULK_CHUNK_SIZE) {
+	if (!transfer_size) {
 		if (error_out)
 			*error_out = LIBUSB_ERROR_INVALID_PARAM;
 		return NULL;
@@ -262,16 +267,24 @@ struct uvc_bulk_pump *uvc_bulk_pump_start_sized(libusb_context *ctx, libusb_devi
 	p->handle = handle;
 	p->endpoint = endpoint;
 	p->borrowed = -1;
-	for (unsigned i = 0; i < BUFFER_COUNT; i++) {
-		p->buffers[i] = malloc(CHUNK_SIZE);
+	p->ready_capacity = READY_BUDGET / transfer_size;
+	if (p->ready_capacity > READY_MAX)
+		p->ready_capacity = READY_MAX;
+	if (p->ready_capacity < XFER_COUNT)
+		p->ready_capacity = XFER_COUNT;
+	p->buffer_count = XFER_COUNT + p->ready_capacity;
+	p->stats.ready_capacity = p->ready_capacity;
+	for (unsigned i = 0; i < p->buffer_count; i++) {
+		p->buffers[i] = malloc(transfer_size);
 		if (!p->buffers[i])
 			goto fail;
 	}
-	for (unsigned i = XFER_COUNT; i < BUFFER_COUNT; i++)
+	for (unsigned i = XFER_COUNT; i < p->buffer_count; i++)
 		p->free_ids[p->free_count++] = i;
 	for (unsigned i = 0; i < XFER_COUNT; i++) {
 		struct slot *slot = &p->slots[i];
 		slot->pump = p;
+		slot->buffer_id = i;
 		slot->x = libusb_alloc_transfer(0);
 		if (!slot->x)
 			goto fail;
@@ -302,6 +315,27 @@ fail_null:
 	if (error_out)
 		*error_out = err;
 	return NULL;
+}
+struct uvc_bulk_pump *uvc_bulk_pump_start_sized(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
+						unsigned transfer_size, int *error_out)
+{
+	if (!transfer_size || transfer_size > UVC_BULK_CHUNK_SIZE) {
+		if (error_out)
+			*error_out = LIBUSB_ERROR_INVALID_PARAM;
+		return NULL;
+	}
+	return pump_start_sized(ctx, handle, endpoint, transfer_size, error_out);
+}
+struct uvc_bulk_pump *uvc_bulk_pump_start_payload(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
+						  unsigned payload_size, int *error_out)
+{
+	const unsigned transfer_size = uvc_bulk_payload_transfer_size(payload_size);
+	if (!transfer_size) {
+		if (error_out)
+			*error_out = LIBUSB_ERROR_INVALID_PARAM;
+		return NULL;
+	}
+	return pump_start_sized(ctx, handle, endpoint, transfer_size, error_out);
 }
 struct uvc_bulk_pump *uvc_bulk_pump_start(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
 					  int *error_out)
@@ -336,7 +370,7 @@ int uvc_bulk_pump_acquire(struct uvc_bulk_pump *p, struct uvc_bulk_block *block,
 		return 0;
 	}
 	struct ready_block b = p->ready[p->ready_head];
-	p->ready_head = (p->ready_head + 1) % XFER_COUNT;
+	p->ready_head = (p->ready_head + 1) % p->ready_capacity;
 	p->ready_count--;
 	p->borrowed = (int)b.buffer;
 	*block = (struct uvc_bulk_block){p->buffers[b.buffer], b.size, b.seq, b.ns};

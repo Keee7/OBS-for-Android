@@ -1065,10 +1065,17 @@ void OBSBasicSettings::LoadColorFormats()
 	ui->colorFormat->addItem(CF_NV12_STR, "NV12");
 	ui->colorFormat->addItem(CF_I420_STR, "I420");
 	ui->colorFormat->addItem(CF_I444_STR, "I444");
+#ifndef __ANDROID__
+	/* 10-bit 格式在 Android 移植里是**声明未实现**的（IMPLEMENTATION_ANDROID.md：当前只支持
+	 * H.264/HEVC Main 8-bit SDR，无 HDR/10-bit）。原来这里无条件列出 P010/I010/P216/P416，
+	 * 用户选了它们会一路走到 obs_reset_video 才失败，而那条失败在设置页里是静默的（见
+	 * SaveSettings 里 ResetVideo 的返回值原先没人看）。这几个选项在 Android 上只是陷阱，
+	 * 不给选；桌面端顺序一字不动。 */
 	ui->colorFormat->addItem(CF_P010_STR, "P010");
 	ui->colorFormat->addItem(CF_I010_STR, "I010");
 	ui->colorFormat->addItem(CF_P216_STR, "P216");
 	ui->colorFormat->addItem(CF_P416_STR, "P416");
+#endif
 	ui->colorFormat->addItem(CF_BGRA_STR, "RGB"); // Avoid config break
 }
 
@@ -3843,7 +3850,16 @@ void OBSBasicSettings::SaveSettings()
 		SaveAppearanceSettings();
 	}
 	if (videoChanged || advancedChanged) {
-		main->ResetVideo();
+		/* 返回值原先没人看：obs_reset_video 失败（典型是选了设备/后端不支持的色彩格式或分辨率）
+		 * 只往日志里写一行，设置页照常关掉、配置照常保存，用户看到的是"设了没生效"而没有任何提示。
+		 * 注意 OBS_VIDEO_CURRENTLY_ACTIVE 不是失败 —— 那是"正在推流/录制、这轮不重组视频"，
+		 * 上游各调用点都不当错误，这里也不报。 */
+		const int videoRet = main->ResetVideo();
+		if (videoRet != OBS_VIDEO_SUCCESS && videoRet != OBS_VIDEO_CURRENTLY_ACTIVE) {
+			blog(LOG_WARNING, "Settings: obs_reset_video 失败 (ret=%d)，本轮的视频设置没生效", videoRet);
+			OBSMessageBox::warning(this, QTStr("Basic.Settings.VideoResetFailed.Title"),
+					       QTStr("Basic.Settings.VideoResetFailed.Text"));
+		}
 	}
 
 	config_save_safe(main->Config(), "tmp", nullptr);

@@ -1472,6 +1472,13 @@ gs_texture_t *gs_android_external_texture_render(gs_android_external_texture_t *
 	return thread_graphics->exports.device_android_external_texture_render(texture, transform);
 }
 
+bool gs_android_external_texture_set_buffer(gs_android_external_texture_t *texture, void *ahardware_buffer)
+{
+	if (!texture || !ahardware_buffer || !gs_valid("gs_android_external_texture_set_buffer"))
+		return false;
+	return thread_graphics->exports.device_android_external_texture_set_buffer(texture, ahardware_buffer);
+}
+
 void gs_android_external_texture_destroy(gs_android_external_texture_t *texture)
 {
 	if (texture && gs_valid("gs_android_external_texture_destroy"))

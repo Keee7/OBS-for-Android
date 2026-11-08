@@ -1,19 +1,38 @@
 # Android 测试包与实机记录
 
-测试包：`releases/OBS-Android-arm64-hwcodec-browser-20261105-2029.apk`
+测试包：`releases/OBS-Android-arm64-hwcodec-browser-20261107-2022.apk`
 
-- 应用版本：`0.1.12-uvc60-test`，versionCode `13`。
+- 应用版本：`0.1.18-alpha-vsync-fix`，versionCode `19`。
 - 包名：`com.obsproject.studio`；arm64-v8a；最低 Android 10，目标 API 35。
-- 文件大小：97,640,478 字节。
-- SHA-256：`72633b64511b31b97b5cb8f25b2651cca62db96ce86f46a2d8d00b354f9febf1`。
+- 文件大小：97,673,246 字节。
+- SHA-256：`51dedc66751af38e977feb27e04e889c3ace11cd526fbbae4adaec830dfcff21`。
 - 使用仓库标准开发测试密钥，保留 debuggable 以便提取日志。
+
+## 本轮：采集回调的源/reader 生命周期（P1-6/P1-7）与保活重试
+
+两处 use-after-free 的根因是两条独立的悬垂链，不是一条：
+
+1. **源悬垂**：`c->source` 是 `obs_source_t` 的裸借指针，而 `obs_source_destroy_defer()` 在 `info.destroy()` 返回后**无条件** `bfree(source)`（`obs-source.c:879`）。采集回调线程活过源销毁后，`obs_source_output_video(c->source, …)` 就是读已释放对象。
+2. **reader 悬垂**：`in_callback == 0` 覆盖不到"框架已决定派发、尚未进入函数体"的那一段，而 `AImageReader_delete()` 既没承诺 join 回调线程，`setImageListener(NULL)` 也没承诺之后不再派发。原代码在 `in_callback` 归零时直接 delete reader，这条路径本身有竞态。
+
+修法（新增 `plugins/android-common/reader-ctx.h`，相机与屏幕共用）：
+
+- 回调上下文 `reader_ctx` **独立于采集结构体分配**，持 `obs_weak_source_t`；回调进入工作区后 `obs_weak_source_get_source()` 现取强引用，源已销毁则返回 NULL 直接退。
+- `close` 先 `retire`（此后不再放新回调进工作区），再等**已进入工作区**的回调归零（retire 与计数在同一把锁里完成，堵住"检查与递增之间"的窗口）。归零即 `AImageReader_delete`，队列里的 `AImage` 一并归还系统；等不到则保留 reader 与 owner，由 `destroy` 的第二道检查决定是否有意泄漏。
+- `screen` 的 `shutting_down` 不再在 `close` 末尾**无条件**清零：干净才清零并允许重开，没等到就把闸门留在 1（隔离）；`try_start` 在 `ctx` 无在册回调后才放开。
+- `push_frame()` 改为接收回调现取的 `src`，不再从 `c->source` 读。
+- `OBSAndroidKeepAlive`：`g_running` 改到 JNI **成功之后**提交。原来先写状态再调 Java，失败那次会被下一拍判成"已在跑"并短路，一次 `startForeground` 失败就永久没有前台服务。
+
+取舍：每次开流新建一份 ctx（旧的那份可能还有"已决定派发"的回调，既不能复用也不能释放），一份不到 100 字节，随进程退出回收；这是本设计里唯一有意的有界泄漏。超时路径保留 reader 会多驻留几条 buffer（1080p YUV 约 12 MB），只在 HAL 卡死时发生。
+
+本版**未做实机验证**：编码完成后平板无线调试离线（`ping` 100% 丢失），因此相机源与屏幕源的开关/切换场景路径需要在真机上走一遍，重点看 `android-camera: 等 2 秒回调仍未退出` 与 `android-screen: 隔离本源` 是否出现（正常路径不应出现）。
 
 ## 安装
 
 将 APK 复制到平板，点击安装；也可以使用本次工作区的 `../build-tools/android-sdk/platform-tools/adb.exe`：
 
 ```text
-adb install -r OBS-Android-arm64-hwcodec-browser-20261105-2029.apk
+adb install -r OBS-Android-arm64-hwcodec-browser-20261107-0423.apk
 ```
 
 如系统报告签名不兼容，应先备份旧版配置/推流设置，再处理旧版安装；不要为更新测试包直接删除尚未备份的数据。
@@ -23,6 +42,24 @@ adb install -r OBS-Android-arm64-hwcodec-browser-20261105-2029.apk
 面向 USB 5 Gbps UVC bulk 采集卡的 YUYV/NV12 → MediaCodec H.264 路径。USB 接收与解析/OBS 交付分线程，预分配缓冲池通过所有权交接重提交；有界过载与序号缺口保护半帧。标准 payload 路径修正 PROBE 帧长/最大 payload 字段偏移，按 USB payload 直接重组 raw YUV；兼容路径改为延迟压实。源属性新增默认开启、仅对明确 YUYV/NV12 生效的“YUV 低延迟推流模式”，保持所选格式/尺寸/帧率并优先最新帧；重协商前停止排干旧泵，新增五秒聚合指标。
 
 请选 YUYV 或 NV12、1920×1080、60 fps，编码器选 MediaCodec H.264。主机收包/取消/过载/重组/完整 1080p 图像、生产模式/PROBE/平面/时间戳回归通过；完整 Android 原生/Qt/Java/APK 构建、签名、16KB 对齐及包内新功能/原生库一致性核查通过。本版没有连接采集卡，不能据此认定 1080p60 吞吐或端到端延迟达标。详细设置、带宽计算、标准/兼容路径与实机步骤见 [专项测试说明](UVC_1080P60_TEST.md)。
+
+## 本轮：推流码率忽高忽低与画面卡顿（编码面 vsync 量化）
+
+真机日志给出阶跃证据：同一次直播前 60 秒稳定 `60.0 fps / 7.1 Mbps`，某一刻起直接掉到 `33.6 fps / 3.04 Mbps` 并不再恢复；另两次出现 `27.0 fps / 2.2 Mbps` 低谷后紧跟 `201.2 fps / 18.8 Mbps`、`294.9 fps / 26.0 Mbps` 的尖峰。编码器侧 `submitted` 与 `output` 始终相等、`failed=0`，说明不是编码器丢帧，而是喂给它的帧率被外部节流后再集中补发。
+
+根因：`device_android_encoder_surface_create()` 给 MediaCodec 输入面建了 recordable EGL surface，但从未调用 `eglSwapInterval(display, 0)`。EGL 默认交换间隔为 1，`eglSwapBuffers` 会等下一个 vsync：任何一帧错过边界，视频线程立刻被量化到 30fps（60 的一半），GPU 编码纹理池随之耗尽（`Video stopped ... skipped frames due to encoding lag: 1808/5509 (32.8%)` 即此），随后 OBS 追赶循环在一瞬间连发几十帧，把瞬时码率顶到 20Mbps 以上。X11/Wayland 后端一直是显式关掉的，Android 这条路漏了。
+
+修法：建面后立即 `eglSwapInterval(display, 0)`，失败打警告；同时给 `event=progress/summary` 增加 `swap_avg_us` / `swap_max_us`（提交一帧到输入面的耗时），稳定 60fps 应在 1~2ms，一旦接近 16666us 就说明又被 vsync 量化。
+
+小米平板 25053RP5CC / Android 16 实测（HEVC 1080p60 本地录像 45.6 秒）：`submitted=2730`（59.92 fps）、`skipped 1/2730 (0.0%)`、`swap_avg_us=1298~1446`、`swap_max_us` 稳态 3.5~9.9ms；修复前同机直播为 `skipped 30.4%`、`submitted` 58.4 fps。构建、签名、16KB 对齐与包内一致性检查通过。
+
+## 上版：UVC 采集与浏览器透明
+
+
+
+真机定位到根因：`SurfaceTexture` 作虚拟显示输出时，本机 SurfaceFlinger 用硬件合成器（`usesDeviceComposition=true`）直接写这块面，写出的目标恒为不透黑；换成 `ImageReader`（`RGBA_8888`，带 CPU 读位）后同一图层改走 GPU 合成，alpha 完整保留（原始帧采样 `a=[0,255]`、角上 `(0,0,0,0)`）。据此把透明路径改成 ImageReader 输出 + `AHardwareBuffer` 经 EGLImage 采样，零 CPU 拷贝；非透明路径继续用 SurfaceTexture。顺带把屏幕采集源的三种“透明度处理”、显式混合函数与显式技术分支移植过来，并修正 reader 路径的上下颠倒。
+
+小米平板 25053RP5CC / Android 16 实测：`output=imagereader`、`EGL image via wrapped+context`、`alpha probe a=[0,152] corner_rgba=(0,0,0,0)`，预览中面板外透出下层、文字方向正确。构建、签名、16KB 对齐与包内一致性检查通过。
 
 ## 上版：屏幕源透明合成
 
@@ -64,6 +101,8 @@ CPU 转换、投影生命周期/内容尺寸、小窗坐标主机回归与 ANGLE
 
 HEVC/暂停与积压/音频停止/GPU 回退的主机回归、24 项验证器测试以及完整 Android 原生/Qt/Java/APK 构建通过。签名、ZIP/ELF 16KB 对齐、36 个库依赖闭包、GPU Java 类和原生桥接验证通过；没有连接目标设备，HEVC 驱动与 GPU 采集表现仍需实机测试。
 
+直播页的编码器列表按所选平台声明的编码能力过滤，这是 OBS 的既有行为：`Twitch` 等大多数平台在 `services.json` 里只声明 `h264`，所以直播页看不到 HEVC；`YouTube - RTMPS`（h264/hevc/av1）、`YouTube - HLS`（h264/hevc）和 `Bilibili Live - RTMP`（h264/hevc）会显示。选择“自定义”时按 RTMP 输出能力（h264/hevc/av1）判断，也会显示 HEVC。录像页不经过平台过滤，所以 HEVC 一直在。即便如此，服务端仍需支持 Enhanced RTMP 的 HEVC，否则推流会失败或回落；不要为了强行显示而去改平台声明。
+
 ## 保留验证：屏幕采集和 MediaCodec 预设
 
 停用再启用屏幕源，重新授权“整个屏幕”，使用默认“1080p 上限”。如果旧场景中源的大小不合适，执行“变换 → 适应屏幕”。反复切场景、开关源和旋转，确认不再因同一授权重复创建显示而失败，停用后也不会被定时回调自动重开。若仍失败，源属性会直接显示系统异常，反馈完整文字。
@@ -88,7 +127,31 @@ HEVC/暂停与积压/音频停止/GPU 回退的主机回归、24 项验证器测
 
 在来源列表添加 Android 浏览器源，输入可信 HTTPS URL。先使用 1280×720、30 fps 导入上限；输出保持 1080p60。测试刷新、CSS、显隐、尺寸修改、场景切换和交互窗口中的点击/拖动。
 
-将 `obs-studio/plugins/android-browser/browser-test.html` 托管到可访问的可信 HTTPS 地址，检查 TOP/BOTTOM 标记、Canvas、WebGL 和按钮；在其后放置彩色源验证真正透明度。网页独立音轨、键盘、滚轮、多点触控和本地 HTML 文件选择器未实现。
+### 透明输出（本版实机验证通过）
+
+透明背景打开后，源**不再使用 SurfaceTexture**：那一路会被本机硬件合成器直接扫描输出，实测合成结果 alpha 恒为 255（`corner_rgba=(0,0,0,255)`），画面的透明度在进入 OBS 之前就丢了。现在改为 `ImageReader`（`RGBA_8888`，4 缓冲）作虚拟显示的输出面，合成器因此改走 GPU 合成并保留 alpha，再由 `eglGetNativeClientBufferANDROID` + `eglCreateImageKHR` 把它按 `GL_TEXTURE_EXTERNAL_OES` 采样进 OBS，**全程零拷贝、无 CPU 读回**。
+
+验证步骤与判据：
+
+- 日志应出现 `OBS-browser: browser … transparent=true output=imagereader` 与 `Android interop: EGL image via wrapped+context`。后者说明该机型的 EGL 走的是包装后的 `AHardwareBuffer` 路径；四种组合都不成时会打印 `no EGL image path`，此时透明不可用。
+- 约 1.5 秒后出现一次性采样 `alpha probe a=[min,max] corner_rgba=(r,g,b,a)`。小米平板 25053RP5CC / Android 16 实测为 `a=[0,152] corner_rgba=(0,0,0,0)`：角上是全透明，面板是半透明。
+- 画面方向：`ImageReader` 的缓冲在 GL 里是自下而上，而互操作着色器已经翻转过一次，所以 reader 路径在 `uv` 矩阵里补一次反向翻转（`matrix[5]=-1, matrix[13]=1`）。这是着色器里的常量，不是额外的一趟拷贝，实测不影响帧率。若换机型后出现上下颠倒，先查这一处。
+- 非透明模式仍走 SurfaceTexture（合成器可直接扫描输出，最省电）。两个模式在切换“透明背景”时会重建整条链路。
+
+页面中面板以外的区域应透出下层彩色源，半透明黑色面板应按比例混色；页面自己绘制的不透明背景会覆盖“透明背景”开关。属性里的“透明度处理”与屏幕采集源同名同义（兼容/直通/预乘），只影响边缘与颜色的算式。网页独立音轨、键盘、滚轮、多点触控和本地 HTML 文件选择器未实现。
+
+## UVC 采集卡音频
+
+UVC 源的视频与音频是两条独立通道：视频由插件经 libusb 读取，卡上的音频走 Android 的 UAC 路由，作为 USB 输入设备出现。插入采集卡后启动应用，日志应出现 `OBS-audio: 音频宿主已安装：callback=true receiver=true 输入设备=N RECORD_AUDIO=true`；`输入设备=0` 说明 ROM/内核没有暴露 USB 音频输入。
+
+在“设置 → 音频”把麦克风/辅助音频设为该“USB 设备”，或在场景中添加“音频输入采集”并选同一台。OBS 日志应出现 `aaudio: 输入流已打开 … device_id=<id>` 与 `aaudio: 第 N 次回调`；`设备选择=系统默认输入` 表示仍在用默认设备，`a=[255,255]` 这类采样与音频无关。
+
+两个已在真机定位并修掉的坑（小米平板 25053RP5CC / Android 16）：
+
+- **固定请求 FLOAT 会被拒流**：采集卡的输入 profile 只有 `PCM_16_BIT`/`PCM_24_BIT_PACKED`，`AudioPolicyManager.getInputForAttr` 返回 -38(ENOSYS)，AAudio 再包成 -895(INVALID_STATE)；此时连内置麦也打不开。现在按 s16 → s16/全默认 → float → float/全默认 依次尝试。
+- **UVC 复位后音频变孤儿**：视频首次开流卡住时恢复阶梯会做 USB reset，采集卡重新枚举、音频设备 id 换号，旧 AAudio 流会被 HAL 以约 160 倍实时重复灌数据。现在音频走回调模式，带实时令牌桶、空转检测与自动重开，并按产品名找回换号后的设备；日志出现 `输入流中断 … → 重开` 属正常自愈。
+
+若 `输入设备` 里始终没有 USB 条目，先在系统声音设置确认该输入可见，再判断是 ROM 限制还是应用问题。
 
 ## 第三轮：持续性能
 

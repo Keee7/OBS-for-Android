@@ -302,7 +302,15 @@ EXPORT uint32_t obs_android_screen_read_audio(int16_t *out, uint32_t max_frames)
 /* Browser host: opaque per-source handles. create/update/destroy are called on the
  * OBS graphics thread; UI work is queued by the host and never waited for. */
 struct obs_android_browser_host {
- void *(*create)(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css);
+ void *(*create)(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css,
+		 bool transparent);
+ /* Reader mode, selected by create(texture = 0): instead of binding a
+  * SurfaceTexture, the host hands over the compositor's own buffers. Returns
+  * the AHardwareBuffer* of the newest frame, valid until the next call, or NULL
+  * when nothing new arrived. Called on the graphics thread, GL context current;
+  * the caller samples it through an EGLImage, so no pixel is ever copied on the
+  * CPU. */
+ void *(*take_buffer)(void *handle);
  int (*update)(void *handle, float transform[16]);
  void (*reload)(void *handle);
  void (*set_visible)(void *handle, bool visible);
@@ -311,7 +319,10 @@ struct obs_android_browser_host {
  void (*destroy)(void *handle);
 };
 EXPORT void obs_android_set_browser_host(const struct obs_android_browser_host *host);
-EXPORT void *obs_android_browser_create(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css);
+EXPORT void *obs_android_browser_create(uint32_t texture, uint32_t width, uint32_t height, const char *url,
+					const char *css, bool transparent);
+/* Reader mode only; see the host struct. */
+EXPORT void *obs_android_browser_take_buffer(void *handle);
 /* -1: failed; 0: no new frame; 1: matrix updated. */
 EXPORT int obs_android_browser_update(void *handle, float transform[16]);
 EXPORT void obs_android_browser_reload(void *handle);

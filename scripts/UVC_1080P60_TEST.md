@@ -1,6 +1,6 @@
 # USB 5 Gbps YUV → H.264 硬编推流
 
-适用版本：`0.1.12-uvc60-test` / versionCode `13`。目标是 **UVC bulk 采集卡、1920×1080、60 fps、YUYV 或 NV12 → OBS 合成 → MediaCodec H.264 Surface 编码 → RTMP**。
+适用版本：`0.1.18-alpha-vsync-fix` / versionCode `19`。目标是 **UVC bulk 采集卡、1920×1080、60 fps、YUYV 或 NV12 → OBS 合成 → MediaCodec H.264 Surface 编码 → RTMP**。
 
 x264 是软件编码器。本路径使用 Android MediaCodec H.264 硬件编码，保留 OBS 场景、叠加、滤镜和预览功能。
 
@@ -21,15 +21,23 @@ x264 是软件编码器。本路径使用 Android MediaCodec H.264 硬件编码�
 
 ## 本次优化
 
-- **USB 接收与帧处理分线程**：预分配传输和缓冲池，完成回调交出已填充缓冲、换入备用缓冲并重新提交，不在回调中执行 OBS 帧拷贝或 JPEG 解码。
-- **有界队列与缺口处理**：32 个接收传输、32 个备用缓冲；过载时回收最旧且未借出的块，不覆盖消费者正在使用的数据。序号缺口使解析器丢弃半帧，不拼接缺口前后的图像。
-- **标准 YUV payload 路径**：使用正确的 PROBE 字段偏移——帧长 18、最大 payload 长度 22；对可读回的标准 bulk 模式，按最大 payload 长度请求传输并直接重组 YUV。支持带数据的 EOF、空 EOF、单 payload 帧及坏帧隔离，无需扫描像素查找伪头，也不经过中间字节流缓冲。
+- **USB 接收与帧处理分线程**：预分配传输和缓冲池，完成回调以常数开销交出已填充缓冲、换入备用缓冲并重新提交，不在回调中执行 OBS 帧拷贝或 JPEG 解码。
+- **有界队列与缺口处理**：32 个接收传输；固定长度 payload 合并为单个 URB（目标 128 KiB，16 KiB payload 即 8 个一包），完成回调一次交出整块；备用缓冲按块大小在最多 4 MiB 预算内分配，最多 256 块；过载时回收最旧且未借出的块，不覆盖消费者正在使用的数据。序号缺口使解析器丢弃半帧，不拼接缺口前后的图像。
+- **标准 YUV payload 路径**：使用正确的 PROBE 字段偏移——帧长 18、最大 payload 长度 22；对可读回的标准 bulk 模式，按 `dwMaxPayloadTransferSize` 把整块切回 payload 直接重组 YUV，最后一个 payload 允许短于该值。支持带数据的 EOF、空 EOF、单 payload 帧及坏帧隔离，无需扫描像素查找伪头，也不经过中间字节流缓冲。
 - **兼容路径减少搬移**：保留原有设备字节流解析，消费时移动视图指针，只在追加空间不足时压实保留的尾部，不再每个 payload 都 `memmove` 剩余数据。
 - **保持目标模式、降低积压**：低延迟模式核对格式、分辨率和帧率，接受常见 59.94/60 的微小差异，不自动改 MJPEG、720p 或 30 fps；OBS 异步源优先使用最新帧。
 - **保持 YUV 输入**：YUYV/NV12 直接进入 OBS 的 YUV 上传/图形转换路径，缓存 BT.709/部分范围参数，不在 CPU 上先转 BGRA。编码继续使用已有的 GPU RGB 合成/MediaCodec Surface 路径，不为编码增加 CPU 整帧读回。
 - **恢复时隔离旧会话**：重新协商或重置前停止并排干 USB，重启新的接收代次，避免旧队列与新流拼接。
 
 这些改动减少了指定路径的 CPU 工作和积压来源，不等于整条链路“零拷贝”：仍需接收 USB 数据、重组图像、OBS 帧缓存拷贝以及 GPU 上传/转换。
+
+## 断流自动恢复
+
+`0.1.13-uvc-recovery-test` 修复 USB 借用生命周期：同一设备被使用时不会为了第二个源强制关闭原连接；断开后的旧借用在 native 归还前保留独立描述符，防止旧会话误关重连后的新会话。
+
+是否需要恢复按**有效视频帧**判断，收到无法组帧的 USB 数据也会触发。连续 8 秒无有效帧时，停止并排干接收，再清端点、重新协商；仍无帧则尝试软件 USB reset，随后完整关闭、重新枚举并打开。USB 错误风暴也会进入恢复。每个源实例的 reset 至少间隔 30 秒，跨内部会话保留；权限不足、设备拔出、参数不支持不会被当成硬件卡死反复 reset。控制操作耗时不计入下一次等待窗口。
+
+软件 reset 是否有效由 Android USB 栈和采集卡决定，不能保证等同物理断电。尚未收到首帧时，`event=waiting`、`event=acquire_stopped` 或 `event=pump_fatal` 会报告字节数、错误数及 `timeouts/stalls/overflows/io_errors` 分类，避免仅显示“无响应”。标准 raw payload 还兼容未置 EOH 标志、带额外头部填充的设备，仍严格检查头长、字段与图像边界。
 
 ## 判断瓶颈
 
@@ -46,6 +54,7 @@ OBS 日志每约五秒记录 `uvc: event=progress`：
 | `usb_errors` | USB 传输错误，优先核查线缆、连接、采集卡和系统 USB 路径 |
 | `submit_avg_us` / `submit_max_us` | 帧交付耗时；MJPEG 兼容路径还包含其解码耗时 |
 | `queue_age_max_us` | USB 完成到解析线程取块的最大等待时间，不是端到端直播延迟 |
+| `ready_peak` / `ready_capacity` | 当前接收代次的队列高水位与最大块数；持续接近容量且丢块增加说明消费者跟不上 |
 | `epoch` | 重新协商后接收代次改变，USB 统计随新泵重置 |
 
 USB 坏帧或队列丢块持续增加，与 OBS 的“渲染延迟”“编码跳帧”是不同层面的信号，需要一起观察。还应确认 [MediaCodec 同会话日志](HEVC_HARDWARE_TEST.md) 中硬件组件、首关键包和输出计数持续增长。
@@ -59,16 +68,16 @@ USB 坏帧或队列丢块持续增加，与 OBS 的“渲染延迟”“编码�
 
 ## 测试 APK
 
-`OBS-Android-arm64-hwcodec-browser-20261105-2029.apk`，97,640,478 字节，SHA-256：
+`OBS-Android-arm64-hwcodec-browser-20261106-2313.apk`，97,640,478 字节，SHA-256：
 
 ```text
-72633b64511b31b97b5cb8f25b2651cca62db96ce86f46a2d8d00b354f9febf1
+603f979edd39e55f13e55957af9f6eee882258ab8d58af947ad7790a1fccb4ba
 ```
 
 完整 Android 原生/Qt/Java/APK 构建、签名、16KB ZIP 对齐及包内新 UVC 代码/原生库一致性核验通过。APK 不纳入源码 Git。
 
 ## 已执行与边界
 
-`scripts/test-android-uvc.ps1` 覆盖缓冲交接与借用保护、过载序号缺口、USB 错误/取消/部分启动失败、标准 payload 重组、含伪 UVC 头的完整 1080p YUYV/NV12 图像、滑动缓冲、生产模式选择、PROBE 偏移、平面布局及主机到达时间戳单调性。
+`scripts/test-android-uvc.ps1` 覆盖缓冲交接与借用保护、过载序号缺口、USB 错误/取消/部分启动失败、标准 payload 重组、含伪 UVC 头的完整 1080p YUYV/NV12 图像、滑动缓冲、生产模式选择、PROBE 偏移、平面布局、主机到达时间戳单调性、协商错误传播和假时钟恢复/限频。`scripts/test-android-usb-host.py` 额外覆盖两份生产 Java 实现的并发借用、断开重连、旧借用归还、复制失败及连接数限制。
 
 测试中的旧/新字节搬移计数仅来自合成数据，不能换算为平板加速比例。新线程模型和 payload 路径尚未用实际采集卡验证；当前仅实现 UVC **bulk**，不支持 isochronous-only 设备。标准路径依赖设备遵守协商的最大 payload 和 USB 短包边界；非标准设备可关闭低延迟模式使用兼容路径。

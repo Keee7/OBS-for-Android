@@ -313,6 +313,21 @@ public final class ObsForegroundService extends Service {
     }
 
     /**
+     * 令牌真的换到了（ObsProjectionHost.takeToken 成功那一发调）。把 startedForProjection 落回 false。
+     *
+     * 为什么必须有这一下：这面旗子的含义是"服务是**我们为了投影、空着手**起起来的，投影没成
+     * 就该把它收掉"。令牌一旦到手，投影就成立了 —— 旗子的使命已经完成。不清它，旗子会一直挂着，
+     * 于是**之后任何一次** releaseProjectionForeground()（例如下一轮 getMediaProjection 抛异常、
+     * promote 失败）都会判成 wasOurs 去 stop() 整个服务：此刻如果推流/录制正在跑，保活就是被
+     * 投影那条腿的失败顺手拆掉的，进程回到可被系统回收的状态。收尾只该落 mediaProjection 那一档
+     * （那是 retypeIfNeeded 的事），不该收服务本身。
+     */
+    public static synchronized void projectionEstablished() {
+        startedForProjection = false;
+        pendingAfterPromote = null;
+    }
+
+    /**
      * 投影没了令牌（被拒 / 取令牌失败）时的收尾：
      * 服务若是我们在 ensureProjectionForeground 里空手起起来的，就把它停掉（不然会留一条
      * 没人认领的常驻通知 —— 原生那侧的保活看门狗只在有输出在跑时才复核，这时不会来收）；

@@ -47,6 +47,7 @@ bool load_graphics_imports(struct gs_exports *exports, void *module, const char 
 	GRAPHICS_IMPORT(device_android_external_texture_create);
 	GRAPHICS_IMPORT(device_android_external_texture_get_id);
 	GRAPHICS_IMPORT(device_android_external_texture_render);
+	GRAPHICS_IMPORT(device_android_external_texture_set_buffer);
 	GRAPHICS_IMPORT(device_android_external_texture_destroy);
 #endif
 

@@ -33,7 +33,7 @@ int main(void)
 	const uint8_t overflow[] = {2, 0x83, 1, 2, 3, 4, 5, 6, 7, 8, 9};
 	assert(!uvc_raw_payload_feed(&s, overflow, sizeof(overflow)) && s.bad_frames == 3);
 	uvc_raw_payload_reset(&s);
-	const uint8_t malformed[] = {6, 0x80, 1, 2, 3, 4};
+	const uint8_t malformed[] = {5, 0x84, 1, 2, 3};
 	assert(!uvc_raw_payload_feed(&s, malformed, sizeof(malformed)) && s.bad_frames == 4);
 	assert(uvc_raw_payload_feed(&s, single, sizeof(single)) == 1);
 	/* Six-byte NV12 frame across SCR and PTS+SCR payloads; same FID but
@@ -50,5 +50,19 @@ int main(void)
 	const uint8_t partial[] = {2, 0x81, 1};
 	assert(!uvc_raw_payload_feed(&s, partial, sizeof(partial)));
 	assert(uvc_raw_payload_feed(&s, next_pts, sizeof(next_pts)) == 1 && s.bad_frames == 1);
+	/* Missing EOH and padded metadata must not become image data. */
+	uvc_raw_payload_init(&s, frame, 8);
+	const uint8_t no_eoh[] = {2, 0x00, 10, 11, 12, 13};
+	const uint8_t padded[] = {8, 0x06, 3, 0, 0, 0, 0xde, 0xad, 14, 15, 16, 17};
+	assert(!uvc_raw_payload_feed(&s, no_eoh, sizeof(no_eoh)));
+	assert(uvc_raw_payload_feed(&s, padded, sizeof(padded)) == 1);
+	assert(!memcmp(frame, (const uint8_t[]){10, 11, 12, 13, 14, 15, 16, 17}, 8));
+	uvc_raw_payload_reset(&s);
+	const uint8_t beyond[] = {7, 0x00, 1, 2, 3};
+	assert(!uvc_raw_payload_feed(&s, beyond, sizeof(beyond)) && s.bad_frames == 1);
+	const uint8_t missing_pts[] = {2, 0x04};
+	assert(!uvc_raw_payload_feed(&s, missing_pts, sizeof(missing_pts)) && s.bad_frames == 2);
+	const uint8_t reserved[] = {2, 0x12, 1, 2, 3, 4, 5, 6, 7, 8};
+	assert(!uvc_raw_payload_feed(&s, reserved, sizeof(reserved)) && s.bad_frames == 3);
 	puts("uvc raw payload tests passed");
 }

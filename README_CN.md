@@ -6,7 +6,7 @@
 
 本项目基于 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android)，原移植基于 [OBS Studio 32.2.1](https://github.com/obsproject/obs-studio)。这是社区移植，并非 OBS Project 官方 Android 发行版。保留原作者、许可证声明和提交历史。
 
-**当前测试版本：** `0.1.12-uvc60-test`，versionCode `13`。包名 `com.obsproject.studio`，**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。Qt 界面主要面向横屏平板。开发测试包使用公开 debug 密钥，保留调试能力。
+**当前测试版本：** `0.1.18-alpha-vsync-fix`，versionCode `19`。包名 `com.obsproject.studio`，**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。Qt 界面主要面向横屏平板。开发测试包使用公开 debug 密钥，保留调试能力。
 
 ## 功能与验证状态
 
@@ -19,12 +19,14 @@
 | 硬编质量控制 | 高级输出提供设备支持的 CBR/VBR/CQ 和自动、低、中、高档位，映射到组件 complexity/quality 范围。MediaCodec 不使用 x264 预设；画质和吞吐需按设备对比。 |
 | GPU 屏幕采集 | MediaProjection → SurfaceTexture/OES → OBS 合成。新建源默认开启，失败退避重试，不自动回退 CPU，保留手动 CPU 选项。测试平板已确认 GPU 采集可用。 |
 | 单应用采集与透明度 | Android 14+ 内容尺寸回调，兼容、直 Alpha、预乘 Alpha 模式。主机合成测试通过；VTube Studio → Android 投影 → OBS 的实际透明效果**尚未实机验证**。 |
-| 浏览器源 | 系统 WebView 经 GPU 纹理接入，支持 URL、尺寸、帧率上限、CSS、刷新、显隐及基础指针交互。暂无 CEF 插件兼容和独立网页音轨，网页/设备兼容性仍需测试。 |
+| 浏览器源 | 系统 WebView 经 GPU 纹理接入，支持 URL、尺寸、帧率上限、CSS、刷新、显隐、基础指针交互和可选透明背景。透明模式改用 `ImageReader` 输出面（合成器走 GPU 合成保留 alpha）+ `AHardwareBuffer` 经 EGLImage 采样，零 CPU 拷贝；已在小米平板 25053RP5CC 实测。暂无 CEF 插件兼容和独立网页音轨。 |
+| 音频输入 | AAudio 采集，输入设备来自 Android AudioManager（内置麦克风、有线耳机麦克风、USB 声卡/采集卡音频），可在源属性中按设备选择。UVC 采集卡的音频走系统 UAC 通道，前提是 ROM 暴露该 USB 输入设备。 |
 | 媒体播放与硬解 | Android 文档 URI 输入，通过带补丁的 FFmpeg 选择命名 MediaCodec 硬解组件。在玄戒 O1 复现并修复 4K H.264 只显示一角，应用重启后复测正常；其他格式需单独验证。 |
 | 共享目录录像 | MediaStore / SAF 写入 `Download/obs` 等可 seek 本地目录，修复路径容量查询失败被误报为“磁盘空间不足”。先使用混合 MP4/MOV；目录/提供者组合仍需实机测试。 |
 | 小窗预览 | 统一 Qt/Android 窗口坐标，已检查进入小窗、移动、缩放和返回全屏的预览对齐。 |
 | RTMP 推流 | 修复重连状态重置、CBR/VBR 动态码率及发送失败包释放。本地实机测试覆盖正常推流、主动断线与带宽限制。 |
 | 1080p60 YUV 采集卡路径 | 独立 USB 收包、有界缓冲交接、标准 raw payload 重组、减少拷贝与 YUYV/NV12 低延迟模式。主机测试及构建检查通过，采集卡实际吞吐尚待验证。[专项说明](scripts/UVC_1080P60_TEST.md)。 |
+| UVC 断流恢复 | 独占 USB 借用、旧描述符隔离、按有效帧超时恢复和限频 USB 软件重置，支持分类传输诊断；软件重置不保证等同物理断电。 |
 | 相机与 USB 采集 | 保留原项目 Camera2、系统内录、Nikon PTP 和 UVC。原项目公开的设备结果属于上游验证，本分支未重复全部测试。 |
 
 硬编初始化失败会明确报错，不静默替换为软件编码器。媒体源硬解可以在**初始化失败时**回退软件，与屏幕采集的 GPU 重试策略独立。
@@ -38,7 +40,7 @@
 - 本地限制为 2 Mbps 时，实际编码输出五秒窗口最低约 1.711 Mbps；解除后回升到约 5.836 Mbps，目标为 6 Mbps。
 - 输入是已有的 4K H.264 媒体文件。输出 60 fps 不代表输入运动内容每秒有 60 个不同画面。
 
-这些是 USB 转发后的本地 RTMP 结果，不能替代真实平台、Wi-Fi 丢包、RTMPS、长期温控或其他芯片测试。HEVC、浏览器源性能和透明采集仍待实机验证。详见 [实机记录](scripts/DEVICE_VALIDATION_WINDOW_STREAM.md)。
+这些是 USB 转发后的本地 RTMP 结果，不能替代真实平台、Wi-Fi 丢包、RTMPS、长期温控或其他芯片测试。HEVC 与浏览器源性能仍待实机验证。详见 [实机记录](scripts/DEVICE_VALIDATION_WINDOW_STREAM.md)。
 
 下图继承自原 Android 移植项目，用于展示界面，不代表本分支新增硬编测试的截图。
 
@@ -79,7 +81,7 @@ HEVC 使用 `--codec hevc`。需要同时看到：
 - GPU 屏幕采集失败后重试，不自动切换 CPU；共享授权被收回后必须重新同意。
 - 媒体源硬解输出仍为 CPU 可读帧，不是端到端 GPU 零拷贝。
 - 共享文档录像需要可 seek 的本地提供者；该路径暂不支持分割录像、回放缓存、自定义 FFmpeg 输出和自动 remux。真实空间不足仍会停止录像。
-- 浏览器源暂无独立音轨、本地 HTML 选择器和完整键盘/滚轮/多点触控；网页透明度需设备验证，明文 HTTP 受 Android 网络策略限制。
+- 浏览器源暂无独立音轨、本地 HTML 选择器和完整键盘/滚轮/多点触控；透明背景是可选开关，能否穿过设备虚拟显示合成需实机验证，明文 HTTP 受 Android 网络策略限制。
 - 未实现 NDI/Spout2 输入，VTube Studio 原生透明采集仍待实机验证。
 - 脚本和 Twitch/YouTube/Restream 内置服务集成仍禁用，需手动配置受支持的服务器与推流密钥。
 

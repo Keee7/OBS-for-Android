@@ -48,9 +48,6 @@ bool obsAndroidKeepAliveSetRunning(bool running, const char *state, QString *det
 		}
 		/* 3-5 看门狗每秒复核一次：状态没变就别再惊动 Java（重复 startForeground 会每秒重刷通知）。 */
 		repeat = running && g_running && g_state == what;
-		g_running = running;
-		if (!repeat)
-			g_state = what;
 	}
 
 	if (repeat) {
@@ -77,6 +74,16 @@ bool obsAndroidKeepAliveSetRunning(bool running, const char *state, QString *det
 	} else {
 		ok = QJniObject::callStaticMethod<jboolean>(kServiceClass, "stop", "(Landroid/content/Context;)Z",
 							    act.object<jobject>()) != 0;
+	}
+
+	/* 成功之后才提交状态。失败时保留旧值，看门狗下一拍会重试 —— 先把 g_running 写成
+	 * 目标值再调 Java 的话，失败的那次会被下一拍判成"已在跑"并直接短路，结果是一次
+	 * startForeground 失败（通知权限被拒、OEM 限制）就永久没有前台服务，推流/录制
+	 * 可以在后台被系统杀掉而不再有任何重试。 */
+	if (ok) {
+		std::lock_guard<std::mutex> lk(g_keepAliveMutex);
+		g_running = running;
+		g_state = what;
 	}
 
 	jstatus = obsAndroidKeepAliveStatus();

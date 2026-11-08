@@ -295,9 +295,20 @@ bool LineEditChanged(QEvent *event)
 		case Qt::Key_Return:
 			return true;
 		}
-	} else if (event->type() == QEvent::FocusOut) {
+	}
+#ifdef __ANDROID__
+	/* Android 上**不**把 FocusOut 当"确认修改"。软键盘弹出/收起、输入法切换、候选词窗抢焦点
+	 * 都会给编辑框发 FocusOut，而调用方（SourceTreeItem::eventFilter / ExtraBrowsersDelegate）
+	 * 收到 true 就去提交并**销毁编辑器**（SourceTreeItem.cpp:387-389 的 delete editor）——
+	 * 症状是"点一下重命名，键盘刚弹出来，编辑框就没了"。桌面上 FocusOut 基本等于"点了别处"，
+	 * 这个判断成立；Android 上不成立，改由 Enter/Return/Tab 或点别处隐式结束（editingFinished）。
+	 * 返回值语义不变：这里只是不再把 FocusOut 当作那一类事件。 */
+	return false;
+#else
+	else if (event->type() == QEvent::FocusOut) {
 		return true;
 	}
+#endif
 
 	return false;
 }

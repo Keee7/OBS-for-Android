@@ -83,9 +83,14 @@ struct encoder {
 	uint64_t max_pending;
 	uint64_t input_gap_ns;
 	size_t queue_bytes, peak_queue_bytes;
+	/* 提交一帧到 MediaCodec 输入面（含 eglSwapBuffers）的耗时。稳定 60fps 时
+	 * 应在几百微秒内；一旦接近 16666us 就说明交换又被 vsync 量化了，
+	 * 表现为帧率掉一半、随后追帧把码率顶出尖峰。 */
+	uint64_t swap_us_sum, swap_max_us;
+	uint32_t swap_samples;
 };
 
-#define PROGRESS_FORMAT(event) "[android-mediacodec] session=%llu event=" event " codec=%s component=%s submitted=%llu output=%llu delivered=%llu bytes=%llu keyframes=%llu queue=%zu queue_bytes=%zu peak_queue_bytes=%zu elapsed_ms=%llu failed=%d"
+#define PROGRESS_FORMAT(event) "[android-mediacodec] session=%llu event=" event " codec=%s component=%s submitted=%llu output=%llu delivered=%llu bytes=%llu keyframes=%llu queue=%zu queue_bytes=%zu peak_queue_bytes=%zu swap_avg_us=%llu swap_max_us=%llu elapsed_ms=%llu failed=%d"
 static void progress(struct encoder *e, bool final)
 {
 	const uint64_t now = os_gettime_ns();
@@ -96,12 +101,17 @@ static void progress(struct encoder *e, bool final)
 	}
 	e->last_report_ns = now;
 	const uint64_t elapsed_ms = e->first_submit_ns ? (now - e->first_submit_ns) / 1000000ULL : 0;
+	const uint64_t swap_avg_us = e->swap_samples ? e->swap_us_sum / e->swap_samples : 0;
+	const uint64_t swap_max_us = e->swap_max_us;
+	e->swap_us_sum = e->swap_max_us = 0;
+	e->swap_samples = 0;
 	mc_log(LOG_INFO, final ? PROGRESS_FORMAT("summary") : PROGRESS_FORMAT("progress"),
 	     (unsigned long long)e->session_id, e->hevc ? "hevc" : "h264",
 	     e->component ? e->component : "none", (unsigned long long)e->flow.submitted,
 	     (unsigned long long)e->flow.output, (unsigned long long)e->delivered_frames,
 	     (unsigned long long)e->output_bytes, (unsigned long long)e->keyframes, e->queued, e->queue_bytes,
-	     e->peak_queue_bytes, (unsigned long long)elapsed_ms, e->failed);
+	     e->peak_queue_bytes, (unsigned long long)swap_avg_us, (unsigned long long)swap_max_us,
+	     (unsigned long long)elapsed_ms, e->failed);
 	pthread_mutex_unlock(&e->mutex);
 }
 static void fail(struct encoder *e, const char *message)
@@ -720,7 +730,15 @@ static bool encode(void *data, struct encoder_texture *t, int64_t pts, uint64_t 
 		publish_failure(e);
 		return false;
 	}
+	const uint64_t submit_start_ns = os_gettime_ns();
 	bool ok = gs_android_encoder_surface_submit(e->surface, t->tex[0], ns);
+	const uint64_t submit_us = (os_gettime_ns() - submit_start_ns) / 1000ULL;
+	pthread_mutex_lock(&e->mutex);
+	e->swap_us_sum += submit_us;
+	if (submit_us > e->swap_max_us)
+		e->swap_max_us = submit_us;
+	e->swap_samples++;
+	pthread_mutex_unlock(&e->mutex);
 	if (!ok) {
 		fail(e, "Submitting texture to MediaCodec Surface failed");
 		publish_failure(e);

@@ -118,6 +118,8 @@ def main():
                     errors.append('screen capture Alpha modes missing from APK')
                 if short == 'android-capture.so' and b'yuv_low_latency' not in payload:
                     errors.append('UVC YUV low-latency mode missing from APK')
+                if short == 'android-capture.so' and b'event=acquire_stopped' not in payload:
+                    errors.append('UVC transport recovery diagnostics missing from APK')
                 digest = hashlib.sha256(payload).hexdigest()
                 print(f'{path} SHA-256 {digest}')
                 if not check_elf_header(payload):

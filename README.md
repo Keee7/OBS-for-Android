@@ -6,7 +6,7 @@ An Android port of OBS Studio with scenes, sources, recording and streaming. Thi
 
 Based on [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android), which ports [OBS Studio 32.2.1](https://github.com/obsproject/obs-studio) to Android. This is a community project, not an official OBS Project Android release. Original authors, license notices and commit history are preserved.
 
-**Current test version:** `0.1.12-uvc60-test` / versionCode `13`. Package `com.obsproject.studio`; **arm64-v8a, Android 10+ (API 29), target API 35**. The Qt UI primarily targets landscape tablets. Development APKs use the public debug key and remain debuggable.
+**Current test version:** `0.1.18-alpha-vsync-fix` / versionCode `19`. Package `com.obsproject.studio`; **arm64-v8a, Android 10+ (API 29), target API 35**. The Qt UI primarily targets landscape tablets. Development APKs use the public debug key and remain debuggable.
 
 ## Features and validation
 
@@ -19,12 +19,14 @@ Based on [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android), 
 | Hardware encoding quality | Advanced output exposes supported CBR/VBR/CQ and Automatic/Low/Medium/High settings mapped to component complexity/quality ranges. MediaCodec does not use x264 presets. Device quality comparisons remain pending. |
 | GPU screen capture | MediaProjection → SurfaceTexture/OES → OBS composition. New sources default to GPU; failures retry with backoff, without automatic CPU fallback. Manual CPU mode remains available. GPU capture was confirmed working on the test tablet. |
 | Single-app capture and Alpha | Android 14+ captured-content size callbacks; compatible, straight-Alpha and premultiplied-Alpha modes. Host composition tests passed. VTube Studio → Android projection → OBS transparency is **not yet verified on-device**. |
-| Browser source | System WebView via GPU texture: URL, size, FPS limit, CSS, refresh, visibility and basic pointer interaction. No CEF plugin support or separate web-audio track; device/browser compatibility needs testing. |
+| Browser source | System WebView via GPU texture: URL, size, FPS limit, CSS, refresh, visibility, basic pointer interaction and an optional transparent background. The transparent path drives the virtual display through an ImageReader output surface (keeps the compositor on its GPU path, so alpha survives) and samples the AHardwareBuffer through an EGLImage, with no CPU copy; verified on Xiaomi Pad 25053RP5CC. No CEF plugin support or separate web-audio track. |
+| Audio input | AAudio capture with devices from Android AudioManager (built-in mic, wired headset, USB audio/capture-card audio), selectable in the source properties. UVC card audio uses the system UAC path and requires the ROM to expose that USB input. |
 | Media playback and hardware decoding | Android document URI input and named MediaCodec hardware decoders through patched FFmpeg. A 4K H.264 cropping problem was reproduced and fixed on Xring O1, including after restarting the app. Other formats need individual validation. |
 | Shared-folder recording | MediaStore / SAF for local seekable destinations such as `Download/obs`; fixes failed path-space queries being reported as insufficient space. Use Hybrid MP4/MOV; folder/provider combinations require device testing. |
 | Floating-window preview | Unified Qt/Android window coordinates. Entering, moving, resizing and leaving floating-window mode checked on the test tablet. |
 | RTMP streaming | Reconnect state reset, CBR/VBR dynamic bitrate and packet cleanup on send failures. Local device tests covered normal streaming, forced disconnection and bandwidth limitation. |
 | 1080p60 YUV capture-card path | Independent USB pump, bounded buffer handoff, standard raw payload assembly, reduced copying and a YUYV/NV12 low-latency option. Host tests/build checks; capture-card device throughput not yet validated. [Test guide](scripts/UVC_1080P60_TEST.md). |
+| UVC recovery | Exclusive USB loans, retained detached descriptors, valid-frame watchdog recovery and rate-limited USB software reset, with classified transport diagnostics. A software reset does not guarantee a physical power cycle. |
 | Camera and USB sources | Retains upstream Camera2, system audio, Nikon PTP and UVC. Published upstream device results have not all been repeated in this fork. |
 
 Hardware encoding reports initialization failures instead of silently choosing a software encoder. Media-source decoding can fall back to software **during initialization**; this is independent of the screen-capture retry policy.

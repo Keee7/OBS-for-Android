@@ -56,6 +56,7 @@
 #include "uvc-stream-buffer.h"
 #include "uvc-bulk-pump.h"
 #include "uvc-raw-payload.h"
+#include "uvc-recovery.h"
 
 /* ---------------- UVC 常量（规范 4.3.1.1 / A.9） ---------------- */
 
@@ -102,11 +103,7 @@
  * swaps a spare buffer into the transfer and resubmits without copying pixels. */
 #define BULK_CHUNK_SIZE UVC_BULK_CHUNK_SIZE
 #define XFER_IN_FLIGHT UVC_BULK_IN_FLIGHT
-/* 冻结看门狗：流"在跑"但连续这么久没有任何完整帧送出（数据来不来都算）→ 重新协商
- * 重进流；连续这么多次无效 → 拆会话。真机：1080p60 YUYV 喂不饱冻死，保帧机制把
- * "流死了"显示成"稳定"，不能再让画面定格装死 */
-#define FREEZE_WATCHDOG_NS 8000000000ULL
-#define FREEZE_MAX_RETRY 3U
+/* Valid-frame recovery deadlines and reset rate limiting are in uvc-recovery.h. */
 /* 纯字节扫描状态机（不定长 payload）：误同步防护靠 PTS 一致性（帧内所有头的 PTS
  * 相等，随机数据撞上的概率约 2^-32）+ FID 一致性。边界只信 EOF（这台设备用空
  * payload 带 EOF 位收尾每帧）；连续拒这么多"边界声称"候选 = EOF 真丢了，重同步 */
@@ -120,12 +117,6 @@
 /* 连续失步这么多次后 hex dump 当前位置 64 字节诊断（每轮只打这一次） */
 #define RESYNC_DUMP_AFTER 3
 
-/* 停滞看门狗阶梯（单位 = 连续无数据读的次数，1 次 ≈ 1 秒 bulk 读超时）：
- * clear_halt → 重新协商 → reset_device → 拆会话重开，每步留日志 */
-#define STALL_CLEAR_HALT 8U
-#define STALL_RENEGOTIATE 16U
-#define STALL_RESET_DEVICE 24U
-#define STALL_TEARDOWN 32U
 
 /* 未压缩 format GUID 的前 4 字节就是 FourCC（小端 ASCII，UVC 规范附录 A） */
 #define FOURCC_YUY2 0x32595559 /* "YUY2" */
@@ -167,6 +158,7 @@ struct uvc_source {
 	bool yuv_low_latency;
 	struct obs_source_frame yuv_frame;
 	uint64_t last_frame_timestamp;
+	struct uvc_reset_limit reset_limit; /* persists across sessions for this source */
 	char fmt_setting[16]; /* video_format 设置的原始字符串，打日志消歧义用 */
 	char usb_id[16];      /* 首台匹配设备的 "vid:pid"（label 前缀），拔插换号后按它认设备 */
 
@@ -289,14 +281,23 @@ static const char *mode_kind_name(enum uvc_mode_kind k)
 	}
 }
 
-/* 未压缩帧的精确字节数；MJPEG 返回 0（不定长） */
+/* 未压缩帧的精确字节数；MJPEG 返回 0（不定长）。
+ * w/h 是设备上报的 uint16，两个都取满时 w*h*2 ≈ 8.6e9 会溢出 uint32 回绕成一个小值
+ * ——那会让 frame_cap 通过上面的 MAX_FRAME_BYTES 检查，后面按小值去收大帧。
+ * 所以在 uint64 里算并饱和到 UINT32_MAX：真超上限的值会被调用方（frame_cap 那条
+ * 检查、push_frame_yuv 的 len< 比较）当成"过大"拒绝，而不是当成"很小"放行。 */
 static uint32_t raw_frame_bytes(const struct uvc_mode *m)
 {
+	uint64_t bytes;
+
 	if (m->kind == MODE_YUYV)
-		return (uint32_t)m->w * (uint32_t)m->h * 2;
-	if (m->kind == MODE_NV12)
-		return (uint32_t)m->w * (uint32_t)m->h * 3 / 2;
-	return 0;
+		bytes = (uint64_t)m->w * (uint64_t)m->h * 2;
+	else if (m->kind == MODE_NV12)
+		bytes = (uint64_t)m->w * (uint64_t)m->h * 3 / 2;
+	else
+		return 0;
+
+	return bytes > UINT32_MAX ? UINT32_MAX : (uint32_t)bytes;
 }
 
 static void set_status(struct uvc_source *s, const char *fmt, ...)
@@ -404,14 +405,22 @@ static void parse_vs_extra(struct uvc_dev *d, const uint8_t *extra, int len)
 			break;
 
 		if (dtype == 0x24 /* CS_INTERFACE */) {
+			/* 下面每个 case 读到的最大偏移都必须落在 dlen 之内：descriptor 是设备
+			 * 上报的不可信数据，dlen 只保证 >= 3。原先只看 dlen >= 3 就按固定偏移读，
+			 * 短 descriptor（尤其链尾那一条）会越界读进下一条描述符甚至 extra 缓冲之外。 */
 			switch (subtype) {
 			case VS_FORMAT_MJPEG:
+				if (dlen < 4) /* bmPreferredFrameIndex 在 off+3 */
+					break;
 				cur_kind = MODE_MJPEG;
 				cur_fmt = extra[off + 3];
 				cur_bpp = 0;
 				cur_valid = true;
 				break;
 			case VS_FORMAT_UNCOMPRESSED: {
+				/* guidFormat 4 字节在 off+5，bBitsPerPixel 在 off+21 ⇒ 至少要 22 字节 */
+				if (dlen < 22)
+					break;
 				const uint32_t fourcc = get_u32le(extra + off + 5);
 				cur_fmt = extra[off + 3];
 				cur_bpp = extra[off + 21];
@@ -684,11 +693,13 @@ static int choose_mode(struct uvc_dev *d, const struct uvc_source *s)
 /* ---------------- probe/commit 协商（UVC 规范 4.3.1.1） ---------------- */
 
 /* GET_LEN 问 probe 结构的实际长度；问不到就按 bcdUVC 推（1.0=26 / 1.1=34 / 1.5=48） */
-static uint32_t probe_struct_len(struct uvc_dev *d)
+static int probe_struct_len(struct uvc_dev *d)
 {
 	uint8_t l[2] = {0};
 	const int r = libusb_control_transfer(d->h, 0xA1, UVC_GET_LEN, UVC_VS_PROBE_CONTROL << 8, (uint16_t)d->vs_iface,
 					      l, sizeof(l), 1000);
+	if (r == LIBUSB_ERROR_NO_DEVICE || r == LIBUSB_ERROR_ACCESS || r == LIBUSB_ERROR_INVALID_PARAM)
+		return r;
 	if (r == 2) {
 		const uint32_t n = get_u16le(l);
 		if (n >= 26 && n <= 48)
@@ -722,7 +733,10 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 	uint8_t hand[48];
 	const struct uvc_mode *m = &d->modes[d->chosen];
 
-	d->probe_len = probe_struct_len(d);
+	const int probe_len = probe_struct_len(d);
+	if (probe_len < 0)
+		return probe_len;
+	d->probe_len = (uint32_t)probe_len;
 	d->payload_size = 0;
 	memset(probe, 0, sizeof(probe));
 	memset(back, 0, sizeof(back));
@@ -748,6 +762,8 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 
 	int r = libusb_control_transfer(d->h, 0xA1, UVC_GET_DEF, UVC_VS_PROBE_CONTROL << 8, (uint16_t)d->vs_iface,
 					probe, (uint16_t)d->probe_len, 1000);
+	if (r == LIBUSB_ERROR_NO_DEVICE || r == LIBUSB_ERROR_ACCESS || r == LIBUSB_ERROR_INVALID_PARAM)
+		return r;
 	if (r == (int)d->probe_len) {
 		char hex[48 * 3 + 1];
 		for (uint32_t i = 0; i < d->probe_len; i++)
@@ -782,6 +798,9 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 			os_sleep_ms(200);
 		r = libusb_control_transfer(d->h, 0xA1, UVC_GET_CUR, UVC_VS_PROBE_CONTROL << 8, (uint16_t)d->vs_iface,
 					    back, (uint16_t)d->probe_len, 1000);
+		if (r == LIBUSB_ERROR_NO_DEVICE || r == LIBUSB_ERROR_ACCESS || r == LIBUSB_ERROR_INVALID_PARAM ||
+		    r == LIBUSB_ERROR_NOT_SUPPORTED)
+			return r;
 		got = r == (int)d->probe_len;
 		if (!got)
 			blog(LOG_WARNING, "uvc: GET probe 第 %d/3 次失败 r=%d", t + 1, r);
@@ -789,7 +808,7 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 
 	if (!got && raw_low_latency(s)) {
 		blog(LOG_ERROR, "uvc: YUV 低延迟模式无法核对协商读回值，拒绝未确认的格式/帧率");
-		return LIBUSB_ERROR_IO;
+		return r < 0 ? r : LIBUSB_ERROR_IO;
 	}
 	if (got) {
 		if (raw_low_latency(s) && (back[2] != m->fmt_index || back[3] != m->frame_index ||
@@ -801,6 +820,9 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 		/* 用设备读回的值再 SET 一次 probe，然后 commit（规范流程，部分设备缺这步会拒） */
 		r = libusb_control_transfer(d->h, 0x21, UVC_SET_CUR, UVC_VS_PROBE_CONTROL << 8, (uint16_t)d->vs_iface,
 					    back, (uint16_t)d->probe_len, 1000);
+		if (r == LIBUSB_ERROR_NO_DEVICE || r == LIBUSB_ERROR_ACCESS || r == LIBUSB_ERROR_INVALID_PARAM ||
+		    r == LIBUSB_ERROR_NOT_SUPPORTED)
+			return r;
 		if (r != (int)d->probe_len)
 			blog(LOG_WARNING, "uvc: 二次 SET probe 失败 r=%d，照样试 commit", r);
 	} else {
@@ -810,6 +832,9 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 		d->frame_buf_size = m->kind == MODE_MJPEG ? m->max_frame_size : raw_frame_bytes(m);
 		r = libusb_control_transfer(d->h, 0x21, UVC_SET_CUR, UVC_VS_PROBE_CONTROL << 8, (uint16_t)d->vs_iface,
 					    back, (uint16_t)d->probe_len, 1000);
+		if (r == LIBUSB_ERROR_NO_DEVICE || r == LIBUSB_ERROR_ACCESS || r == LIBUSB_ERROR_INVALID_PARAM ||
+		    r == LIBUSB_ERROR_NOT_SUPPORTED)
+			return r;
 		if (r != (int)d->probe_len)
 			blog(LOG_WARNING, "uvc: 跳过 readback 路径的二次 SET 失败 r=%d，照样试 commit", r);
 	}
@@ -837,14 +862,18 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 static int uvc_negotiate(struct uvc_dev *d, struct uvc_source *s)
 {
 	int r = negotiate_try(d, s);
-	if (r == 0 || d->vs_iface < 0)
+	if (d->vs_iface < 0 || (r != LIBUSB_ERROR_IO && r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_PIPE))
 		return r;
 
 	blog(LOG_WARNING, "uvc: 协商失败（%d），SET_INTERFACE alt0→alt%d 踢一脚再试", r, d->vs_alt);
 	const int s0 = libusb_set_interface_alt_setting(d->h, d->vs_iface, 0);
+	if (s0 != 0)
+		return s0;
 	os_sleep_ms(100);
 	const int s1 = libusb_set_interface_alt_setting(d->h, d->vs_iface, d->vs_alt);
 	blog(LOG_WARNING, "uvc: SET_INTERFACE alt0 r=%d，工作 alt%d r=%d", s0, d->vs_alt, s1);
+	if (s1 != 0)
+		return s1;
 	return negotiate_try(d, s);
 }
 
@@ -1126,6 +1155,7 @@ static void stream_reset_parse(struct uvc_stream *st)
 	st->has_pts = false;
 	st->rejected = 0;
 	st->bad_streak = 0;
+	st->err_first_ns = 0;
 }
 
 /* BMH ERR 处理（对齐 Linux uvcvideo：静默丢帧、全速继续读 drain，绝不逐条日志，
@@ -1163,11 +1193,11 @@ static bool use_raw_packets(const struct uvc_dev *d, const struct uvc_source *s)
 
 static struct uvc_bulk_pump *start_input_pump(struct uvc_dev *d, struct uvc_source *s, int *error)
 {
-	/* Request one standard UVC bulk payload per transfer. Short packets or
-	 * dwMaxPayloadTransferSize delimit it; the legacy byte-stream path keeps
-	 * its original transfer size for cards with nonstandard payloads. */
-	const unsigned size = use_raw_packets(d, s) ? d->payload_size : UVC_BULK_CHUNK_SIZE;
-	return uvc_bulk_pump_start_sized(d->ctx, d->h, d->ep_in, size, error);
+	/* A bulk URB may cover several fixed-size payloads. The consumer reframes
+	 * by dwMaxPayloadTransferSize; no short packet or firmware change is needed. */
+	if (use_raw_packets(d, s))
+		return uvc_bulk_pump_start_payload(d->ctx, d->h, d->ep_in, d->payload_size, error);
+	return uvc_bulk_pump_start_sized(d->ctx, d->h, d->ep_in, UVC_BULK_CHUNK_SIZE, error);
 }
 
 static int restart_input_pump(struct uvc_dev *d, struct uvc_source *s, struct uvc_bulk_pump **pump)
@@ -1181,11 +1211,63 @@ static int restart_input_pump(struct uvc_dev *d, struct uvc_source *s, struct uv
 	*pump = start_input_pump(d, s, &error);
 	return *pump ? 0 : error;
 }
+/* A reset is followed by full close/re-enumeration, never reuse this handle. */
+static void reset_before_reopen(struct uvc_dev *d, struct uvc_source *s, struct uvc_bulk_pump **pump)
+{
+	uvc_bulk_pump_stop(*pump);
+	*pump = NULL;
+	if (os_atomic_load_long(&s->shutting_down))
+		return;
+	if (uvc_recovery_allow_reset(&s->reset_limit, os_gettime_ns())) {
+		const int rr = libusb_reset_device(d->h);
+		blog(LOG_WARNING, "uvc: USB reset r=%d；关闭并重新枚举", rr);
+	} else {
+		blog(LOG_WARNING, "uvc: USB reset 限频，关闭并重新枚举");
+	}
+}
+
+struct uvc_raw_delivery {
+	uint64_t fps_window_start, fps_window_frames, last_frame_ns;
+	uint64_t submit_count, submit_total_ns, submit_max_ns;
+};
+
+static void deliver_raw_frame(struct uvc_source *s, const struct uvc_mode *m, struct uvc_stream *st,
+			      struct uvc_raw_delivery *delivery, struct uvc_recovery *recovery, uint64_t received_ns)
+{
+	const uint64_t submit_started = os_gettime_ns();
+	if (!push_frame_yuv(s, m, st->frame_buf, (uint32_t)st->frame_total, received_ns))
+		return;
+	s->cur_w = m->w;
+	s->cur_h = m->h;
+	const uint64_t elapsed = os_gettime_ns() - submit_started;
+	delivery->submit_count++;
+	delivery->submit_total_ns += elapsed;
+	if (elapsed > delivery->submit_max_ns)
+		delivery->submit_max_ns = elapsed;
+	s->frames_out++;
+	delivery->fps_window_frames++;
+	delivery->last_frame_ns = os_gettime_ns();
+	uvc_recovery_frame(recovery, delivery->last_frame_ns);
+
+	const uint64_t now = delivery->last_frame_ns;
+	if (now - delivery->fps_window_start >= 1000000000ULL) {
+		s->cur_fps_x100 = (uint32_t)(delivery->fps_window_frames * 100000000000ULL /
+					     (now - delivery->fps_window_start));
+		delivery->fps_window_start = now;
+		delivery->fps_window_frames = 0;
+		set_status(s, "采集中：%s %ux%u @ %.2f fps", mode_kind_name(m->kind), (unsigned)s->cur_w,
+			   (unsigned)s->cur_h, s->cur_fps_x100 / 100.0);
+	}
+	if (s->frames_out == 1 || s->frames_out % 300 == 0)
+		blog(LOG_INFO, "uvc: 第 %llu 帧 %ux%u %s（载荷 %u 字节，累计丢弃 %llu）",
+		     (unsigned long long)s->frames_out, (unsigned)s->cur_w, (unsigned)s->cur_h, mode_kind_name(m->kind),
+		     (unsigned)st->frame_total, (unsigned long long)s->frames_dropped);
+}
 
 /* The USB pump owns submitted transfers; this thread only parses borrowed blocks. */
 static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 {
-	struct uvc_dev d = {0};
+	struct uvc_dev d = {.bridge_fd = -1};
 	struct uvc_stream st = {0};
 	struct uvc_raw_payload_state raw = {0};
 	bool raw_packets = false;
@@ -1195,12 +1277,14 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	size_t bgra_size = 0;
 	tjhandle tj = NULL;
 	bool streaming = false;
+	bool vs_claimed = false;
 	bool progress = false;
 	struct uvc_bulk_pump *pump = NULL;
 	uint64_t received_ns = 0, previous_sequence = 0;
 	bool have_sequence = false;
 	uint64_t parser_gaps = 0, submit_count = 0, submit_total_ns = 0, submit_max_ns = 0;
-	uint64_t max_queue_age_ns = 0, stats_start_ns = 0, stats_bytes = 0, stats_frames = s->frames_out;
+	uint64_t max_queue_age_ns = 0, stats_start_ns = 0, stats_bytes = 0, stats_urbs = 0;
+	uint64_t stats_frames = s->frames_out;
 	d.chosen = -1;
 
 	/* ---- 1. 总线清单里找选中的设备 / 授权 ---- */
@@ -1280,7 +1364,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 
 	/* ---- 2. 借 fd，包 libusb（nikon-source 真机验证的唯一可行模式） ---- */
 	d.bridge_fd = obs_android_usb_open(open_name);
-	if (d.bridge_fd <= 0) {
+	if (d.bridge_fd < 0) {
 		set_status(s, "打开设备失败（fd=%d）—— 设备被拔或授权刚被收回", d.bridge_fd);
 		return false;
 	}
@@ -1371,6 +1455,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		goto out;
 	}
 	progress = true; /* 能 claim 上就算赢了一半（内核驱动 detach 成功） */
+	vs_claimed = true;
 
 	/* ---- 4.5 开流前置 SET_INTERFACE（一次性正常开流步骤，不是 ERR 期的反复
 	 * 踢脚——那个保持删除）：Windows UVC 驱动每次开流都切到工作 alt，有的固件
@@ -1387,25 +1472,10 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 
 	/* ---- 5. probe/commit 协商 ---- */
 	r = uvc_negotiate(&d, s);
-	if (r == LIBUSB_ERROR_IO) {
-		/* GET probe 首轮就 -1 = IN 路径疑似猝死（OUT/描述符仍通的老毛病）：
-		 * 对新开的句柄先 USBDEVFS_RESET 再重试协商——ROM 若放行，
-		 * "猝死"无需物理拔插即可自愈。打 reset 返回值以便真机确认放行与否 */
-		const int rr = libusb_reset_device(d.h);
-		blog(LOG_WARNING, "uvc: 协商首轮 GET -1（IN 路径疑似猝死），reset_device r=%d，重试协商", rr);
-		/* reset 后内核 uvcvideo 可能重新绑上，重新 detach + claim（原 claim 若随
-		 * reset 保留，这里拿 -6/BUSY，只记日志，句柄状态两种结局都对） */
-		if (d.vc_iface >= 0)
-			libusb_detach_kernel_driver(d.h, d.vc_iface);
-		libusb_detach_kernel_driver(d.h, d.vs_iface);
-		const int cr = libusb_claim_interface(d.h, d.vs_iface);
-		if (cr != 0)
-			blog(LOG_WARNING, "uvc: reset 后重新 claim VS 接口 r=%d（-6=原 claim 仍在，无碍）", cr);
-		r = uvc_negotiate(&d, s);
-		blog(LOG_WARNING, "uvc: reset 后的重试协商结果 %d", r);
-	}
 	if (r != 0) {
 		set_status(s, "UVC 协商失败（%d）", r);
+		if (r == LIBUSB_ERROR_IO || r == LIBUSB_ERROR_TIMEOUT || r == LIBUSB_ERROR_PIPE)
+			reset_before_reopen(&d, s, &pump);
 		goto out;
 	}
 
@@ -1470,17 +1540,20 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 
 	streaming = true;
 	set_status(s, "采集中：%s %ux%u", mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h);
-	blog(LOG_INFO, "uvc: 进入 bulk 流循环（端点 0x%02X，%d 个 %uKB 读并发在飞，帧缓冲 %zu 字节）", d.ep_in,
-	     XFER_IN_FLIGHT, (unsigned)(BULK_CHUNK_SIZE / 1024), st.frame_cap);
+	blog(LOG_INFO, "uvc: 进入 bulk 流循环（端点 0x%02X，%d 个读并发，transfer=%u 字节，帧缓冲 %zu 字节）", d.ep_in,
+	     XFER_IN_FLIGHT, raw_packets ? d.payload_size : (unsigned)BULK_CHUNK_SIZE,
+	     st.frame_cap);
 
 	/* ---- 7. bulk 流循环：攒流 → 同步锁定 → 按跨距走 payload 重组帧 ---- */
 	uint64_t fps_window_start = os_gettime_ns();
 	uint64_t fps_window_frames = 0;
-	unsigned stall_reads = 0; /* 连续无数据读的次数（1 次 ≈ 1 秒 bulk 读超时） */
+	uint64_t last_wait_log_ns = fps_window_start;
 	bool first_read_logged = false;
 	bool abort_stream = false;       /* BMH ERR 超 10 秒：解析循环置位，出循环后拆会话 */
 	uint64_t last_frame_ns = 0;      /* 最近一次送出完整帧的时间（冻结看门狗，0 = 还没送过） */
-	unsigned freeze_retries = 0;     /* 冻结看门狗已连续重协商次数 */
+	struct uvc_raw_delivery delivery = {.fps_window_start = fps_window_start};
+	struct uvc_recovery recovery;
+	uvc_recovery_start(&recovery, os_gettime_ns());
 	uint64_t black_win_start = 0;    /* 黑场自降级：窗口起点（0 = 未开始） */
 	unsigned black_checked = 0;      /* 窗口内已检帧数 */
 	unsigned black_frames = 0;       /* 窗口内全黑帧数 */
@@ -1489,80 +1562,85 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	while (!os_atomic_load_long(&s->shutting_down)) {
 		const int fatal = uvc_bulk_pump_error(pump);
 		if (fatal) {
-			blog(LOG_ERROR, "uvc: USB 接收错误 %d，拆会话重枚举", fatal);
+			struct uvc_bulk_stats stats;
+			uvc_bulk_pump_snapshot(pump, &stats);
+			blog(LOG_ERROR, "uvc: event=pump_fatal error=%d usb_bytes=%llu transfers=%llu errors=%llu drops=%llu timeouts=%llu stalls=%llu overflows=%llu io_errors=%llu",
+			     fatal, (unsigned long long)stats.received_bytes, (unsigned long long)stats.transfers,
+			     (unsigned long long)stats.errors, (unsigned long long)stats.dropped_blocks,
+			     (unsigned long long)stats.timeouts, (unsigned long long)stats.stalls,
+			     (unsigned long long)stats.overflows, (unsigned long long)stats.io_errors);
 			set_status(s, "USB 接收错误（%d），等待重连…", fatal);
+			if (fatal == LIBUSB_ERROR_IO)
+				reset_before_reopen(&d, s, &pump);
 			break;
 		}
 
-		/* 冻结看门狗：连续 FREEZE_WATCHDOG_NS 没送出任何完整帧（数据来不来都算）
-		 * → 重新协商重进流；连续 FREEZE_MAX_RETRY 次无效 → 拆会话走重开链。
-		 * 真机：1080p60 YUYV 喂不饱冻死，保帧机制把"流死了"显示成"稳定" */
-		{
-			const uint64_t fn = os_gettime_ns();
-			if (!last_frame_ns) {
-				last_frame_ns = fn; /* 首帧还没来：给一段起动时间 */
-			} else if (fn - last_frame_ns >= FREEZE_WATCHDOG_NS) {
-				if (freeze_retries >= FREEZE_MAX_RETRY) {
-					blog(LOG_ERROR, "uvc: 冻结看门狗：连续 %u 次重协商仍无完整帧，拆会话重开",
-					     FREEZE_MAX_RETRY);
-					break;
+		/* A single deadline covers both no USB data and data that cannot form
+		 * valid frames. Never count control/restart time against the next deadline. */
+		const enum uvc_recovery_action action = uvc_recovery_poll(&recovery, os_gettime_ns());
+		if (action != UVC_RECOVERY_WAIT) {
+			int nr = 0;
+			uvc_bulk_pump_stop(pump);
+			pump = NULL;
+			if (os_atomic_load_long(&s->shutting_down))
+				break;
+			if (action == UVC_RECOVERY_RESTART) {
+				blog(LOG_WARNING, "uvc: 无有效帧，清除端点并重新协商");
+				nr = libusb_clear_halt(d.h, d.ep_in);
+				if (nr == 0)
+					nr = restart_input_pump(&d, s, &pump);
+				blog(LOG_WARNING, "uvc: 端点恢复/重新协商结果 %d", nr);
+				if (nr == 0) {
+					stream_reset_parse(&st);
+					uvc_raw_payload_init(&raw, st.frame_buf, st.frame_total);
+					raw_packets = use_raw_packets(&d, s);
+					have_sequence = false;
+					stats_bytes = 0;
+					stats_urbs = 0;
+					stats_frames = s->frames_out;
+					stats_start_ns = os_gettime_ns();
+					capture_epoch++;
+					uvc_recovery_restart_finished(&recovery, os_gettime_ns());
+					continue;
 				}
-				freeze_retries++;
-				blog(LOG_WARNING, "uvc: 冻结看门狗：%u 秒无完整帧（第 %u/%u 次），重新协商重进流",
-				     (unsigned)(FREEZE_WATCHDOG_NS / 1000000000ULL), freeze_retries, FREEZE_MAX_RETRY);
-				const int nr = restart_input_pump(&d, s, &pump);
-				blog(LOG_WARNING, "uvc: 冻结后的重新协商结果 %d，解析状态已重置", nr);
-				stream_reset_parse(&st);
-				uvc_raw_payload_init(&raw, st.frame_buf, st.frame_total);
-				raw_packets = use_raw_packets(&d, s);
-				have_sequence = false;
-				stats_bytes = 0;
-				stats_frames = s->frames_out;
-				stats_start_ns = os_gettime_ns();
-				capture_epoch++;
-				if (nr != 0)
-					break;
-				last_frame_ns = fn; /* 再给一段 */
 			}
+			/* Only transport failures or a second no-frame deadline justify a
+			 * reset; permissions, disconnects and invalid modes do not. */
+			if ((action == UVC_RECOVERY_RESET || nr == LIBUSB_ERROR_IO || nr == LIBUSB_ERROR_TIMEOUT ||
+			     nr == LIBUSB_ERROR_PIPE) &&
+			    !os_atomic_load_long(&s->shutting_down))
+				reset_before_reopen(&d, s, &pump);
+			break;
 		}
 
 		struct uvc_bulk_block block = {0};
 		const int acquired = uvc_bulk_pump_acquire(pump, &block, BULK_TIMEOUT_MS);
 		if (acquired < 0) {
-			set_status(s, "USB 接收停止（%d）", uvc_bulk_pump_error(pump));
+			const int e = uvc_bulk_pump_error(pump);
+			struct uvc_bulk_stats stats;
+			uvc_bulk_pump_snapshot(pump, &stats);
+			blog(LOG_ERROR, "uvc: event=acquire_stopped error=%d usb_bytes=%llu transfers=%llu errors=%llu drops=%llu timeouts=%llu stalls=%llu overflows=%llu io_errors=%llu",
+			     e, (unsigned long long)stats.received_bytes, (unsigned long long)stats.transfers,
+			     (unsigned long long)stats.errors, (unsigned long long)stats.dropped_blocks,
+			     (unsigned long long)stats.timeouts, (unsigned long long)stats.stalls,
+			     (unsigned long long)stats.overflows, (unsigned long long)stats.io_errors);
+			set_status(s, "USB 接收停止（%d）", e);
+			if (e == LIBUSB_ERROR_IO)
+				reset_before_reopen(&d, s, &pump);
 			break;
 		}
 		if (!acquired) {
-			/* 1 秒无任何完成 = 断流/拔线：逐级升级抢救（clear_halt → 重新协商 →
-			 * reset_device → 拆会话重开），每步留日志 */
-			if (++stall_reads == STALL_CLEAR_HALT) {
-				blog(LOG_WARNING, "uvc: 流停滞约 %u 秒，clear_halt 试试", (unsigned)STALL_CLEAR_HALT);
-				libusb_clear_halt(d.h, d.ep_in);
-			} else if (stall_reads == STALL_RENEGOTIATE) {
-				blog(LOG_WARNING, "uvc: 流停滞约 %u 秒，重新协商一次", (unsigned)STALL_RENEGOTIATE);
-				const int nr = restart_input_pump(&d, s, &pump);
-				blog(LOG_WARNING, "uvc: 停滞后的重新协商结果 %d，解析状态已重置", nr);
-				stream_reset_parse(&st);
-				uvc_raw_payload_init(&raw, st.frame_buf, st.frame_total);
-				raw_packets = use_raw_packets(&d, s);
-				have_sequence = false;
-				stats_bytes = 0;
-				stats_frames = s->frames_out;
-				stats_start_ns = os_gettime_ns();
-				capture_epoch++;
-				if (nr != 0)
-					break;
-			} else if (stall_reads == STALL_RESET_DEVICE) {
-				uvc_bulk_pump_stop(pump);
-				pump = NULL;
-				const int rr = libusb_reset_device(d.h);
-				blog(LOG_WARNING, "uvc: 流停滞约 %u 秒，reset_device r=%d，重新打开会话",
-				     (unsigned)STALL_RESET_DEVICE, rr);
-				break;
-			} else if (stall_reads >= STALL_TEARDOWN) {
-				blog(LOG_ERROR, "uvc: 流停滞约 %u 秒，拆会话完整重开（关 fd → 重枚举 → 重开）",
-				     (unsigned)STALL_TEARDOWN);
-				break;
+			const uint64_t now = os_gettime_ns();
+			if (now - last_wait_log_ns >= 5000000000ULL) {
+				struct uvc_bulk_stats stats;
+				uvc_bulk_pump_snapshot(pump, &stats);
+				blog(LOG_INFO, "uvc: event=waiting frames=%llu usb_bytes=%llu transfers=%llu errors=%llu drops=%llu timeouts=%llu stalls=%llu overflows=%llu io_errors=%llu",
+				     (unsigned long long)s->frames_out, (unsigned long long)stats.received_bytes,
+				     (unsigned long long)stats.transfers, (unsigned long long)stats.errors,
+				     (unsigned long long)stats.dropped_blocks, (unsigned long long)stats.timeouts,
+				     (unsigned long long)stats.stalls, (unsigned long long)stats.overflows,
+				     (unsigned long long)stats.io_errors);
+				last_wait_log_ns = now;
 			}
 			continue;
 		}
@@ -1571,7 +1649,6 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			first_read_logged = true;
 			blog(LOG_INFO, "uvc: first USB block=%zu; independent pump with buffer handoff", block.size);
 		}
-		stall_reads = 0;
 		received_ns = block.received_ns;
 		const uint64_t now_ns = os_gettime_ns();
 		const uint64_t age = now_ns > received_ns ? now_ns - received_ns : 0;
@@ -1591,14 +1668,29 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		have_sequence = true;
 		previous_sequence = block.sequence;
 		if (raw_packets) {
+			/* One URB normally carries several fixed-size payloads. Reframe by
+			 * dwMaxPayloadTransferSize; a completed frame is delivered before
+			 * feeding the rest of the block, so no extra pixel copy is needed. */
+			const size_t payload = d.payload_size;
 			const uint64_t bad_before = raw.bad_frames;
-			const int complete = uvc_raw_payload_feed(&raw, block.data, block.size);
+			size_t offset = 0;
+			for (; offset + payload <= block.size; offset += payload) {
+				if (uvc_raw_payload_feed(&raw, block.data + offset, payload))
+					deliver_raw_frame(s, mode, &st, &delivery, &recovery, received_ns);
+			}
+			/* UVC allows the last payload of a frame to be shorter than
+			 * dwMaxPayloadTransferSize. The short packet still ends a payload,
+			 * so feed the remainder instead of treating it as data loss. */
+			if (offset < block.size &&
+			    uvc_raw_payload_feed(&raw, block.data + offset, block.size - offset))
+				deliver_raw_frame(s, mode, &st, &delivery, &recovery, received_ns);
 			s->frames_dropped += raw.bad_frames - bad_before;
 			uvc_bulk_pump_release(pump, &block);
-			if (complete) {
-				st.frame_len = st.frame_total;
-				goto frame_complete;
-			}
+			fps_window_start = delivery.fps_window_start;
+			fps_window_frames = delivery.fps_window_frames;
+			submit_count = delivery.submit_count;
+			submit_total_ns = delivery.submit_total_ns;
+			submit_max_ns = delivery.submit_max_ns;
 			goto report_statistics;
 		}
 		if (!uvc_stream_buffer_append(&st.input, block.data, block.size)) {
@@ -1750,8 +1842,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			if (!eof)
 				continue;
 
-		frame_complete:
-			/* ---- 一帧齐了（EOF：无论这个 payload 带不带数据，0 字节也合法） ---- */
+		/* ---- 一帧齐了（EOF：无论这个 payload 带不带数据，0 字节也合法） ---- */
 			st.assembling = false;
 			uint32_t flen = (uint32_t)st.frame_len;
 			st.frame_len = 0;
@@ -1872,7 +1963,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			s->frames_out++;
 			fps_window_frames++;
 			last_frame_ns = os_gettime_ns();
-			freeze_retries = 0;
+			uvc_recovery_frame(&recovery, last_frame_ns);
 
 			/* 黑场自降级看门狗（通用，一次性）：流起 3 秒推的全是黑帧（全帧峰值
 			 * <30）且当前不是 YUYV → 自动改协商同分辨率 YUYV 重进流；
@@ -1930,6 +2021,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 							raw_packets = use_raw_packets(&d, s);
 							have_sequence = false;
 							stats_bytes = 0;
+							stats_urbs = 0;
 							stats_frames = s->frames_out;
 							stats_start_ns = os_gettime_ns();
 							capture_epoch++;
@@ -1937,6 +2029,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 								abort_stream = true;
 								break;
 							}
+							uvc_recovery_start(&recovery, os_gettime_ns());
 							continue;
 						}
 					}
@@ -1956,8 +2049,6 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				blog(LOG_INFO, "uvc: 第 %llu 帧 %ux%u %s（载荷 %u 字节，累计丢弃 %llu）",
 				     (unsigned long long)s->frames_out, (unsigned)s->cur_w, (unsigned)s->cur_h,
 				     mode_kind_name(mode->kind), (unsigned)flen, (unsigned long long)s->frames_dropped);
-			if (raw_packets)
-				break;
 		}
 	report_statistics:
 		if (abort_stream || !pump)
@@ -1968,8 +2059,8 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			uvc_bulk_pump_snapshot(pump, &stats);
 			blog(LOG_INFO,
 			     "uvc: event=progress epoch=%u format=%s width=%u height=%u fps=%.2f usb_MBps=%.2f "
-			     "frames=%llu bad_frames=%llu queue_drops=%llu usb_errors=%llu parser_gaps=%llu "
-			     "ready_peak=%u compacted_bytes=%llu submit_avg_us=%llu submit_max_us=%llu queue_age_max_us=%llu",
+			     "frames=%llu bad_frames=%llu queue_drops=%llu usb_errors=%llu timeouts=%llu stalls=%llu overflows=%llu io_errors=%llu parser_gaps=%llu "
+			     "ready_peak=%u ready_capacity=%u compacted_bytes=%llu urbs_per_s=%llu submit_avg_us=%llu submit_max_us=%llu queue_age_max_us=%llu",
 			     capture_epoch, mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h,
 			     (double)(s->frames_out - stats_frames) * 1000000000.0 /
 				     (double)(stats_now - stats_start_ns),
@@ -1977,12 +2068,17 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				     (double)(stats_now - stats_start_ns),
 			     (unsigned long long)s->frames_out, (unsigned long long)s->frames_dropped,
 			     (unsigned long long)stats.dropped_blocks, (unsigned long long)stats.errors,
-			     (unsigned long long)parser_gaps, stats.ready_high_water,
+			     (unsigned long long)stats.timeouts, (unsigned long long)stats.stalls,
+			     (unsigned long long)stats.overflows, (unsigned long long)stats.io_errors,
+			     (unsigned long long)parser_gaps, stats.ready_high_water, stats.ready_capacity,
 			     (unsigned long long)st.input.compacted_bytes,
+			     (unsigned long long)((stats.transfers - stats_urbs) * 1000000000ULL /
+						  (stats_now - stats_start_ns)),
 			     (unsigned long long)(submit_count ? submit_total_ns / submit_count / 1000 : 0),
 			     (unsigned long long)(submit_max_ns / 1000), (unsigned long long)(max_queue_age_ns / 1000));
 			stats_start_ns = stats_now;
 			stats_bytes = stats.received_bytes;
+			stats_urbs = stats.transfers;
 			stats_frames = s->frames_out;
 		}
 		if (abort_stream)
@@ -1997,12 +2093,13 @@ out:
 	if (d.h) {
 		if (streaming)
 			blog(LOG_INFO, "uvc: 离开 bulk 流循环");
-		libusb_release_interface(d.h, d.vs_iface >= 0 ? d.vs_iface : 0);
+		if (vs_claimed)
+			libusb_release_interface(d.h, d.vs_iface);
 		libusb_close(d.h); /* auto_detach 开着时内核驱动会在这里重新绑回去 */
 	}
 	if (d.ctx)
 		libusb_exit(d.ctx);
-	if (d.bridge_fd > 0)
+	if (d.bridge_fd >= 0)
 		obs_android_usb_close(d.bridge_fd); /* fd 归 Java，只还不关 */
 	bfree(st.input.storage);
 	if (st.frame_buf)
@@ -2037,8 +2134,8 @@ static void *uvc_thread_main(void *arg)
 			retry_ms = RETRY_BACKOFF_MIN_MS;
 		} else if (++dead_rounds >= DEAD_ROUND_LIMIT) {
 			retry_ms = DEAD_ROUND_BACKOFF_MS;
-			set_status(s, "设备无响应（已连续 %u 轮送不出帧），请拔插设备…", dead_rounds);
-			blog(LOG_WARNING, "uvc: 连续 %u 轮送不出帧，实例疑似猝死，退避 %llu ms（建议拔插设备）",
+			set_status(s, "设备无响应（已连续 %u 轮送不出帧），正在自动重连…", dead_rounds);
+			blog(LOG_WARNING, "uvc: 连续 %u 轮送不出帧，自动重连退避 %llu ms",
 			     dead_rounds, (unsigned long long)retry_ms);
 		} else {
 			/* 本轮有进展（claim 上了接口）就重置退避：真断流/拔线才让等待指数拉长 */

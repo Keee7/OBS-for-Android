@@ -100,6 +100,13 @@ private:
 	std::vector<std::unique_ptr<WidgetInfo>> children;
 	std::string lastFocused;
 	QWidget *lastWidget = nullptr;
+	/* 重建（RefreshProperties）会把整棵控件树 deleteLater + 重建，输入到一半的文本控件
+	 * 光靠 lastFocused 恢复焦点还不够：AddText 走 setText()，光标会被推到行尾、选区全丢。
+	 * 这对 Android 影响最大 —— 编辑语境（IME composing）绑在具体控件上，光标一跳到行尾
+	 * 就等于把正在输入的字丢掉。这里在拆旧树之前把光标/选区记下来，重建后照原样放回去。 */
+	int lastCursorPos = -1;
+	int lastSelStart = -1;
+	int lastSelEnd = -1;
 	bool deferUpdate;
 	bool enableDefer = true;
 	bool disableScrolling = false;

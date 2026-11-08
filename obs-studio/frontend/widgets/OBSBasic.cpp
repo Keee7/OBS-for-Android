@@ -28,6 +28,7 @@
 #ifdef __ANDROID__
 #include <utility/AndroidCodecCapabilities.hpp>
 #include "OBSAndroidBrowser.hpp"
+#include "OBSAndroidAudio.hpp"
 #include "OBSAndroidPath.hpp"
 #include "OBSAndroidDisplay.hpp" // 3-4 校形探针日志（logcat tag OBS-display）
 #include "OBSAndroidKeepAlive.hpp"
@@ -1245,6 +1246,8 @@ void OBSBasic::OBSInit()
 	obsAndroidStorageInit();
 	if (!OBSAndroidBrowserInit())
 		blog(LOG_WARNING, "Android browser host registration failed");
+	if (!OBSAndroidAudioInit())
+		blog(LOG_WARNING, "Android audio host registration failed");
 #endif
 	App()->loadAppModules(mfi);
 

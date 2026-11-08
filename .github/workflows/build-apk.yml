@@ -1,0 +1,214 @@
+name: Build Android APK
+
+# 触发：
+#   push 到 main           → 构建；有密钥则签名
+#   push tag v*            → 构建 + 创建 GitHub Release
+#   pull_request           → 只构建不签名（fork 的 PR 拿不到 Secrets）
+#   workflow_dispatch      → 手动，可勾"签名 / 发布 Release"
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: '用 Secrets 里的密钥签名（需先配好 4 个 Secrets）'
+        type: boolean
+        default: true
+      create_release:
+        description: '构建成功后创建 GitHub Release 并上传 APK'
+        type: boolean
+        default: false
+
+# 同一 ref 的重复触发取消旧任务。tag 不取消：避免发出半截 Release。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build arm64-v8a APK
+    # Ubuntu 24.04：自带 JDK 17 与较新的系统库。NDK/Qt/SDK/Gradle/CMake 由脚本自己拉。
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    # 工作流级只给 read（默认最小权限）；这一级要 write 是因为"打 tag 时创建 Release"
+    # 需要 contents:write。只在 push tag（已完成过仓库写权限校验）或手动触发时才会走到发布那一步，
+    # PR 事件拿不到这个写权限。
+    permissions:
+      contents: write
+
+    env:
+      # 工具链版本。改这里 = 改 CI 工具链；缓存键里带这些值，改动会自动失效重建。
+      NDK_VERSION: r30
+      QT_VERSION: 6.9.3
+      CMAKE_VERSION: 3.31.6
+      GRADLE_VERSION: 8.14.3
+      BUILD_TOOLS: 36.0.0
+      PLATFORM: android-35
+      # 缓存目录（必须与下面 cache 的 path 一致）
+      TOOLS_ROOT: ${{ github.workspace }}/.ci-tools
+      # 下载物落在工作区外：它有几 GB，不该被工具链缓存反复打包。
+      DL_ROOT: ${{ runner.temp }}/obs-dl
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          # 7-Zip：Ubuntu 24.04 上 **p7zip-full 已变成 transitional 包**，不再提供
+          # /usr/bin/7z；提供二进制的是 7zip 包（7z/7za/7zr）。所以这里装 7zip。
+          # autoconf/automake/libtool：deps-android 里 freetype/speexdsp/fdk-aac/rnnoise
+          #   走 autoconf 系（defs.sh 的 _autoconf_dep 首行就是 autoreconf -fi），缺了会直接失败。
+          # nasm/yasm：备 x86 汇编路径（本包是 arm64，一般用不到，但装了更稳）。
+          # pkg-config/dpkg-dev：交叉 pkg-config 与 dpkg 架构查询。
+          sudo apt-get install -y --no-install-recommends \
+            7zip ninja-build build-essential curl unzip zip ca-certificates \
+            patch pkg-config dpkg-dev autoconf automake libtool nasm yasm
+          # 确认解包器真的在（脚本也会自己找一遍；早点失败更好定位）
+          for c in 7z 7zz 7za 7zr; do command -v "$c" >/dev/null 2>&1 && { echo "7-Zip: $c"; break; }; done
+          # 确认 autoreconf 就位（依赖构建的硬前提）
+          autoreconf --version | head -1
+
+      # ---- 依赖缓存：最慢的一环（FFmpeg + 13 个依赖）----
+      # 键里带 versions.sh/defs.sh/ffmpeg 补丁的内容哈希：依赖定义一变缓存即失效，
+      # 避免"用了旧二进制却以为源码编译过了"。
+      - name: Compute dependency cache key
+        id: depkey
+        run: |
+          set -euo pipefail
+          HASH="$(cat deps-android/versions.sh deps-android/defs.sh deps-android/build.sh \
+                  scripts/android-native-deps/ffmpeg-*.patch | sha256sum | cut -c1-16)"
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "依赖缓存键哈希=$HASH"
+
+      - name: Cache dependency sources and prebuilt libs
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps-android/src
+            deps-android/prebuilt
+          key: obsdeps-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-${{ steps.depkey.outputs.hash }}
+
+      - name: Cache Android toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOOLS_ROOT }}
+          key: obstools-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-cm${{ env.CMAKE_VERSION }}-bt${{ env.BUILD_TOOLS }}
+
+      # 独立一步恢复密钥：这样"有没有密钥"的判断只在一处，构建步骤里不再套条件表达式。
+      - name: Restore signing keystore from secrets
+        id: keystore
+        if: |
+          github.event_name != 'pull_request' &&
+          (github.event_name != 'workflow_dispatch' || inputs.sign)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "未配置 ANDROID_KEYSTORE_BASE64 —— 本次将只产出未签名 APK"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # tr -d 去掉换行：粘贴 Secrets 时很容易带回车，解码出来就是坏文件。
+          printf '%s' "$KEYSTORE_B64" | tr -d '\n\r' | base64 -d > "$RUNNER_TEMP/release.jks"
+          chmod 600 "$RUNNER_TEMP/release.jks"
+          # 立刻验一次：口令错/文件坏在这里暴露，而不是等到最后签名那一步。
+          keytool -list -keystore "$RUNNER_TEMP/release.jks" \
+            -storepass "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            -alias "${{ secrets.ANDROID_KEY_ALIAS }}" >/dev/null
+          echo "密钥库可用"
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build APK
+        env:
+          SIGN_KEYSTORE: ${{ steps.keystore.outputs.available == 'true' && format('{0}/release.jks', runner.temp) || '' }}
+          SIGN_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          SIGN_STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SIGN_KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: bash scripts/ci-build-android.sh
+
+      - name: Locate APK and checksum
+        id: apk
+        run: |
+          set -euo pipefail
+          # 脚本把最终产物路径写在这个文件里（签名过就是签名包，否则是未签名包）。
+          APK_FILE="$(cat build-fe-arm64-v8a-ci/.final-apk-path)"
+          [ -f "$APK_FILE" ] || { echo "FATAL: 路径文件指向的 APK 不存在：$APK_FILE"; exit 1; }
+          SHA="$(sha256sum "$APK_FILE" | cut -d' ' -f1)"
+          SIZE="$(stat -c %s "$APK_FILE")"
+          # 判定"是否签名"要按**文件名精确比对**，不能用 *release.apk 这类通配：
+          # 未签名包的路径里也常含 "release"（.../outputs/apk/release/xxx-unsigned.apk），
+          # 通配会把未签名的包误判成已签名，进而把一个装不上的包发成 Release。
+          SIGNED="no"
+          if [ "$(basename "$APK_FILE")" = "OBS-Android-arm64-v8a-release.apk" ]; then
+            SIGNED="yes"
+          fi
+          {
+            echo "path=$APK_FILE"
+            echo "name=$(basename "$APK_FILE")"
+            echo "sha256=$SHA"
+            echo "signed=$SIGNED"
+          } >> "$GITHUB_OUTPUT"
+          echo "APK       : $APK_FILE"
+          echo "SHA-256   : $SHA"
+          echo "签名      : $SIGNED"
+          {
+            echo "### APK 构建完成"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 文件 | \`$(basename "$APK_FILE")\` |"
+            echo "| SHA-256 | \`$SHA\` |"
+            echo "| 大小 | $SIZE 字节 |"
+            echo "| 已签名 | $SIGNED |"
+            echo "| ABI / API | arm64-v8a / minSdk 29 |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-android-apk-${{ github.sha }}
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release
+        # 只在打 v* tag 时发布（手动触发要先勾 create_release）；
+        # 且必须真的签过名 —— 发一个装不上的包比不发更糟。
+        if: |
+          steps.apk.outputs.signed == 'yes' &&
+          (startsWith(github.ref, 'refs/tags/v') ||
+           (github.event_name == 'workflow_dispatch' && inputs.create_release))
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.apk.outputs.path }}
+          generate_release_notes: true
+          body: |
+            OBS for Android —— arm64-v8a 自签名 release 包（用仓库维护者自己的密钥签名）。
+
+            | 项 | 值 |
+            | --- | --- |
+            | 文件 | `${{ steps.apk.outputs.name }}` |
+            | SHA-256 | `${{ steps.apk.outputs.sha256 }}` |
+
+            安装：`adb install -r <apk>`。此包与仓库里的 debug 测试包**签名不同**，
+            覆盖安装前请先备份配置（跨签名升级需要先卸载，用户数据会丢）。
+
+            未在真机验证的范围见仓库 README 的 Limitations 一节。
+          fail_on_unmatched_files: true

@@ -19,7 +19,10 @@ foreach ($source in @('obs-studio/frontend/widgets/OBSAndroidBrowser.cpp', 'obs-
     if ($LASTEXITCODE -ne 0) { throw "Android Qt JNI compilation failed: $source" }
 }
 $javac = Join-Path $DepsRoot 'jdk-17.0.12/bin/javac.exe'
-& $javac -source 17 -target 17 -Xlint:all -cp (Join-Path $DepsRoot 'android-35/android.jar') `
+# -encoding UTF-8 is required: these sources are UTF-8 (they carry Chinese comments), but
+# javac falls back to the host default (GBK on a zh-CN Windows) and then fails on every
+# non-ASCII character. Gradle compiles the same files fine, so this is a harness gap.
+& $javac -encoding UTF-8 -source 17 -target 17 -Xlint:all -cp (Join-Path $DepsRoot 'android-35/android.jar') `
     -d (Join-Path $DepsRoot 'java-classes') `
     (Join-Path $repo 'obs-studio/frontend/cmake/android/java/com/obsproject/studio/ObsCodecCapabilities.java') `
     (Join-Path $repo 'obs-studio/frontend/cmake/android/java/com/obsproject/studio/ObsBrowserHost.java')

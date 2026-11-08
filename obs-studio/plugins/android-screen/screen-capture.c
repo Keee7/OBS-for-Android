@@ -67,6 +67,9 @@
 #include "gpu-fallback.h"
 #include "capture-alpha.h"
 
+/* 回调上下文：源用弱引用、reader 用"退役 + 在册回调归零"。与相机源共用同一份实现。 */
+#include "../android-common/reader-ctx.h"
+
 /* 缓冲数。与相机同一笔账：头里两处把这变成硬前提 —— maxImages 至少 2 才谈得上
  * acquireLatestImage 的"丢旧留新"，而 acquire 数一旦等于 maxImages 又不 AImage_delete，
  * 之后一律 AMEDIA_IMGREADER_MAX_IMAGES_ACQUIRED。4 = 2（latest 的余量）+ 2（在途）。 */
@@ -104,10 +107,10 @@ struct screen_source {
 	_Atomic uint32_t width;
 	_Atomic uint32_t height;
 
-	/* 拆除协议那两个计数，形状抄相机：回调在 reader 自己的线程上跑，
-	 * 而 AImageReader_delete 不承诺 join 那条线程。 */
-	volatile long in_callback;
+	/* 拆除协议：shutting_down 只作快速短路，真正的闸门是 ctx（retire + 在册回调计数），
+	 * 形状与相机源一致，设计与取舍见 ../android-common/reader-ctx.h。 */
 	volatile long shutting_down;
+	struct reader_ctx *ctx;
 	volatile long native_resolution;
 	volatile long gpu_requested;
 	volatile long alpha_mode;
@@ -120,7 +123,6 @@ struct screen_source {
 
 	uint64_t next_try_ns;   // 退避的那道闸，见 RETRY_INTERVAL_NS
 	bool consent_asked;     // 一次 activate episode 只弹一次同意框，见 try_start 那段
-	bool cb_thread_maybe_live;
 	bool display_started;
 
 	/* 第一帧那台仪器的三个读数，都在 open_capture 里起、在 video_tick 里判。
@@ -162,7 +164,7 @@ static void drop_frame(struct screen_source *c, const char *why, int32_t a, int3
 /* 把一帧 RGBA 递给 libobs。
  * 与相机那次唯一的实质差别是"只有一个平面、四个字节一个像素"，所以这里的活几件：
  * 读元数据 → 夹裁剪矩形 → 递帧 → 数一下 alpha。 */
-static void push_frame(struct screen_source *c, AImage *image)
+static void push_frame(struct screen_source *c, obs_source_t *src, AImage *image)
 {
 	struct obs_source_frame out = {0};
 	int32_t fw = 0, fh = 0, planes = 0, row = 0, px = 0, len = 0;
@@ -259,37 +261,48 @@ static void push_frame(struct screen_source *c, AImage *image)
 		out.data[0] = straight;
 		out.linesize[0] = (uint32_t)stride;
 	}
-	obs_source_output_video(c->source, &out);
+	/* src 是回调进入工作区时取的强引用，不是 c->source：源可能已经销毁。 */
+	obs_source_output_video(src, &out);
 	bfree(straight);
 
 	c->frames_out++;
 	if (c->frames_out == 1)
-		obs_source_update_properties(c->source); // 属性页那句状态是"打开对话框那一刻"的快照
+		obs_source_update_properties(src); // 属性页那句状态是"打开对话框那一刻"的快照
 }
 
 /* reader 那条回调线程。契约与相机一致：不许在这儿碰源以外的东西、
  * 递完帧就把 AImage 还掉（还不掉就是 maxImages 之后一律 acquire 失败）。 */
 static void on_image_available(void *context, AImageReader *reader)
 {
-	struct screen_source *c = context;
+	struct reader_ctx *ctx = context;
 
-	os_atomic_inc_long(&c->in_callback);
+	/* enter 之前一个字段都不碰：retire 之后直接返回，而 ctx 比 source 活得久。 */
+	if (!reader_ctx_enter(ctx))
+		return;
 
-	if (os_atomic_load_long(&c->shutting_down) || !reader)
+	struct screen_source *c = reader_ctx_owner(ctx);
+	if (!c || os_atomic_load_long(&c->shutting_down) || !reader)
+		goto out;
+
+	/* 弱引用现取：源已进销毁流程时拿到 NULL，直接退。 */
+	obs_source_t *src = reader_ctx_source(ctx);
+	if (!src)
 		goto out;
 
 	AImage *image = NULL;
 	const media_status_t st = AImageReader_acquireLatestImage(reader, &image);
 	if (st != AMEDIA_OK || !image) {
 		drop_frame(c, "acquireLatestImage 没拿到帧", (int)st, 0);
+		obs_source_release(src);
 		goto out;
 	}
 
-	push_frame(c, image);
+	push_frame(c, src, image);
 	AImage_delete(image);
+	obs_source_release(src);
 
 out:
-	os_atomic_dec_long(&c->in_callback);
+	reader_ctx_leave(ctx);
 }
 
 /* ===================== P-18-e：系统内录（一路一份的泵） =====================
@@ -310,6 +323,11 @@ out:
 /* 一次最多取这么多帧：48k 下约 21 ms 的量。取空就睡 10 ms，所以正常情况每次都是"有一点就取一点"，
  * 这个数只是上限，不是要求攒够了才给（攒够了反倒是在自己给自己加延迟）。 */
 #define AUDIO_READ_FRAMES 1024
+
+/* 一发 PCM 最多扇给这么多颗源时走"锁里只搬引用"的快路径。要音的屏幕源本来就是一两颗，
+ * 给到 16 足够；真超过（用户堆了一堆屏幕源）就退回原来的"持锁推完"路径 —— 慢一点，
+ * 但绝不丢源。 */
+#define AUDIO_SINK_MAX 16
 
 /* Lifecycle lock serializes start/stop, including join and buffer destruction.
  * The pump never takes it. The sink lock protects the sink table and statistics;
@@ -362,31 +380,76 @@ static void *audio_pump_thread(void *param)
 			if (v > peak)
 				peak = v;
 		}
+
+		/* 锁里只干两件小事：更新峰值计数、把这张表里的源引用抄一份出来。
+		 * obs_source_output_audio() 会走进 libobs 的音频管线（可能拿别的锁、可能阻塞），
+		 * 而 audio_mx 的另一头是 UI 线程的 audio_state_line 与视频线程的 acquire/release ——
+		 * 把推帧和 blog 放在锁里，就是让它们等这条读线程把整批 PCM 推完。
+		 * 表里的每一格本来就自带引用（见文件上方那段），所以照搬引用号是安全的：
+		 * 期间就算有源被 release，它那份引用也还在这发快照的循环里撑着。 */
+		obs_source_t *snapshot[AUDIO_SINK_MAX];
+		size_t nsinks = 0;
+		bool overflow = false;
+
 		pthread_mutex_lock(&audio_mx);
 		if (peak > audio_peak_win)
 			audio_peak_win = peak;
-		if (peak > audio_peak_all) {
+		if (peak > audio_peak_all)
 			audio_peak_all = peak;
-			if (!audio_nonzero_logged) {
-				audio_nonzero_logged = true;
-				blog(LOG_INFO, "android-screen: 内录第一次量到非零样本（峰值 %d/32767，第 %llu 发）", peak,
-				     (unsigned long long)(audio_pushes + 1));
+
+		if (audio_sinks.num <= AUDIO_SINK_MAX) {
+			/* 锁外推帧，所以这里必须**各取一份自己的引用**：表里那份是表的所有权，
+			 * 解锁后并发的那一发 audio_pump_release 可能把它 release 掉，
+			 * 只抄裸指针就是拿着一个可能已经被 free 的源去推帧。 */
+			for (size_t i = 0; i < audio_sinks.num; i++) {
+				obs_source_t *ref = obs_source_get_ref(audio_sinks.array[i]);
+				if (ref)
+					snapshot[nsinks++] = ref;
+			}
+		} else {
+			overflow = true;
+		}
+		pthread_mutex_unlock(&audio_mx);
+
+		if (overflow) {
+			/* 源数超过 AUDIO_SINK_MAX（极罕见）：退回持锁推帧，宁可慢也不丢源。 */
+			pthread_mutex_lock(&audio_mx);
+			for (size_t i = 0; i < audio_sinks.num; i++)
+				obs_source_output_audio(audio_sinks.array[i], &out);
+			pthread_mutex_unlock(&audio_mx);
+		} else {
+			for (size_t i = 0; i < nsinks; i++) {
+				obs_source_output_audio(snapshot[i], &out);
+				obs_source_release(snapshot[i]);
 			}
 		}
 
-		for (size_t i = 0; i < audio_sinks.num; i++)
-			obs_source_output_audio(audio_sinks.array[i], &out);
+		/* 峰值日志也搬出锁。audio_nonzero_logged 只在锁内读一次、锁外写会有竞态，
+		 * 但它的用途只是"第一次量到非零时打一行"—— 极端并发下最多多打一行，不为它再上一把锁。 */
+		if (peak > 0 && !audio_nonzero_logged) {
+			audio_nonzero_logged = true;
+			blog(LOG_INFO, "android-screen: 内录第一次量到非零样本（峰值 %d/32767，第 %llu 发）", peak,
+			     (unsigned long long)(audio_pushes + 1));
+		}
 
+		pthread_mutex_lock(&audio_mx);
 		audio_frames_total += got;
 		audio_pushes++;
-		if (audio_pushes == 1 || (audio_pushes % 200) == 0) {
+		const bool log_now = (audio_pushes == 1 || (audio_pushes % 200) == 0);
+		const uint64_t total = audio_frames_total;
+		const uint64_t pushes = audio_pushes;
+		const int win = audio_peak_win;
+		const int all = audio_peak_all;
+		if (log_now)
+			audio_peak_win = 0;
+		pthread_mutex_unlock(&audio_mx);
+
+		if (log_now) {
 			blog(LOG_INFO,
 			     "android-screen: 内录第 %llu 发（本批 %u 帧，累计 %llu 帧 ≈ %.2f 秒；这一窗峰值 %d，本场峰值 %d，满量程 32767）",
-			     (unsigned long long)audio_pushes, got, (unsigned long long)audio_frames_total,
-			     (double)audio_frames_total / (double)audio_rate, audio_peak_win, audio_peak_all);
-			audio_peak_win = 0;
+			     (unsigned long long)pushes, got, (unsigned long long)total,
+			     (double)total / (double)audio_rate, win, all);
 		}
-		pthread_mutex_unlock(&audio_mx);
 	}
 	return NULL;
 }
@@ -552,30 +615,35 @@ static void close_capture(struct screen_source *c, const char *why)
 	if (c->reader) {
 		AImageReader_setImageListener(c->reader, NULL);
 
-		int waited_ms = 0;
-		while (os_atomic_load_long(&c->in_callback) > 0 && waited_ms < 2000) {
-			os_sleep_ms(1);
-			waited_ms++;
-		}
-		if (os_atomic_load_long(&c->in_callback) > 0) {
-			/* 宁漏一次 reader，也不在回调还在场的时候 delete 它。相机那边同样的话，
-			 * 同样的理由：AImageReader_delete 不 join 它的回调线程，而回调的 context 就是本结构。 */
-			c->cb_thread_maybe_live = true;
-			blog(LOG_ERROR, "android-screen: 等 2 秒回调线程仍未退出 onImageAvailable，"
-					"这次不 delete reader（宁可泄漏，不制造 use-after-free）");
-		} else {
-			c->cb_thread_maybe_live = false;
+		/* retire 之后不再放新回调进工作区；已在里面的靠 users 计数等。
+		 * 等的不是 in_callback —— 那个计数覆盖不到"框架已决定派发、尚未进入函数体"
+		 * 的那一段（NdkImageReader.h 既没承诺 delete 会 join，也没承诺 set NULL 之后
+		 * 不再派发），所以 retire 与 users 必须在同一把锁里完成，见 reader-ctx.h。 */
+		reader_ctx_retire(c->ctx);
+		if (reader_ctx_wait_idle(c->ctx, 2000)) {
+			/* 没人还在用 reader：队列里未消费的 AImage 由 delete 一并归还系统。
+			 * shutting_down 到这里才允许回落 —— 原来那句无条件清零会让 try_start
+			 * 在回调仍被挂起时立刻再开一路，旧回调的闸门也就跟着开了。 */
+			reader_ctx_set_owner(c->ctx, NULL);
 			AImageReader_delete(c->reader);
+			c->ctx = NULL;
+			os_atomic_set_long(&c->shutting_down, 0);
+		} else {
+			/* 兜底：回调被系统挂起，delete 会与它撞车。reader 留着（连带队列里
+			 * 那几块 AImage），owner 也留着；shutting_down 保持 1 让 try_start
+			 * 不再重开 —— 隔离本源比"再开一路撞上去"便宜。 */
+			blog(LOG_ERROR, "android-screen: 等 2 秒回调仍未退出，这次不 delete reader"
+					"（隔离本源、不再重开，宁可泄漏，不制造 use-after-free）");
 		}
+
 		c->reader = NULL;
 		c->window = NULL; // 归 reader 所有，跟着它一起没了
+
 	}
 
 	c->width = 0;
 	c->height = 0;
-	os_atomic_set_long(&c->shutting_down, 0);
 }
-
 static bool capture_size(struct screen_source *c, uint32_t *w, uint32_t *h, uint32_t *dpi)
 {
 	if (!obs_android_screen_display_size(w, h, dpi))
@@ -594,6 +662,15 @@ static bool open_capture(struct screen_source *c)
 	c->opened_ns = os_gettime_ns();
 	c->frames_at_open = c->frames_out;
 	c->no_frame_warned = false;
+
+	/* 上一场拆除时回调没退干净（close 超时、reader 已留作兜底）：旧 ctx 可能还有
+	 * "已决定派发、尚未进入函数体" 的回调要来读它。此时再开一路只会两路抢同一颗源，
+	 * 而且下面会把 c->ctx 覆盖掉、旧的那份彻底失联。和 camera 的 open_capture_locked
+	 * 同一个闸门，别只靠 try_start 那一处 —— open_capture 还有别的调用者。 */
+	if (!reader_ctx_wait_idle(c->ctx, 0)) {
+		set_error(c, "上一场采集的回调仍未退出，暂不重开");
+		return false;
+	}
 
 	if (!capture_size(c, &w, &h, &dpi)) {
 		set_error(c, "问不到屏幕尺寸（总线未接线，或 Java 侧读不到显示模式）");
@@ -623,7 +700,24 @@ static bool open_capture(struct screen_source *c)
 		return false;
 	}
 
-	AImageReader_ImageListener listener = {c, on_image_available};
+	/* 每次开流一份新 ctx。上一份在 close 里已经 retire，不能复用（复用等于把
+	 * "已决定派发"的旧回调重新放进工作区）。ctx 有意比采集结构体活得久，
+	 * 所以这里只 retire、不释放 —— 见 reader-ctx.h。 */
+	struct reader_ctx *fresh = reader_ctx_create(c->source);
+	if (!fresh) {
+		set_error(c, "建回调上下文失败（内存不足）");
+		close_capture(c, "上下文没建成");
+		return false;
+	}
+	/* 覆盖之前先把上一份 retire 掉：close 正常走完时它已经是 retired（幂等），
+	 * 但打开失败等路径可能留下一个从未 retire 的旧 ctx。只 retire、不释放 ——
+	 * reader-ctx.h 写明 ctx 必须比采集结构体活得久。 */
+	reader_ctx_retire(c->ctx);
+	reader_ctx_set_owner(fresh, c);
+	c->ctx = fresh;
+	os_atomic_set_long(&c->shutting_down, 0);
+
+	AImageReader_ImageListener listener = {c->ctx, on_image_available};
 	if (AImageReader_setImageListener(c->reader, &listener) != AMEDIA_OK) {
 		set_error(c, "AImageReader_setImageListener 失败");
 		close_capture(c, "监听没挂上");
@@ -672,8 +766,15 @@ static void try_start(struct screen_source *c)
 	obs_enter_graphics();
 	bool gpu_open = c->gpu_pending || c->gpu_host;
 	obs_leave_graphics();
-	if (c->reader || gpu_open || os_atomic_load_long(&c->shutting_down))
+	if (c->reader || gpu_open)
 		return;
+	if (os_atomic_load_long(&c->shutting_down)) {
+		/* 上一场拆除时回调没退干净，close 把闸门留在了 1（隔离）。等它真退了再放开，
+		 * 否则会在旧回调还在的时候再开一路。 */
+		if (!reader_ctx_wait_idle(c->ctx, 0))
+			return;
+		os_atomic_set_long(&c->shutting_down, 0);
+	}
 
 	if (!obs_android_screen_ready()) {
 		set_error(c, "屏幕总线没接线（前端没注册，或注册晚于建源）");
@@ -760,6 +861,20 @@ static void *screen_create(obs_data_t *settings, obs_source_t *source)
 	}
 
 	c->source = source;
+	/* 回调上下文独立于 c 分配：c 会被 bfree，而"已决定派发"的回调仍会来读它。
+	 * GPU 路径这一版还不经过 reader，但 ctx 一起建出来，destroy/close 的路径就只有一条。 */
+	c->ctx = reader_ctx_create(source);
+	if (!c->ctx) {
+		/* 建不出 ctx 就别把源交出去：没有它，回调一进来就没法安全地认领源，
+		 * 这条源的采集永远开不起来（open_capture 会用 reader_ctx_* 一路走下去）。
+		 * 返回 NULL 让 obs_source_create 报错，比给一个"建好了但用不了"的源干净。 */
+		blog(LOG_ERROR, "android-screen: 建回调上下文失败（内存不足），不建本源");
+		pthread_mutex_destroy(&c->status_mx);
+		pthread_mutex_destroy(&c->lifecycle_mx);
+		bfree(c);
+		return NULL;
+	}
+	reader_ctx_set_owner(c->ctx, c);
 	os_atomic_inc_long(&live_sources);
 	os_atomic_set_long(&c->native_resolution, obs_data_get_bool(settings, "native_resolution"));
 	long alpha = (long)obs_data_get_int(settings, "alpha_mode");
@@ -797,14 +912,17 @@ static void screen_destroy(void *data)
 		obs_android_screen_release_consent();
 	}
 
-	if (c->cb_thread_maybe_live) {
-		/* reader 回调线程可能还握着 context=&c ⇒ data 不能放。相机那边同一格同样的处置
-		 * （camera2-input.c:1425 那段）：故意泄漏，比随机崩在一个已被复用的堆块上便宜。
-		 * 正常路径走不到这里 —— 等待环有 2 秒，而回调体里除了 obs_source_output_video 没有别的阻塞点。 */
-		blog(LOG_ERROR, "android-screen: 源 '%s' 的回调线程可能还在场 —— 这次不释放 data（故意泄漏）",
+	if (!reader_ctx_wait_idle(c->ctx, 0)) {
+		/* reader 回调线程仍在工作区里 ⇒ data 不能放。相机那边同一格同样的处置
+		 * （camera2-input.c 的 destroy）：故意泄漏，比随机崩在一个已被复用的堆块上便宜。
+		 * 回调的 context 已经是 ctx 而不是 &c，但 ctx->owner 仍指着 c，所以 users 归零
+		 * 之前 bfree(c) 依然是 UAF。 */
+		blog(LOG_ERROR, "android-screen: 源 '%s' 的回调线程仍在场 —— 这次不释放 data（故意泄漏）",
 		     obs_source_get_name(c->source));
 		return;
 	}
+	reader_ctx_set_owner(c->ctx, NULL);
+	c->ctx = NULL;
 
 	pthread_mutex_destroy(&c->status_mx);
 	pthread_mutex_destroy(&c->lifecycle_mx);

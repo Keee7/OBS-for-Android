@@ -44,6 +44,7 @@ EXPORT void device_android_encoder_surface_destroy(gs_android_encoder_surface_t 
 EXPORT gs_android_external_texture_t *device_android_external_texture_create(gs_device_t *, uint32_t, uint32_t);
 EXPORT uint32_t device_android_external_texture_get_id(gs_android_external_texture_t *);
 EXPORT gs_texture_t *device_android_external_texture_render(gs_android_external_texture_t *, const float *);
+EXPORT bool device_android_external_texture_set_buffer(gs_android_external_texture_t *, void *ahardware_buffer);
 EXPORT void device_android_external_texture_destroy(gs_android_external_texture_t *);
 #endif
 EXPORT gs_swapchain_t *device_swapchain_create(gs_device_t *device, const struct gs_init_data *data);

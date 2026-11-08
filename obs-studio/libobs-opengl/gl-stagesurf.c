@@ -17,6 +17,16 @@
 
 #include "gl-subsystem.h"
 
+/* 一行的字节数。必须与下面 glReadPixels 的实际落盘宽度一致：GL 默认 PACK_ALIGNMENT=4，
+ * 每行按 4 字节对齐（1/2 字节每像素的格式 —— GS_R8 / GS_R8G8，比如 NV12 那两个色度平面
+ * 取 width/2 —— 遇到奇数宽度时对齐会多出 1~3 字节）。allocate 与 map 两处原先各算各的：
+ * 分配走对齐（(size+3)&~3），map 报的是**未对齐**的 bytes_per_pixel*width，于是消费方
+ * 按窄行距去读一块宽行距的缓冲，从第二行起整幅画面右移、错位随行数累积。 */
+static inline uint32_t stage_row_stride(const struct gs_stage_surface *surf)
+{
+	return (surf->bytes_per_pixel * surf->width + 3) & ~3u;
+}
+
 static bool create_pixel_pack_buffer(struct gs_stage_surface *surf)
 {
 	GLsizeiptr size;
@@ -28,8 +38,7 @@ static bool create_pixel_pack_buffer(struct gs_stage_surface *surf)
 	if (!gl_bind_buffer(GL_PIXEL_PACK_BUFFER, surf->pack_buffer))
 		return false;
 
-	size = surf->width * surf->bytes_per_pixel;
-	size = (size + 3) & 0xFFFFFFFC; /* align width to 4-byte boundary */
+	size = stage_row_stride(surf);
 	size *= surf->height;
 
 	glBufferData(GL_PIXEL_PACK_BUFFER, size, 0, GL_DYNAMIC_READ);
@@ -215,7 +224,7 @@ bool gs_stagesurface_map(gs_stagesurf_t *stagesurf, uint8_t **data, uint32_t *li
 
 	gl_bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
 
-	*linesize = stagesurf->bytes_per_pixel * stagesurf->width;
+	*linesize = stage_row_stride(stagesurf);
 	return true;
 
 fail:

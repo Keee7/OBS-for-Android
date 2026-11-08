@@ -21,11 +21,12 @@ import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
 import android.os.Build;
+import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.Map;
 
 public final class ObsUsbHost {
     private static final String TAG = "OBS-usb";
@@ -47,8 +48,22 @@ public final class ObsUsbHost {
     private static UsbReceiver receiver;
     private static boolean receiverRegistered = false;
 
-    /** 按设备名索引的已打开连接，close 时按 fd 反查 */
-    private static final LinkedHashMap<String, UsbDeviceConnection> connections = new LinkedHashMap<>();
+    /** 当前设备的独占借用；断开后仍保留 loan，直到 native 归还 fd。 */
+    private static final LinkedHashMap<String, Loan> connections = new LinkedHashMap<>();
+    private static final HashMap<Integer, Loan> loans = new HashMap<>();
+
+    private static final class Loan {
+        final String name;
+        final UsbDeviceConnection connection;
+        final ParcelFileDescriptor descriptor;
+        boolean disconnected;
+
+        Loan(String name, UsbDeviceConnection connection, ParcelFileDescriptor descriptor) {
+            this.name = name;
+            this.connection = connection;
+            this.descriptor = descriptor;
+        }
+    }
 
     /** 快照协议的分隔符。设备名是内核给的（/dev/bus/usb/NNN/MMM）不会含；产品名是设备
      *  自己上报的描述符字符串，属于不可信输入，必须过 scrub() 才能进串。 */
@@ -203,17 +218,13 @@ public final class ObsUsbHost {
             Log.w(TAG, "openFd(" + name + ")：还没有 USB 权限，先 requestPermission");
             return -1;
         }
-        UsbDeviceConnection existing = connections.get(name);
-        if (existing != null) {
-            /* 节点号会被内核复用：缓存连接可能属于拔掉前的旧设备实例，fd 看着活着其实
-             * 是死的（真机症状：描述符能读、GET probe 永远 -1）。一律关旧开新，
-             * 死 fd 绝不往 native 递。 */
-            Log.w(TAG, "openFd(" + name + ")：关闭缓存连接（fd=" + existing.getFileDescriptor() + "）重开，防拔插后的死 fd");
-            connections.remove(name);
-            existing.close();
+        if (connections.containsKey(name)) {
+            Log.w(TAG, "openFd(" + name + ")：设备正在使用 (busy)");
+            return -1;
         }
-        if (connections.size() >= MAX_CONNECTIONS) {
-            Log.e(TAG, "openFd(" + name + ")：连接数已达上限 " + MAX_CONNECTIONS + "，拒绝再开");
+        // Detached loans count too: their descriptors stay reserved until native returns them.
+        if (loans.size() >= MAX_CONNECTIONS) {
+            Log.e(TAG, "openFd(" + name + ")：连接数已达上限 " + MAX_CONNECTIONS);
             return -1;
         }
         UsbDeviceConnection conn = manager.openDevice(d);
@@ -227,45 +238,62 @@ public final class ObsUsbHost {
             conn.close();
             return -1;
         }
-        connections.put(name, conn);
-        Log.i(TAG, "openFd(" + name + ") = " + fd);
-        return fd;
+        final ParcelFileDescriptor descriptor;
+        try {
+            descriptor = ParcelFileDescriptor.fromFd(fd);
+        } catch (IOException | RuntimeException e) {
+            Log.e(TAG, "openFd(" + name + ")：复制 fd 失败", e);
+            conn.close();
+            return -1;
+        }
+        Loan loan = new Loan(name, conn, descriptor);
+        int loanFd = descriptor.getFd();
+        connections.put(name, loan);
+        loans.put(loanFd, loan);
+        Log.i(TAG, "openFd(" + name + ") = " + loanFd);
+        return loanFd;
     }
 
-    /** 按 fd 反查连接并关闭；找不到就什么都不做（可能是 native 侧自己造的 fd）。 */
+    /** 归还 native 借用的 fd；调用方必须对每次成功借用恰好归还一次。 */
     public static synchronized void closeFd(int fd) {
-        if (fd < 0)
-            return;
-        String key = null;
-        UsbDeviceConnection conn = null;
-        for (Map.Entry<String, UsbDeviceConnection> e : connections.entrySet()) {
-            if (e.getValue().getFileDescriptor() == fd) {
-                key = e.getKey();
-                conn = e.getValue();
-                break;
-            }
-        }
-        if (conn == null) {
+        Loan loan = loans.remove(fd);
+        if (loan == null) {
             Log.i(TAG, "closeFd(" + fd + ")：不是本类打开的连接，忽略");
             return;
         }
-        connections.remove(key);
-        conn.close();
-        Log.i(TAG, "closeFd(" + fd + ") 已关闭 " + key);
+        if (connections.get(loan.name) == loan)
+            connections.remove(loan.name);
+        if (!loan.disconnected)
+            loan.connection.close();
+        try {
+            loan.descriptor.close();
+        } catch (IOException e) {
+            Log.w(TAG, "closeFd(" + fd + ")：关闭借用 fd 失败", e);
+        }
+        Log.i(TAG, "closeFd(" + fd + ") 已关闭 " + loan.name);
     }
 
-    /** 设备拔了要把连接关掉再丢，否则 fd 漏在表里（设备已拔，native 的 closeFd 再也找不到它）。 */
+    private static void disconnect(String name) {
+        Loan loan = connections.remove(name);
+        if (loan != null) {
+            loan.disconnected = true;
+            loan.connection.close();
+            Log.i(TAG, "断开 USB 连接 " + name + "，等待 native 归还 fd");
+        }
+    }
+
     private static synchronized void dropDisconnected() {
         if (manager == null)
             return;
         HashMap<String, UsbDevice> present = manager.getDeviceList();
-        connections.entrySet().removeIf(e -> {
-            if (present.containsKey(e.getKey()))
-                return false;
-            e.getValue().close();
-            Log.i(TAG, "dropDisconnected：关闭并移除 " + e.getKey());
-            return true;
-        });
+        for (String name : new java.util.ArrayList<>(connections.keySet())) {
+            if (!present.containsKey(name))
+                disconnect(name);
+        }
+    }
+
+    private static synchronized void detach(String name) {
+        disconnect(name);
     }
 
     private static final class UsbReceiver extends BroadcastReceiver {
@@ -293,9 +321,7 @@ public final class ObsUsbHost {
                 UsbDevice d = Build.VERSION.SDK_INT >= 33 ? intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice.class)
                                                           : intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                 if (d != null) {
-                    UsbDeviceConnection conn = connections.remove(d.getDeviceName());
-                    if (conn != null)
-                        conn.close(); /* 只 remove 不 close 会漏 fd */
+                    detach(d.getDeviceName());
                 }
             }
             dropDisconnected();

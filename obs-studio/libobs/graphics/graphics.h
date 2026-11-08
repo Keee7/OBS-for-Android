@@ -316,6 +316,10 @@ EXPORT uint32_t gs_android_external_texture_get_id(gs_android_external_texture_t
 /* The returned texture belongs to the external-texture handle. */
 EXPORT gs_texture_t *gs_android_external_texture_render(gs_android_external_texture_t *texture,
 							const float transform[16]);
+/* Reader mode: bind an AHardwareBuffer (an EGLImage is created and sampled on
+ * the GPU, no pixel copy). The buffer must stay valid until the next call; the
+ * previous image is released here, one frame after its last use. */
+EXPORT bool gs_android_external_texture_set_buffer(gs_android_external_texture_t *texture, void *ahardware_buffer);
 EXPORT void gs_android_external_texture_destroy(gs_android_external_texture_t *texture);
 #endif
 typedef struct graphics_subsystem graphics_t;

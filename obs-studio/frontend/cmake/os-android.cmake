@@ -28,6 +28,9 @@ target_sources(
     # USB host 总线（obs_android_usb_*）的前端注册（Java 侧 .../ObsUsbHost.java，
     # 自 android-shell/obs_usb_host.cpp 移植），给 android-capture 的 UVC 源用。
     widgets/OBSAndroidBrowser.cpp
+    # 音频输入设备总线（obs_android_audio_*）的前端注册（Java 侧 .../ObsAudioHost.java，
+    # 自 android-shell/obs_audio_host.cpp 移植）。AAudio 采集源据此列出 USB 声卡等输入。
+    widgets/OBSAndroidAudio.cpp
     widgets/OBSAndroidUsb.cpp
     # 3-4：桌面 "openUrl(本地路径)" 的 Android 替代（显示路径 + 复制剪贴板）。
     widgets/OBSAndroidPath.cpp
@@ -181,8 +184,12 @@ set_target_properties(
     # 清单与 FileProvider 的 paths 都在 cmake/android/ 下自带；一旦设了这个变量，
     # androiddeployqt 就不再拿自己的模板覆盖清单（同 android-shell 的做法）。
     QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/android"
-    QT_ANDROID_VERSION_NAME "0.1.12-uvc60-test"
-    QT_ANDROID_VERSION_CODE 13
+    # 真正生效的是 cmake/android/AndroidManifest.xml 里那对 versionCode/versionName
+    # （设了 QT_ANDROID_PACKAGE_SOURCE_DIR 之后 androiddeployqt 用自带清单，不再拿模板覆盖）。
+    # 这两行只是 androiddeployqt 的默认值，出包前必须与清单保持一致，否则 aapt2 报的版本
+    # 和这里看到的是两个数 —— 三处版本号不一致就是这么来的。
+    QT_ANDROID_VERSION_NAME "0.1.18-alpha-vsync-fix"
+    QT_ANDROID_VERSION_CODE 19
     QT_ANDROID_COMPILE_SDK_VERSION 35
     QT_ANDROID_TARGET_SDK_VERSION 35
     QT_ANDROID_MIN_SDK_VERSION 29)

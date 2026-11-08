@@ -213,9 +213,19 @@ static QRect AndroidWindowRectPx(QWidget *w)
 
 void OBSQTDisplay::syncAndroidGeometry()
 {
-	if (destroying || androidSuspended || !display || !isVisible() ||
-	    !obsAndroidDisplayIsLifecycleOwner(this))
+	if (destroying || androidSuspended || !isVisible() || !obsAndroidDisplayIsLifecycleOwner(this))
 		return;
+
+	/* 建面失败过就会一直是 NULL（attach 时 Java 那块面还没回来、acquire 拿不到
+	 * ANativeWindow、obs_display_create 返 NULL 都会走到），而这一秒一拍的回调是
+	 * 失败之后**唯一还会周期性跑到这儿的地方** —— 原先它也在这行早退，于是预览就永久黑着，
+	 * 只能靠用户手动开关源属性/旋转之类的偶然路径再撞一次 CreateDisplay。这里补一次重试；
+	 * CreateDisplay 自己会查 isExposed、attach、认领槽，重复调是幂等的。 */
+	if (!display) {
+		CreateDisplay();
+		if (!display)
+			return;
+	}
 	const QRect r = AndroidWindowRectPx(this);
 	if (r.width() <= 0 || r.height() <= 0)
 		return;

@@ -35,6 +35,7 @@ struct gs_exports {
 	gs_android_external_texture_t *(*device_android_external_texture_create)(gs_device_t *, uint32_t, uint32_t);
 	uint32_t (*device_android_external_texture_get_id)(gs_android_external_texture_t *);
 	gs_texture_t *(*device_android_external_texture_render)(gs_android_external_texture_t *, const float *);
+	bool (*device_android_external_texture_set_buffer)(gs_android_external_texture_t *, void *);
 	void (*device_android_external_texture_destroy)(gs_android_external_texture_t *);
 #endif
 	const char *(*device_get_name)(void);

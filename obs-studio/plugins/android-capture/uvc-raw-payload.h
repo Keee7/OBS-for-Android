@@ -54,7 +54,9 @@ static inline int uvc_raw_payload_feed(struct uvc_raw_payload_state *s, const ui
 	const uint8_t hle = payload[0], bmh = payload[1];
 	const bool pts_present = (bmh & 0x04) != 0;
 	const unsigned expected_hle = 2U + (pts_present ? 4U : 0U) + ((bmh & 0x08) ? 6U : 0U);
-	if ((bmh & 0x90) != 0x80 || hle != expected_hle || hle > length) {
+	/* The USB transfer supplies the payload boundary, so EOH is not needed
+	 * for synchronization. Extra header bytes are metadata, not pixels. */
+	if ((bmh & 0x10) || hle < expected_hle || hle > length) {
 		uvc_raw_payload_discard(s);
 		return 0;
 	}

@@ -564,15 +564,21 @@ int obs_android_storage_open(const char *uri, const char *mode) { return storage
 
 static const struct obs_android_browser_host *browser_host;
 void obs_android_set_browser_host(const struct obs_android_browser_host *host) { browser_host = host; }
-void *obs_android_browser_create(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css)
+void *obs_android_browser_create(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css,
+				 bool transparent)
 {
  const struct obs_android_browser_host *h = browser_host;
- return h && h->create ? h->create(texture, width, height, url, css) : NULL;
+ return h && h->create ? h->create(texture, width, height, url, css, transparent) : NULL;
 }
 int obs_android_browser_update(void *handle, float transform[16])
 {
  const struct obs_android_browser_host *h = browser_host;
  return h && h->update && handle && transform ? h->update(handle, transform) : -1;
+}
+void *obs_android_browser_take_buffer(void *handle)
+{
+ const struct obs_android_browser_host *h = browser_host;
+ return h && h->take_buffer && handle ? h->take_buffer(handle) : NULL;
 }
 void obs_android_browser_reload(void *handle)
 {

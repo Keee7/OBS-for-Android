@@ -4,6 +4,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <android/native_window.h>
+#include <android/hardware_buffer.h>
 #include <string.h>
 #include "gl-subsystem.h"
 
@@ -13,6 +14,12 @@
 #endif
 #ifndef EGL_RECORDABLE_ANDROID
 #define EGL_RECORDABLE_ANDROID 0x3142
+#endif
+#ifndef EGL_NATIVE_BUFFER_ANDROID
+#define EGL_NATIVE_BUFFER_ANDROID 0x3140
+#endif
+#ifndef EGL_IMAGE_PRESERVED_KHR
+#define EGL_IMAGE_PRESERVED_KHR 0x30D2
 #endif
 
 /* OBS FBOs use a top-down texture convention. Flip once when crossing the
@@ -165,6 +172,14 @@ gs_android_encoder_surface_t *device_android_encoder_surface_create(gs_device_t 
 		goto fail;
 	if (!eglMakeCurrent(s->display, s->surface, s->surface, s->context))
 		goto fail;
+	/* 这块面是 MediaCodec 的输入队列，不是屏幕：必须立即返回。
+	 * EGL 默认 swap interval=1，eglSwapBuffers 会等下一个 vsync；只要有一帧
+	 * 错过边界，视频线程就被锁到 30fps（60 的一半），随后 OBS 的追赶循环
+	 * 又在一瞬间连发几十帧，把推流码率顶到 20Mbps 以上。X11/Wayland 后端
+	 * 都是这么关的。 */
+	if (eglSwapInterval(s->display, 0) == EGL_FALSE)
+		blog(LOG_WARNING, "Android interop: eglSwapInterval(0) 失败（0x%x），编码帧率会被 vsync 量化",
+		     eglGetError());
 	s->srgb_write_control = has_gl_extension("GL_EXT_sRGB_write_control");
 	s->program = create_program(encoder_fragment);
 	if (s->program) {
@@ -347,6 +362,11 @@ struct external_texture {
 	GLint transform, image;
 	gs_texture_t *output;
 	uint32_t width, height;
+	/* Set only when frames arrive as AHardwareBuffers (reader mode). */
+	EGLDisplay egl_display;
+	EGLImageKHR egl_image;
+	PFNEGLCREATEIMAGEKHRPROC create_image;
+	PFNEGLDESTROYIMAGEKHRPROC destroy_image;
 };
 
 gs_android_external_texture_t *device_android_external_texture_create(gs_device_t *device, uint32_t width,
@@ -423,11 +443,120 @@ gs_texture_t *device_android_external_texture_render(gs_android_external_texture
 	return ok ? t->output : NULL;
 }
 
+bool device_android_external_texture_set_buffer(gs_android_external_texture_t *texture, void *hardware_buffer)
+{
+	struct external_texture *t = texture;
+	if (!t || !t->external || !hardware_buffer)
+		return false;
+
+	if (t->egl_display == EGL_NO_DISPLAY)
+		t->egl_display = eglGetCurrentDisplay();
+	if (t->egl_display == EGL_NO_DISPLAY)
+		t->egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+	if (!t->create_image)
+		t->create_image = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+	if (!t->destroy_image)
+		t->destroy_image = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
+	if (t->egl_display == EGL_NO_DISPLAY || !t->create_image || !t->destroy_image || !glEGLImageTargetTexture2DOES) {
+		static bool warned;
+		if (!warned) {
+			warned = true;
+			blog(LOG_ERROR, "Android interop: EGL image entry points unavailable (display=%p create=%p destroy=%p)",
+			     (void *)t->egl_display, (void *)t->create_image, (void *)t->destroy_image);
+		}
+		return false;
+	}
+
+	/* Replace one frame late on purpose: the command stream submitted last
+	 * frame may still be sampling the previous image, and the producer only
+	 * recycles a buffer once its AHardwareBuffer is released. */
+	if (t->egl_image != EGL_NO_IMAGE_KHR) {
+		t->destroy_image(t->egl_display, t->egl_image);
+		t->egl_image = EGL_NO_IMAGE_KHR;
+	}
+	/* EGL_IMAGE_PRESERVED_KHR is not part of EGL_ANDROID_image_native_buffer
+	 * and the driver rejects it for AHardwareBuffers (EGL_BAD_PARAMETER), so
+	 * no attributes are passed. */
+	/* Different drivers want different inputs here, so try the four documented
+	 * combinations once and remember the one that works: an AHardwareBuffer is
+	 * either wrapped by eglGetNativeClientBufferANDROID or passed directly, and
+	 * the call either takes the current context or EGL_NO_CONTEXT. */
+	static int working = -1;
+	static bool probed;
+	if (!probed) {
+		probed = true;
+		PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC wrap =
+			(PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC)eglGetProcAddress("eglGetNativeClientBufferANDROID");
+		EGLClientBuffer wrapped = wrap ? wrap((AHardwareBuffer *)hardware_buffer) : NULL;
+		EGLContext ctx = eglGetCurrentContext();
+		const struct {
+			EGLClientBuffer buffer;
+			EGLContext context;
+			const char *name;
+		} variants[] = {
+			{wrapped, ctx, "wrapped+context"},
+			{wrapped, EGL_NO_CONTEXT, "wrapped"},
+			{(EGLClientBuffer)hardware_buffer, ctx, "direct+context"},
+			{(EGLClientBuffer)hardware_buffer, EGL_NO_CONTEXT, "direct"},
+		};
+		for (int i = 0; i < 4 && working < 0; i++) {
+			if (!variants[i].buffer)
+				continue;
+			EGLImageKHR image = t->create_image(t->egl_display, variants[i].context,
+							    EGL_NATIVE_BUFFER_ANDROID, variants[i].buffer, NULL);
+			const EGLint error = eglGetError();
+			if (image != EGL_NO_IMAGE_KHR) {
+				working = i;
+				blog(LOG_INFO, "Android interop: EGL image via %s", variants[i].name);
+				t->egl_image = image;
+				break;
+			}
+			blog(LOG_INFO, "Android interop: EGL image via %s failed (0x%x)", variants[i].name, error);
+		}
+		if (working < 0) {
+			AHardwareBuffer_Desc desc = {0};
+			AHardwareBuffer_describe((const AHardwareBuffer *)hardware_buffer, &desc);
+			blog(LOG_ERROR, "Android interop: no EGL image path for %ux%u format=%u usage=0x%llx",
+			     desc.width, desc.height, desc.format, (unsigned long long)desc.usage);
+			return false;
+		}
+	} else if (working >= 0) {
+		PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC wrap =
+			(PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC)eglGetProcAddress("eglGetNativeClientBufferANDROID");
+		EGLClientBuffer client = (EGLClientBuffer)hardware_buffer;
+		if (working <= 1 && wrap)
+			client = wrap((AHardwareBuffer *)hardware_buffer);
+		const EGLContext ctx = (working == 0 || working == 2) ? eglGetCurrentContext() : EGL_NO_CONTEXT;
+		t->egl_image = t->create_image(t->egl_display, ctx, EGL_NATIVE_BUFFER_ANDROID, client, NULL);
+	}
+	if (t->egl_image == EGL_NO_IMAGE_KHR)
+		return false;
+
+	struct gl_state state;
+	save_state(&state);
+	glBindTexture(GL_TEXTURE_EXTERNAL_OES, t->external);
+	glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)t->egl_image);
+	const bool ok = glGetError() == GL_NO_ERROR;
+	restore_state(&state);
+	if (!ok) {
+		static bool warned_bind;
+		if (!warned_bind) {
+			warned_bind = true;
+			blog(LOG_ERROR, "Android interop: glEGLImageTargetTexture2DOES failed");
+		}
+	}
+	return ok;
+}
+
 void device_android_external_texture_destroy(gs_android_external_texture_t *texture)
 {
 	struct external_texture *t = texture;
 	if (!t)
 		return;
+	if (t->egl_image != EGL_NO_IMAGE_KHR && t->destroy_image && t->egl_display != EGL_NO_DISPLAY) {
+		t->destroy_image(t->egl_display, t->egl_image);
+		t->egl_image = EGL_NO_IMAGE_KHR;
+	}
 	if (t->fbo)
 		glDeleteFramebuffers(1, &t->fbo);
 	if (t->vao)

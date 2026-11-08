@@ -781,7 +781,11 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 			continue;
 		}
 		const uint32_t jpeg_len = get_u32be(obj + LVO_OFF_JPEG_SIZE);
-		if (jpeg_len == 0 || LVO_HEADER_SIZE + jpeg_len > frame_payload) {
+		/* 别写 LVO_HEADER_SIZE + jpeg_len > frame_payload：两个操作数都在 uint32_t 里，
+		 * jpeg_len 接近 UINT32_MAX 时加法回绕成小值，正好绕过这道检查，下面按 jpeg_len
+		 * 索引 jpeg[i] 就是越界读。改成先减后比 —— frame_payload >= LVO_HEADER_SIZE + 2
+		 * 上面已经保证，减法不会下溢。 */
+		if (jpeg_len == 0 || jpeg_len > frame_payload - LVO_HEADER_SIZE) {
 			s->frames_dropped++;
 			blog(LOG_WARNING, "nikon: JPEG 长度 %u 越界（payload=%u），丢帧", (unsigned) jpeg_len,
 			     (unsigned) frame_payload);

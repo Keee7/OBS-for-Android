@@ -56,6 +56,9 @@
  * （移植层包在 threading-windows.h 内），POSIX 那一支不拉。 */
 #include <pthread.h>
 
+/* 回调上下文：源用弱引用、reader 用"退役 + 在册回调归零"。设计与取舍见该文件头。 */
+#include "../android-common/reader-ctx.h"
+
 #include <obs-module.h>
 #include <util/platform.h>
 #include <util/threading.h> /* os_atomic_*（拆除协议那两个计数靠它）+ pthread_mutex_init_value */
@@ -154,6 +157,13 @@ struct camera2_source {
 	int32_t cap_w_pref, cap_h_pref;
 	int32_t fps_lo_pref, fps_hi_pref;
 
+	/* 画面旋转（度，0/90/180/270，默认 0）。设备侧只报 ACAMERA_SENSOR_ORIENTATION
+	 * （"传感器装歪了多少度"），真正该转多少还要叠加**当前显示旋转**与**前置镜像**，
+	 * 而这个插件至今没有一条腿去读 Display.getRotation —— 所以自动算出来的角度在本机
+	 * 未必对，瞎猜会把本来正的画面转歪。这里给用户一个显式旋钮：默认 0 = 与本插件
+	 * 历史行为完全一致（不转），要转的人在属性页里对着预览调到正为止。 */
+	int rotation;
+
 	/* 打开/拆除互斥。**线程地图（这次逐条量过，别照记忆改）**：
 	 *  - update：UI 线程调 obs_source_update 时对视频源只做一件事 —— defer_update_count++
 	 *    （obs-source.c:1112-1113），本文件那个 camera2_update 真正跑起来是在
@@ -184,18 +194,12 @@ struct camera2_source {
 
 	struct camera2_stream s;
 
-	/* 拆除协议（c 腿的线程安全就靠这两个）：
-	 * shutting_down 置 1 之后回调不再 acquire 新帧；in_callback 是"正在回调里"的计数，
-	 * close_capture 等它归零才 AImageReader_delete —— 头里对 delete 的原话是
-	 * "Do NOT access the reader object or any of those data pointers after this method returns"
-	 * （NdkImageReader.h:110-114），而它**没承诺**会 join 那条回调线程。 */
+	/* 拆除协议（c 腿的线程安全就靠这两层）：
+	 * shutting_down 只作快速短路（回调一进来就能退，不必碰 ctx 的锁）；
+	 * 真正的闸门是 ctx —— 它保证"已进入工作区"的回调被计数、retire 之后不再放新回调进来，
+	 * 源则走弱引用。原先是 in_callback + cb_thread_maybe_live 两个裸字段，问题见 reader-ctx.h。 */
 	volatile long shutting_down;
-	volatile long in_callback;
-
-	/* 上面那次"等回调线程退出"超时了就置 true。置起来就不能再 free data —— 那条线程的
-	 * context 就是 &c，free 掉之后它下一次进 on_image_available 就是往已释放内存里写。
-	 * 后续某次拆除等到过 in_callback==0 就清回 false（那时才是真的安全）。 */
-	bool cb_thread_maybe_live;
+	struct reader_ctx *ctx;
 
 	uint64_t frames_out;
 	uint64_t frames_dropped;
@@ -703,7 +707,7 @@ static void scan_plane(const uint8_t *p, int32_t row, int32_t w, int32_t h, int3
  * ⇒ 全零的 frame 会把每一钳到 0 再乘零矩阵，**画面纯黑**。
  * （struct obs_source_frame out = {0} 这种写法在仓里另有一处：android-capture 的 YUYV 分支，
  *  本轮已照 linux-v4l2/v4l2-input.c:128 那个先例一并修掉，见 plan.md 那条产品账。） */
-static void push_frame(struct camera2_source *c, AImage *image)
+static void push_frame(struct camera2_source *c, obs_source_t *src, AImage *image)
 {
 	struct obs_source_frame out = {0};
 	int32_t fw = 0, fh = 0, planes = 0;
@@ -815,7 +819,9 @@ static void push_frame(struct camera2_source *c, AImage *image)
 		blog(LOG_WARNING, "android-camera: 色彩矩阵取不到（cs=%d fmt=0x%x），这一次按 601 兜底",
 		     c->color_space_pref, (unsigned) out.format);
 
-	obs_source_output_video(c->source, &out);
+	/* src 是回调在进入工作区时取的强引用，不是 c->source：c->source 只在源存活期间有效，
+	 * 而这条线程可能活过源销毁（见 reader-ctx.h）。 */
+	obs_source_output_video(src, &out);
 
 	c->frames_out++;
 	os_atomic_inc_long(&c->frame_seq); // f 腿看门狗读它，见 struct 上那段
@@ -825,7 +831,7 @@ static void push_frame(struct camera2_source *c, AImage *image)
 		 * 相机、重读能力表。这里是 reader 那条回调线程，而该函数只是发一个信号
 		 * （obs-source.c:1129-1135），真去建属性对象的是 UI 线程；仓内先例是 linux-v4l2 在
 		 * 设备热插拔回调里刷（v4l2-input.c:739、:760）。 */
-		obs_source_update_properties(c->source);
+		obs_source_update_properties(src);
 
 	if (c->frames_out == 1 || (c->frames_out % 300) == 0) {
 		uint8_t ymn, ymx, umn, umx, vmn, vmx;
@@ -858,11 +864,20 @@ static void push_frame(struct camera2_source *c, AImage *image)
  * 就能跟得上生产；用 NextImage 的话积压会长成"越 delay 越大直到整条流卡死"（:206-211 原话）。*/
 static void on_image_available(void *context, AImageReader *reader)
 {
-	struct camera2_source *c = context;
+	struct reader_ctx *ctx = context;
 
-	os_atomic_inc_long(&c->in_callback);
+	/* enter 之前一个字段都不碰：retire 之后这里直接返回，而 ctx 比 data 活得久。
+	 * 进入工作区之后 owner / source / reader 都有人在等，close 不会在中途拆。 */
+	if (!reader_ctx_enter(ctx))
+		return;
 
-	if (os_atomic_load_long(&c->shutting_down))
+	struct camera2_source *c = reader_ctx_owner(ctx);
+	if (!c || os_atomic_load_long(&c->shutting_down))
+		goto out;
+
+	/* 弱引用现取：源已进销毁流程时拿到 NULL，直接退，不碰 c->source。 */
+	obs_source_t *src = reader_ctx_source(ctx);
+	if (!src)
 		goto out;
 
 	AImage *image = NULL;
@@ -870,14 +885,16 @@ static void on_image_available(void *context, AImageReader *reader)
 	if (st != AMEDIA_OK || !image) {
 		if (st != AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE)
 			blog(LOG_WARNING, "android-camera: acquireLatestImage 失败 media_status=%d", (int) st);
+		obs_source_release(src);
 		goto out;
 	}
 
-	push_frame(c, image);
+	push_frame(c, src, image);
 	AImage_delete(image);
+	obs_source_release(src);
 
 out:
-	os_atomic_dec_long(&c->in_callback);
+	reader_ctx_leave(ctx);
 }
 
 /* 设备与会话的回调：c 腿一律**不碰 source 指针**，context 传 NULL，只留一条日志。
@@ -972,22 +989,22 @@ static void close_capture_locked(struct camera2_source *c, const char *why)
 	if (s->reader) {
 		AImageReader_setImageListener(s->reader, NULL);
 
-		int waited_ms = 0;
-		while (os_atomic_load_long(&c->in_callback) > 0 && waited_ms < 2000) {
-			os_sleep_ms(1);
-			waited_ms++;
-		}
-		if (os_atomic_load_long(&c->in_callback) > 0) {
-			/* 宁漏一次 reader，也不在回调还在场的时候 delete 它 —— AImageReader_delete
-			 * 不承诺 join 它那条回调线程（见 struct camera2_source 上那段）。
-			 * 泄漏一次远比一次随机崩溃便宜。
-			 * 而且这次连带把 data 也标成"不许 free"：回调的 context 就是 &c。 */
-			c->cb_thread_maybe_live = true;
-			blog(LOG_ERROR, "android-camera: 等 2 秒回调线程仍未退出 onImageAvailable，"
-					"这次不 delete reader（宁可泄漏，不制造 use-after-free）");
-		} else {
-			c->cb_thread_maybe_live = false;
+		/* retire 之后不再放新回调进工作区；已在里面的靠 users 计数等。
+		 * 注意等的不是 in_callback —— 那个计数覆盖不到"框架已决定派发、尚未进入函数体"
+		 * 的那一段（NdkImageReader.h 既没承诺 delete 会 join，也没承诺 set NULL 之后
+		 * 不再派发），所以 retire 与 users 必须在同一把锁里完成，见 reader-ctx.h。 */
+		reader_ctx_retire(c->ctx);
+		if (reader_ctx_wait_idle(c->ctx, 2000)) {
+			/* 没人还在用 reader：队列里未消费的 AImage 由 delete 一并归还系统，
+			 * 常态路径因此不驻留任何 buffer。 */
+			reader_ctx_set_owner(c->ctx, NULL);
 			AImageReader_delete(s->reader);
+		} else {
+			/* 兜底：回调被系统挂起，delete 会与它撞车。reader 留着（连带队列里
+			 * 那几块 AImage），owner 也留着 —— 由 destroy 的第二道检查决定
+			 * 是否连同 data 一起有意泄漏。这里是唯一会多驻留几条 buffer 的路径。 */
+			blog(LOG_ERROR, "android-camera: 等 2 秒回调仍未退出，这次不 delete reader"
+					"（整包留给 destroy 兜底，宁可泄漏，不制造 use-after-free）");
 		}
 		s->reader = NULL;
 		s->window = NULL; // 归 reader 所有，跟着它一起没了
@@ -1051,6 +1068,14 @@ static bool open_capture_locked(struct camera2_source *c)
 	}
 
 	c->last_error[0] = 0;
+
+	/* 上一场拆除时回调没退干净（close 超时、reader 已留作兜底）：旧 reader 还在那条
+	 * 线程手里，此时再开一路只会两路抢同一颗源。等它退了再开，看门狗每秒会重来一次。 */
+	if (!reader_ctx_wait_idle(c->ctx, 0)) {
+		set_error(c, "上一场采集的回调仍未退出，暂不重开");
+		return false;
+	}
+
 	os_atomic_set_long(&c->shutting_down, 0);
 
 	/* 一次读全这台相机的两张表（尺寸 + AE 帧率），下面挑档和校验都只照着它来。
@@ -1081,7 +1106,6 @@ static bool open_capture_locked(struct camera2_source *c)
 	/* 上面这个初始化按 ACameraDevice_StateCallbacks 的字段顺序写：
 	 * context / onDisconnected / onError / onClientSharedAccessPriorityChanged。
 	 * 最后一个只有共享模式（API 36）才会用到，给 NULL 是对的。 */
-	AImageReader_ImageListener listener = {c, on_image_available};
 	ACameraCaptureSession_stateCallbacks sess_cb = {
 		NULL, on_session_closed, on_session_ready, on_session_active};
 
@@ -1090,6 +1114,30 @@ static bool open_capture_locked(struct camera2_source *c)
 		set_error(c, "AImageReader_new(%d,%d) 失败", (int) w, (int) h);
 		goto fail;
 	}
+
+	/* ctx 建在 reader 成功之后：AImageReader_new 之前有若干 goto fail，而
+	 * close_capture_locked 见 reader/device/session/request 全空会直接早退 ——
+	 * 那时新建的 ctx 既不 retire 也不释放，下一次 open 还会把 c->ctx 覆盖掉，
+	 * 旧的那份（含 weak 与 mutex）就永久丢失。更要命的是旧 ctx 的 retired
+	 * 仍是 false、users 是 0，于是下一次 open 的 wait_idle 恒通过、闸门失效。
+	 * 挪到这里之后，所有 fail 路径都已经有 reader，close 一定会走到 retire。 */
+	struct reader_ctx *fresh = reader_ctx_create(c->source);
+	if (!fresh) {
+		set_error(c, "建回调上下文失败（内存不足）");
+		ok = false;
+		goto fail;
+	}
+	/* 覆盖之前先把上一份 retire 掉：close 正常走完时它已经是 retired（幂等），
+	 * 但打开失败等路径可能留下一个从未 retire 的旧 ctx —— 那样它的 retired 仍是
+	 * false、users 是 0，下一次 open 的 wait_idle 就会恒通过、闸门形同虚设。
+	 * 注意只 retire、不释放：reader-ctx.h 里写明 ctx 必须比采集结构体活得久，
+	 * "已决定派发"的回调仍会来读 retired 与 weak。 */
+	reader_ctx_retire(c->ctx);
+	reader_ctx_set_owner(fresh, c);
+	c->ctx = fresh;
+	/* listener 必须在 ctx 就位之后再取 context：写在这一行之前会拿到上一场的旧 ctx
+	 * （或 NULL），AImageReader_setImageListener 就把回调绑到已经 retire 的上下文上了。 */
+	AImageReader_ImageListener listener = {c->ctx, on_image_available};
 	if (AImageReader_setImageListener(s->reader, &listener) != AMEDIA_OK) {
 		set_error(c, "AImageReader_setImageListener 失败");
 		ok = false;
@@ -1242,9 +1290,14 @@ static bool open_capture_locked(struct camera2_source *c)
 			 s->session_params ? "会话参数 + 重复请求" : "只重复请求");
 
 	blog(LOG_INFO, "android-camera: 源 '%s' 开始采集 —— 相机='%s' %s 转角=%d° 尺寸=%dx%d 帧率=%s "
-			       "格式=YUV_420_888 缓冲 maxImages=%d",
+			       "格式=YUV_420_888 缓冲 maxImages=%d 画面旋转=%d°",
 	     obs_source_get_name(c->source), cam.id, facing_name(cam.facing), cam.orientation, (int) w, (int) h,
-	     fps_text, MAX_IMAGES);
+	     fps_text, MAX_IMAGES, c->rotation);
+
+	/* 旋转项每帧读的一次落地：libobs 在渲染异步帧时按 source->async_rotation 转画面，
+	 * 这里把用户选的角度写进去（0 = 不转，与本插件历史行为一致）。放最后、放在所有可能
+	 * 失败的分支之后 —— 采集没起来就别改这个全局态，否则失败一次会把旧值也带歪。 */
+	obs_source_set_async_rotation(c->source, c->rotation);
 	return true;
 
 fail:
@@ -1362,6 +1415,7 @@ static void camera2_get_defaults(obs_data_t *settings)
 	 * （"1280x720" / "10-30"）。空串 = 自动。 */
 	obs_data_set_default_string(settings, "cap_size", "");
 	obs_data_set_default_string(settings, "fps", "");
+	obs_data_set_default_int(settings, "rotation", 0);
 }
 
 static void camera2_load_settings(struct camera2_source *data, obs_data_t *settings)
@@ -1391,6 +1445,11 @@ static void camera2_load_settings(struct camera2_source *data, obs_data_t *setti
 		flo = fhi = 0;
 	data->fps_lo_pref = flo;
 	data->fps_hi_pref = fhi;
+
+	/* 旋转同样是可手改的磁盘输入：只认 0/90/180/270 四个值，别的（负角、非 90 倍数）归 0。
+	 * libobs 的 rotate_async_video 只实现了这四档的平移补偿，喂别的角度会得到错位画面。 */
+	const long long rot = obs_data_get_int(settings, "rotation");
+	data->rotation = (rot == 90 || rot == 180 || rot == 270) ? (int) rot : 0;
 }
 
 static void *camera2_create(obs_data_t *settings, obs_source_t *source)
@@ -1404,6 +1463,18 @@ static void *camera2_create(obs_data_t *settings, obs_source_t *source)
 	if (pthread_mutex_init(&data->mtx, NULL) != 0)
 		blog(LOG_ERROR, "android-camera: 建锁失败，开/拆采集就没有互斥了");
 	camera2_load_settings(data, settings);
+
+	/* 回调上下文独立于 data 分配：data 会被 bfree，而"已决定派发"的回调仍会来读它。 */
+	data->ctx = reader_ctx_create(source);
+	if (!data->ctx) {
+		/* 建不出 ctx 就别把源交出去：回调一律先 reader_ctx_enter() 再认领源，
+		 * 没有 ctx 这条源的采集永远开不起来。返回 NULL 让 obs_source_create 报错。 */
+		blog(LOG_ERROR, "android-camera: 建回调上下文失败（内存不足），不建本源");
+		pthread_mutex_destroy(&data->mtx);
+		bfree(data);
+		return NULL;
+	}
+	reader_ctx_set_owner(data->ctx, data);
 
 	data->manager = ACameraManager_create();
 	if (!data->manager) {
@@ -1429,15 +1500,18 @@ static void camera2_destroy(void *data)
 	 * 再关 manager。反过来的话这里就是拿一个已释放的 manager 去关设备。
 	 * deactivate 正常走完时这里是空转（close_capture 见什么都没建就直接返回）。 */
 	close_capture(c, "destroy");
-	if (c->cb_thread_maybe_live) {
-		/* 那条 reader 回调线程可能还握着 context=&c ⇒ data、锁、manager 一样都不能放。
-		 * 这是故意泄漏：一台机上一次、每次撞上都会有这条 ERROR 日志，比随机崩在
-		 * 一个已被复用的堆块上便宜得多。（正常路径永远走不到这里：等待环只有 2 秒，
-		 * 而回调体里除了 obs_source_output_video 没有别的阻塞点。） */
-		blog(LOG_ERROR, "android-camera: 源 '%s' 的回调线程可能还在场 —— 这次不释放 data/锁/manager（故意泄漏）",
+	/* close 已经 retire 并等过 2 秒；这里再看一眼是否真没人。回调的 context 已经不是
+	 * &c 了（是 ctx），但 ctx->owner 仍指着 c —— users 归零之前 bfree(c) 依然是 UAF。 */
+	if (!reader_ctx_wait_idle(c->ctx, 0)) {
+		/* 那条 reader 回调线程仍握着 owner=c ⇒ data、锁、manager 一样都不能放。
+		 * 这是故意泄漏：每次撞上都会有这条 ERROR 日志，比随机崩在一个已被复用的
+		 * 堆块上便宜得多。源本身的弱引用仍在 ctx 里，回调不会碰到已释放的 obs_source。 */
+		blog(LOG_ERROR, "android-camera: 源 '%s' 的回调线程仍在场 —— 这次不释放 data/锁/manager（故意泄漏）",
 		     obs_source_get_name(c->source));
 		return;
 	}
+	reader_ctx_set_owner(c->ctx, NULL);
+	c->ctx = NULL;
 	if (c->manager)
 		ACameraManager_delete(c->manager);
 	pthread_mutex_destroy(&c->mtx);
@@ -1470,9 +1544,16 @@ static void camera2_update(void *data, obs_data_t *settings)
 	const int old_facing = c->facing_pref;
 	const int32_t old_w = c->cap_w_pref, old_h = c->cap_h_pref;
 	const int32_t old_flo = c->fps_lo_pref, old_fhi = c->fps_hi_pref;
+	const int old_rotation = c->rotation;
 
 	memcpy(old_id, c->camera_id, sizeof(old_id));
 	camera2_load_settings(c, settings);
+
+	/* 旋转不重建会话：libobs 每帧读 source->async_rotation，改这里当场生效。
+	 * 和色彩偏好同一档处理（下面那条注释说的就是它们）。采集没在跑时不用设 ——
+	 * open_capture 起流那次会按当时的 c->rotation 写进去。 */
+	if (old_rotation != c->rotation)
+		obs_source_set_async_rotation(c->source, c->rotation);
 
 	const bool id_changed = strcmp(old_id, c->camera_id) != 0;
 	const bool facing_changed = old_facing != c->facing_pref;
@@ -1480,7 +1561,7 @@ static void camera2_update(void *data, obs_data_t *settings)
 	const bool fps_changed = old_flo != c->fps_lo_pref || old_fhi != c->fps_hi_pref;
 
 	if (!id_changed && !facing_changed && !size_changed && !fps_changed)
-		return; // 色彩偏好是 push_frame 每帧读的，不用重建会话
+		return; // 色彩偏好与旋转是渲染期每帧读的，不用重建会话
 
 	/* 换相机要换那台独占设备，换尺寸要重配流（reader 和 session 都是按尺寸建的），换帧率虽然在
 	 * 重复请求里就能改、但**会话参数**只有重开会话才谈得上 —— 三件并成一条"拆了重开"，日志里那句
@@ -1568,6 +1649,17 @@ static obs_properties_t *camera2_properties(void *data)
 	obs_property_list_add_int(facing, "不挑", -1);
 	obs_property_list_add_int(facing, "后置", ACAMERA_LENS_FACING_BACK);
 	obs_property_list_add_int(facing, "前置", ACAMERA_LENS_FACING_FRONT);
+
+	/* 画面旋转：设备侧 ACAMERA_SENSOR_ORIENTATION 只说"传感器装歪多少度"，真正该转多少
+	 * 还要叠加当前显示旋转与前置镜像，而本插件没有一条腿去读 Display.getRotation ——
+	 * 自动算在本机未必对（猜错就是把正的转歪）。所以给一个显式旋钮，默认"不旋转" =
+	 * 与本插件历史行为一致。上面相机下拉里那个"转角 %d°"就是设备报的传感器角度，供参考。 */
+	obs_property_t *rot = obs_properties_add_list(props, "rotation", "画面旋转", OBS_COMBO_TYPE_LIST,
+						      OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(rot, "不旋转（默认）", 0);
+	obs_property_list_add_int(rot, "顺时针 90°", 90);
+	obs_property_list_add_int(rot, "旋转 180°", 180);
+	obs_property_list_add_int(rot, "顺时针 270°", 270);
 
 	/* d 腿的两张下拉只列设备表里的档 —— 用的就是开采集时那同一把尺子（choose_camera +
 	 * read_camera_caps），所以"属性里列得出来的"和"开采集开得出来的"必然是同一批。读表只要

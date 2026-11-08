@@ -524,6 +524,23 @@ public final class ObsProjectionHost extends Activity {
         if (audioRecord == null && audioThread == null)
             return;
         audioRunning = false;
+        final AudioRecord rec = audioRecord;
+        audioRecord = null;
+        /* 顺序是这一格的要点：**先 stop、再 join**。读线程平时正卡在 rec.read() 里等数据，
+         * 而那一下是阻塞的 —— 只翻 audioRunning 不会把它叫醒，join(2000) 只会白等满两秒，
+         * 然后我们在"线程还活着、可能正从缓冲里读"的时候去 release，正是注释里那句
+         * "故意不制造边读边拆"要防的事。AudioRecord.stop() 会让卡住的那次 read() 立刻返回
+         * （通常带 ERROR_INVALID_OPERATION），循环这才看得到 audioRunning==false 而退出；
+         * 先 stop 之后 join 一般几毫秒就回。
+         */
+        if (rec != null) {
+            try {
+                if (rec.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING)
+                    rec.stop();
+            } catch (Throwable e) {
+                Log.e(TAG, "AudioRecord.stop() 抛异常: " + e, e);
+            }
+        }
         final Thread t = audioThread;
         audioThread = null;
         if (t != null) {
@@ -535,19 +552,13 @@ public final class ObsProjectionHost extends Activity {
             if (t.isAlive())
                 Log.w(TAG, "内录读线程 join(2000) 之后还在，AudioRecord 仍要释放（可能造成一次 read 失败）");
         }
-        final AudioRecord rec = audioRecord;
-        audioRecord = null;
         synchronized (AUDIO_LOCK) {
+            /* 放在 join 之后：读线程退出前还要读 audioRing，先清它就得靠 audioRing==null
+             * 那条 break 兜底（audioLoop 里确有）。join 超时那条路径正是靠它收尾。 */
             audioRing = null;
             audioHead = audioTail = audioFilled = 0;
         }
         if (rec != null) {
-            try {
-                if (rec.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING)
-                    rec.stop();
-            } catch (Throwable e) {
-                Log.e(TAG, "AudioRecord.stop() 抛异常: " + e, e);
-            }
             try {
                 rec.release();
             } catch (Throwable e) {
@@ -770,6 +781,10 @@ public final class ObsProjectionHost extends Activity {
             projection = p;
             lastAction = "已拿到投影令牌（" + Build.VERSION.SDK_INT + " 档系统）";
             Log.i(TAG, lastAction + " " + describe());
+            /* 令牌到手，"为投影空手起服务"这面旗子的使命到此为止。不落回 false 的话，
+             * 之后任何一次投影失败收尾都会把整个保活服务停掉 —— 那时若正在推流/录制，
+             * 等于被投影那条腿顺手拆了保活（见 ObsForegroundService.projectionEstablished）。 */
+            ObsForegroundService.projectionEstablished();
         } catch (Throwable t) {
             lastError = "取令牌/registerCallback 抛异常: " + t;
             Log.e(TAG, lastError, t);
