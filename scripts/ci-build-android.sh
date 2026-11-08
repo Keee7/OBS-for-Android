@@ -209,12 +209,17 @@ ensure_qt_icu() {
 # 宿主工具自检。**这是为了 fail fast**：宿主 uic/moc 缺共享库时，CMake 要到 AutoUic
 # 阶段才报错（那时已跑完依赖构建，几十分钟），而这里在工具链装配阶段就能撞出来（秒级）。
 # 前面两次 CI 失败都是"跑到一半才发现工具链缺件"，这个探针就是针对那类问题。
+#
+# 判据是**动态链接器能不能加载它**，不是退出码：这些工具对 --version/--help 的返回码
+# 并不统一（androiddeployqt --help 就返回 1），用 `|| exit 1` 会把能跑的工具判成坏的
+# ——我自己就踩过：uic/moc/rcc 全 OK，探针却因为 androiddeployqt 的退出码 1 让 CI 挂了。
+# 所以：**能加载 = 输出里有该工具自己的字样**；加载失败 = 输出里出现
+# "error while loading shared libraries" / "cannot open shared object"。
 probe_host_tools() {
     log "自检宿主 Qt 工具（uic/moc/rcc/androiddeployqt）"
-    local tool
-    for tool in uic moc rcc; do
-        # Linux Qt6 把这三个放在 libexec；个别包装法在 bin。两处都找。
-        local p=""
+    local tool p out
+    for tool in uic moc rcc androiddeployqt; do
+        p=""
         for cand in "$HOST/libexec/$tool" "$HOST/bin/$tool"; do
             [ -x "$cand" ] && { p="$cand"; break; }
         done
@@ -222,16 +227,18 @@ probe_host_tools() {
             echo "  WARN: 找不到 $tool（libexec/bin 都没有）"
             continue
         fi
-        if "$p" --version >/dev/null 2>&1; then
-            echo "  OK   $tool"
-        else
-            echo "FATAL: $tool 跑不起来（共享库缺失？）—— 直接看下面这行它的报错：" >&2
-            "$p" --version 2>&1 | head -3 >&2
+        # --version/--help 都可能非零退出，所以不判退出码，只收输出。
+        out="$("$p" --version 2>&1 || true)"
+        [ -n "$out" ] || out="$("$p" --help 2>&1 || true)"
+        case "$out" in
+        *"error while loading shared libraries"*|*"cannot open shared object file"*)
+            echo "FATAL: $tool 起不来（共享库缺失）—— 下面是它的原始报错：" >&2
+            printf '  %s\n' "$out" | head -3 >&2
             exit 1
-        fi
+            ;;
+        esac
+        echo "  OK   $tool"
     done
-    [ -x "$HOST/bin/androiddeployqt" ] && "$HOST/bin/androiddeployqt" --help >/dev/null 2>&1 \
-        && echo "  OK   androiddeployqt"
 }
 
 
