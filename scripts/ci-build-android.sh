@@ -110,7 +110,12 @@ fetch_ndk() {
 }
 
 fetch_qt() {
-    [ -x "$HOST/bin/androiddeployqt" ] && { echo "Qt 已就位：$QT"; return; }
+    if [ -x "$HOST/bin/androiddeployqt" ]; then
+        echo "Qt 已就位：$QT"
+        ensure_qt_icu      # 工具链缓存里那份 Qt 也可能缺 ICU，不能只在首次下载时补
+        probe_host_tools
+        return
+    fi
     log "下载 Qt $QT_VERSION（Android arm64 目标 + Linux gcc_64 宿主）"
     # 目录布局：桌面宿主在 linux_x64/desktop；Android 目标是 all_os/android。
     # 包名前缀是**完整的 6.9.3-0-<时间戳>**（不只时间戳），宿主与目标各一套时间戳，
@@ -168,9 +173,67 @@ fetch_qt() {
         echo "  已改写 target_qt.conf → 宿主 $HOST"
     fi
     [ -x "$HOST/bin/androiddeployqt" ] || { echo "FATAL: Qt 宿主缺 androiddeployqt（解包不完整？）" >&2; exit 1; }
-    [ -x "$HOST/libexec/moc" ] || [ -x "$HOST/bin/moc" ] || \
-        echo "WARN: 宿主 moc 不在常见位置，androiddeployqt 可能找不到"
+
+    ensure_qt_icu
+    probe_host_tools
 }
+
+# Qt 的 Linux 预编译宿主工具（uic/moc/rcc/androiddeployqt）是在 RHEL 8 上构建的，
+# 动态依赖 **ICU 73**；Ubuntu 24.04 自带的 ICU 是 74，于是：
+#   .ci-tools/Qt/6.9.3/gcc_64/libexec/uic: error while loading shared libraries:
+#     libicui18n.so.73: cannot open shared object file
+#   → AutoUic subprocess error / exit 127
+# Qt 把这份运行时单独打了个包（icu-linux-Rhel8.6-x86_64.7z），必须跟着宿主一起装。
+# 包内是**扁平结构**（libicu*.so.73 直接在根），所以解到 $HOST/lib 即可 —— 宿主工具的
+# RPATH 指向 $ORIGIN/../lib；下面再把 $HOST/lib 挂进 LD_LIBRARY_PATH 兜底。
+ensure_qt_icu() {
+    if [ -f "$HOST/lib/libicui18n.so.73" ] && [ -f "$HOST/lib/libicuuc.so.73" ]; then
+        export LD_LIBRARY_PATH="$HOST/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        return
+    fi
+    log "安装 Qt 宿主工具依赖的 ICU 73（Ubuntu 自带 74，宿主 uic/moc 找不到 73）"
+    local tag="${QT_VERSION}-0-202509261207"
+    local url="https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_693/qt6_693/qt.qt6.693.linux_gcc_64/${tag}icu-linux-Rhel8.6-x86_64.7z"
+    local f="$DL_ROOT/icu-host.7z"
+    mkdir -p "$DL_ROOT" "$HOST/lib"
+    [ -s "$f" ] || curl -fL --retry 3 --retry-delay 5 -o "$f" "$url"
+    "$SEVENZIP" x -y -o"$HOST/lib" "$f" >/dev/null
+    [ -f "$HOST/lib/libicui18n.so.73" ] || {
+        echo "FATAL: ICU 解包后没有 libicui18n.so.73（$HOST/lib）" >&2
+        exit 1
+    }
+    export LD_LIBRARY_PATH="$HOST/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "  已装：$HOST/lib/libicu*.so.73（并加入 LD_LIBRARY_PATH）"
+}
+
+# 宿主工具自检。**这是为了 fail fast**：宿主 uic/moc 缺共享库时，CMake 要到 AutoUic
+# 阶段才报错（那时已跑完依赖构建，几十分钟），而这里在工具链装配阶段就能撞出来（秒级）。
+# 前面两次 CI 失败都是"跑到一半才发现工具链缺件"，这个探针就是针对那类问题。
+probe_host_tools() {
+    log "自检宿主 Qt 工具（uic/moc/rcc/androiddeployqt）"
+    local tool
+    for tool in uic moc rcc; do
+        # Linux Qt6 把这三个放在 libexec；个别包装法在 bin。两处都找。
+        local p=""
+        for cand in "$HOST/libexec/$tool" "$HOST/bin/$tool"; do
+            [ -x "$cand" ] && { p="$cand"; break; }
+        done
+        if [ -z "$p" ]; then
+            echo "  WARN: 找不到 $tool（libexec/bin 都没有）"
+            continue
+        fi
+        if "$p" --version >/dev/null 2>&1; then
+            echo "  OK   $tool"
+        else
+            echo "FATAL: $tool 跑不起来（共享库缺失？）—— 直接看下面这行它的报错：" >&2
+            "$p" --version 2>&1 | head -3 >&2
+            exit 1
+        fi
+    done
+    [ -x "$HOST/bin/androiddeployqt" ] && "$HOST/bin/androiddeployqt" --help >/dev/null 2>&1 \
+        && echo "  OK   androiddeployqt"
+}
+
 
 fetch_sdk() {
     if [ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then

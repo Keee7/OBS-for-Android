@@ -161,7 +161,28 @@ bash scripts/ci-build-android.sh
 | `找不到 7-Zip 解包器` | Ubuntu 24.04 要装 `7zip`（`p7zip-full` 已变 transitional 包，不提供 `7z`） |
 | `autoreconf: not found` | 装 `autoconf automake libtool` |
 | `CMake 版本过低` | 脚本会自拉 3.31.6，别用系统那个；确认 `PATH` 里 `$TOOLS_ROOT/cmake-*/bin` 在前 |
+| `Unrecognized named-value: 'runner'` | job 级 `env` 里用了 `runner.*`。`runner` 上下文只在 step 级可用；job 级改用 `github.*` |
+| `Could not find ... nlohmann_json` | 前端 `CMakeLists.txt:73` 无条件要它，但它不在 `deps-android` 清单里。脚本的 `install_nlohmann_json()` 会装；若报错看该函数日志 |
+| `uic: error while loading shared libraries: libicui18n.so.73` / `AutoUic subprocess error` / exit 127 | Qt 的 Linux 宿主工具（RHEL 8 构建）要 **ICU 73**，而 Ubuntu 24.04 自带 74。脚本的 `ensure_qt_icu()` 会装 Qt 那份 `icu-linux-Rhel8.6` 到 `$HOST/lib` 并加入 `LD_LIBRARY_PATH` |
+| `Host tool ... 跑不起来` / 工具自检 FATAL | 宿主 Qt 工具缺共享库。脚本的 `probe_host_tools()` 在装配阶段就会撞出来（秒级），不必等构建 |
 | 签名步骤报口令错 | Secrets 里的四项要来自**同一次** `generate-release-key.sh` 输出 |
 | `base64: invalid input` | `ANDROID_KEYSTORE_BASE64` 粘贴时断行/带了多余字符；重新整行复制 |
 | 构建成功但 APK 没插件 | 看日志里"已暂存"那一行；`package_apk` 缺插件会直接 FATAL，不会静默出空壳 |
 | 依赖构建每次都重来 | 缓存被回收了（约 7 天不用）。属预期，等一次"首次"耗时 |
+
+### 关于"工具链缺件"这类失败
+
+CI 在这里失败过三次，都是**脚本装的东西少了**，而不是 OBS 源码的问题：
+
+| 次数 | 缺什么 | 为什么本地没暴露 |
+| --- | --- | --- |
+| 1 | `runner` 上下文用错位置 | YAML 语法能过，PyYAML 查不出；后来用 actionlint 才拦下 |
+| 2 | `nlohmann_json` | 本机**恰好**装了 conda 的版本（`CMakeCache` 里指向 `miniconda3`） |
+| 3 | Qt 宿主要的 ICU 73 | 仓库的 Windows 构建用 `msvc2022_64` 宿主，Linux 宿主是 CI 才第一次真正跑起来 |
+
+共同点：**本地"能过"不代表 CI 能过，因为本地工具链带着机器上的偶发状态。**
+因此脚本里加了装配阶段的 `probe_host_tools()` 自检——宿主工具跑不起来就在这里失败（秒级），
+而不是跑完几十分钟的依赖构建后才在 `AutoUic` 报 exit 127。
+
+改 CI 工具链相关的东西时，请跑 `actionlint .github/workflows/*.yml`，并优先信 CI 的实际日志。
+
