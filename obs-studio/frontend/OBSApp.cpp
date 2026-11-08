@@ -56,10 +56,6 @@
 #include <QComboBox> // P-8 触摸：组合框弹层探针要认出按下落在的是不是 QComboBox
 #include <QContextMenuEvent> // 3-4 触摸：长按合成右键
 #include <QGestureEvent> // P-8 探针：认出 TapAndHold 手势
-// 3-4 触摸：长按=右键要排除文本类控件（长按选词/移光标是 Android 标准操作）
-#include <QLineEdit>
-#include <QPlainTextEdit>
-#include <QTextEdit>
 #include <QElapsedTimer>
 #include <QTimer>
 #include <android/log.h>
@@ -1075,14 +1071,6 @@ protected:
 					comboPress = cb;
 				break;
 			}
-			/* 文本类控件不参与"长按=右键"。Android 上长按文本是**标准操作**：移动插入点、
-			 * 选中单词/整段并挂出它自己的选择把手。这里若照常起计时器，500 ms 后就会合成一发
-			 * QContextMenuEvent —— 结果是候选词条/选择把手被收掉、选区被清、编辑语境重开。
-			 * QComboBox 上面已单独处理（弹层判据不同）；这里再排除掉真正吃文本输入的那几类，
-			 * 以及数字/日期等 QAbstractSpinBox 内部的行编辑（它们同样是可编辑文本框）。 */
-			if (qobject_cast<QLineEdit *>(pw) || qobject_cast<QPlainTextEdit *>(pw) ||
-			    qobject_cast<QTextEdit *>(pw) || pw->inherits("QAbstractSpinBox"))
-				break;
 			target = static_cast<QWidget *>(watched);
 			pressGlobal = me->globalPosition().toPoint();
 			armed = false;

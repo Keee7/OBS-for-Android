@@ -138,7 +138,6 @@
         android:roundIcon="@mipmap/ic_launcher"
             android:launchMode="singleTop"
             android:screenOrientation="sensorLandscape"
-            android:windowSoftInputMode="adjustResize"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
