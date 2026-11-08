@@ -105,3 +105,18 @@ bool obsAndroidDisplayClaimLifecyclePreemptive(QObject *ctx, std::function<void(
 // 否则投影仪一开就被自己人藏掉。别拿 obsAndroidDisplayIsLifecycleOwner 代替：那条在槽空着时
 // 对任何 ctx 都返回 true，用它等于把整条判据废掉。
 QObject *obsAndroidDisplayLifecycleOwner();
+
+// 3-3 补充：**让对话框在开关时主动叫一次可见性重算**。
+//
+// 为什么光靠"窗口事件"不行（2026-11-08 实测，小米平板 25053RP5CC / Android 16）：
+//   17:41:05.495 CreatePropertiesWindow（双击源）
+//   17:41:05.500 属性框 SHOW → setVisible(false)（藏面）
+//   17:41:05.683 surfaceEvent#0 销毁 obs_display
+//   之后**再也没有任何 OBSBasicProperties 的窗口事件**（连 Close/Hide 都没有）
+//   ⇒ 判据永远算出"有窗口遮挡"，obs_display 永不重建 ⇒ 预览永久黑屏。
+// 也就是说 QDialog 在这套 Qt/Android 组合下关闭时**不发** Hide/Close，
+// 任何"监听事件"的写法都会漏。对话框自己是唯一确定知道"我关了"的人 —— 由它显式叫一次。
+//
+// 本函数定义在 frontend/OBSApp.cpp（判据本体也在那儿）。只在 __ANDROID__ 下存在，
+// 调用方请用 #ifdef __ANDROID__ 包住（与 OBSApp.cpp 里那条 include 同一做法）。
+void obsAndroidPreviewVisibilityChanged();

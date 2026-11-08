@@ -399,8 +399,29 @@ void device_present(gs_device_t *device)
 		return;
 	}
 
-	if (!eglSwapBuffers(plat->display, device->cur_swap->wi->surface))
-		blog(LOG_ERROR, "eglSwapBuffers failed: %s", egl_error_str());
+	if (eglSwapBuffers(plat->display, device->cur_swap->wi->surface))
+		return;
+
+	/* 交换失败 = 这块面已经不能用了（Android 上最典型的是 SurfaceView 的 buffer queue
+	 * 被 abandon ⇒ EGL_BAD_SURFACE）。**关键是要把面就地作废**：
+	 * 只打一行日志就 return 的话，wi->surface 仍是个非 EGL_NO_SURFACE 的死句柄，
+	 * device_is_present_ready() 继续返回 true，obs_display 的渲染循环就会
+	 * **全速对着死面 present**（不再等 vsync）——实测（小米平板 25053RP5CC /
+	 * Android 16，2026-11-08）日志里 34 秒刷了 299 次 "eglSwapBuffers failed"，
+	 * qtMainLoopThrea 占 85% CPU，整机被拖慢。
+	 *
+	 * 作废方式与 gl_platform_cleanup_swapchain 保持一致：先切回 pbuffer，再 destroy，
+	 * 否则可能把后续绘制打到一个已销毁的面上。置成 EGL_NO_SURFACE 之后：
+	 *   * device_is_present_ready() 变 false ⇒ render_display_begin 直接不渲染，
+	 *     循环不再空转（CPU 立刻回落）；
+	 *   * gl_platform_cleanup_swapchain 看到 EGL_NO_SURFACE 会跳过，不会二次销毁。
+	 * 面的恢复不靠这里 —— 由 B-8 的 surface 生命周期回调重建 obs_display/swapchain，
+	 * 那时会是一个全新的面。 */
+	blog(LOG_ERROR, "eglSwapBuffers failed: %s —— 作废该窗口面，等 B-8 重建",
+	     egl_error_str());
+	eglMakeCurrent(plat->display, plat->pbuffer, plat->pbuffer, plat->context);
+	eglDestroySurface(plat->display, device->cur_swap->wi->surface);
+	device->cur_swap->wi->surface = EGL_NO_SURFACE;
 }
 
 bool device_enum_adapters(gs_device_t *device, bool (*callback)(void *param, const char *name, uint32_t id),

@@ -26,6 +26,13 @@
 
 #include <QPushButton>
 
+#ifdef __ANDROID__
+/* 3-3：本对话框开关时主动叫一次预览可见性重算。为什么必须显式叫、不能靠窗口事件，
+ * 见 OBSAndroidDisplay.hpp 里 obsAndroidPreviewVisibilityChanged 上面那段实测记录
+ *（QDialog 关闭时在这套 Qt/Android 上不发 Hide/Close，监听事件必漏 ⇒ 预览永久黑屏）。 */
+#include <widgets/OBSAndroidDisplay.hpp>
+#endif
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN 1
@@ -164,6 +171,10 @@ OBSBasicProperties::~OBSBasicProperties()
 	obs_source_dec_showing(source);
 	main->SaveProject();
 	main->UpdateContextBarDeferred(true);
+#ifdef __ANDROID__
+	/* 析构是"这个窗真的没了"的最终凭据 —— 比任何 Hide/Close 事件都可靠。 */
+	obsAndroidPreviewVisibilityChanged();
+#endif
 }
 
 static obs_source_t *CreateLabel(const char *name, size_t h)
@@ -419,6 +430,12 @@ void OBSBasicProperties::Cleanup()
 
 	obs_display_remove_draw_callback(ui->preview->GetDisplay(), OBSBasicProperties::DrawPreview, this);
 	obs_display_remove_draw_callback(ui->preview->GetDisplay(), OBSBasicProperties::DrawTransitionPreview, this);
+
+#ifdef __ANDROID__
+	/* 所有关闭路径（确定 / 取消 / closeEvent）都经这里 —— 是"这个窗不再挡着预览"的
+	 * 唯一必经点，比等窗口事件可靠（实测 QDialog 关闭时一个事件都不发，见头文件说明）。 */
+	obsAndroidPreviewVisibilityChanged();
+#endif
 }
 
 void OBSBasicProperties::reject()
@@ -466,6 +483,9 @@ bool OBSBasicProperties::nativeEvent(const QByteArray &, void *message, qintptr 
 void OBSBasicProperties::Init()
 {
 	show();
+#ifdef __ANDROID__
+	obsAndroidPreviewVisibilityChanged();
+#endif
 }
 
 int OBSBasicProperties::CheckSettings()

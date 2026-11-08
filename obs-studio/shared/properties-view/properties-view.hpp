@@ -100,6 +100,14 @@ private:
 	std::vector<std::unique_ptr<WidgetInfo>> children;
 	std::string lastFocused;
 	QWidget *lastWidget = nullptr;
+	/* RefreshProperties() 是**整棵控件树重建**（deleteLater + new QWidget + 重新
+	 * AddProperty），而 AddText 走 setText() 填值 —— 光标会被推到行尾、选区全丢。
+	 * 之前只恢复"聚焦哪个控件"（lastFocused/lastWidget），没恢复"光标在控件里的哪儿"，
+	 * 于是每删一个字符触发一次重建，光标就跳到行尾一次（Android 上还会把输入法的
+	 * composing 打断）。这里把光标/选区一并记下来，重建后原样放回去。 */
+	int lastCursorPos = -1;
+	int lastSelStart = -1;
+	int lastSelEnd = -1;
 	bool deferUpdate;
 	bool enableDefer = true;
 	bool disableScrolling = false;

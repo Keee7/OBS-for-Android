@@ -75,50 +75,63 @@ using LogUploadType = OBS::LogFileType;
 
 void OBSBasic::CreateInteractionWindow(obs_source_t *source)
 {
-	bool closed = true;
 	if (interaction) {
-		closed = interaction->close();
-	}
-
-	if (!closed) {
-		return;
+		if (!interaction->close())
+			return;
+		/* 与 CreatePropertiesWindow 同一处坑：close() 只排 deleteLater，
+		 * 立刻 new 会留下一个"已关闭但仍然存在"的僵尸顶层窗。 */
+		interaction->setAttribute(Qt::WA_DeleteOnClose, false);
+		delete interaction;
 	}
 
 	interaction = new OBSBasicInteraction(this, source);
-	interaction->Init();
 	interaction->setAttribute(Qt::WA_DeleteOnClose, true);
+	interaction->Init();
 }
 
 void OBSBasic::CreatePropertiesWindow(obs_source_t *source)
 {
-	bool closed = true;
 	if (properties) {
-		closed = properties->close();
-	}
-
-	if (!closed) {
-		return;
+		/* 已有窗口：先关。close() 返回 false = 用户在"未保存"确认里点了取消，
+		 * 上游语义要求此时保留原窗口，直接返回。 */
+		if (!properties->close())
+			return;
+		/* close() 成功**不等于窗口已经没了**：WA_DeleteOnClose 只是排了一个
+		 * deleteLater，真正析构要等事件循环。
+		 * 若这时立刻 new 一个新窗口，旧的会以"已关闭但仍然存在"的僵尸态留在
+		 * 顶层窗列表里。实测（小米平板 25053RP5CC / Android 16，2026-11-08）
+		 * 顶层窗清单里会同时出现**两个** OBSBasicProperties：
+		 *   cls=OBSBasicProperties ... vis=1
+		 *   cls=OBSBasicProperties ... vis=0
+		 * 而 3-3 的遮挡判据（androidSyncPreviewVisibility）把"有顶层窗在场"当成
+		 * 该藏面，于是预览面被永久挡住 ⇒ **双击源就黑屏**。
+		 * 桌面端无所谓（不影响渲染），Android 上致命。
+		 * ⇒ 当场把旧的删掉，别留到下一轮事件循环。先摘掉 WA_DeleteOnClose，
+		 *   免得和已排队的 DeferredDelete 重复删除（QObject 析构本身也会清掉
+		 *   自己挂着的 posted events，这里是显式写清楚意图）。 */
+		properties->setAttribute(Qt::WA_DeleteOnClose, false);
+		delete properties; // QPointer 随之置空
 	}
 
 	properties = new OBSBasicProperties(this, source);
-	properties->Init();
+	/* 属性要在 show() **之前**设好：show() 之后再设，这中间任何一次 close()
+	 * 都不按"关了就删"走，窗口会既没删掉也没被记账。 */
 	properties->setAttribute(Qt::WA_DeleteOnClose, true);
+	properties->Init();
 }
 
 void OBSBasic::CreateFiltersWindow(obs_source_t *source)
 {
-	bool closed = true;
 	if (filters) {
-		closed = filters->close();
-	}
-
-	if (!closed) {
-		return;
+		if (!filters->close())
+			return;
+		filters->setAttribute(Qt::WA_DeleteOnClose, false);
+		delete filters;
 	}
 
 	filters = new OBSBasicFilters(this, source);
-	filters->Init();
 	filters->setAttribute(Qt::WA_DeleteOnClose, true);
+	filters->Init();
 }
 
 void OBSBasic::updateCheckFinished()

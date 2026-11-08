@@ -1267,6 +1267,9 @@ private:
 	bool backEaten = false;
 	QPointer<QComboBox> comboPress; // P-8：这发按下落在组合框上（松手时据此决定吃不吃）
 };
+
+/* 定义在下面（3-3 模态遮挡那一段）；构造函数里要起它，先声明。 */
+static void androidStartPreviewVisibilityWatchdog();
 #endif // __ANDROID__
 
 OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
@@ -1280,6 +1283,10 @@ OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
 	/* 装在 app 上：所有控件的鼠标**和键盘**事件都过这一道（跟着进程活，不用管析构）。
 	 * ① 3-4 长按合成右键；② build 74 返回键当 Escape 用。 */
 	installEventFilter(new AndroidInputFilter(this));
+
+	/* 3-3 模态遮挡的兜底重算（每秒一拍那套事件触发的补充，见函数上方的实测记录）。
+	 * 放构造里只起一次；它自己判断是否需要再启。 */
+	androidStartPreviewVisibilityWatchdog();
 #endif
 
 	/* fix float handling */
@@ -1905,7 +1912,11 @@ static void androidSyncPreviewVisibility()
 static void androidResyncPreviewOnWindowToggle(QObject *receiver, QEvent *e)
 {
 	const QEvent::Type type = e->type();
-	if (type != QEvent::Show && type != QEvent::Hide)
+	/* 顺带认 Close：组合框弹层（QComboBoxPrivateContainer）关闭时只发 Close、不发 Hide
+	 *（2026-11-08 16:26 实测），多认一种事件类型没坏处。
+	 * 但**别指望它救黑屏**——真正那条路是 QDialog 关闭时**什么都不发**（见下面
+	 * obsAndroidPreviewVisibilityChanged 的说明）；这里只是顺手把能收的都收下。 */
+	if (type != QEvent::Show && type != QEvent::Hide && type != QEvent::Close)
 		return;
 	if (!receiver->isWidgetType())
 		return;
@@ -1924,6 +1935,44 @@ static void androidResyncPreviewOnWindowToggle(QObject *receiver, QEvent *e)
 		});
 	}
 	androidSyncPreviewVisibility();
+}
+
+/* 给对话框用的显式入口（声明在 widgets/OBSAndroidDisplay.hpp）。见那里的长注释：
+ * QDialog 在这套 Qt/Android 组合下关闭时**不发** Hide/Close，靠"监听窗口事件"必漏；
+ * 对话框自己叫一次最可靠。**
+ * 延到事件循环下一轮再算，是因为调用点常在对话框自己的 closeEvent/析构里：
+ * 那一刻顶层窗列表/可见性还没更新完，当场算会读到"窗口还在"的旧状态。 */
+void obsAndroidPreviewVisibilityChanged()
+{
+	QTimer::singleShot(0, qApp, [] { androidSyncPreviewVisibility(); });
+	androidSyncPreviewVisibility();
+}
+
+/* 周期兜底重算。**这不是"再算一次以防万一"，而是这个闩锁唯一可靠的出口**。
+ *
+ * 实测（2026-11-08，小米平板 25053RP5CC / Android 16）：hiddenForModal 卡在 true 会让
+ * **三条**恢复路径同时短路 —— Java 侧 attach() 拒（"3-3 藏面中"）、armHeal() 拒、
+ * healIfStale() 拒。于是预览永久黑屏，而渲染循环照跑（CPU 9.6% / 60.00fps），
+ * 开关源属性、切场景都救不回来；日志里从 16:08:57 起每秒一次 attach 失败直到日志结束。
+ *
+ * 触发那次卡死的具体事件是：组合框弹层（QComboBoxPrivateContainer）关闭时**只发 Close、
+ * 不发 Hide**，而重算原先只听 Show/Hide ⇒ 最后那次重算被丢掉，此后再无窗口事件来清闩锁。
+ * （上面 androidResyncPreviewOnWindowToggle 已把 Close 并进来，修的就是这一条；
+ *  这里再加一道与事件类型无关的兜底，因为"漏掉某类事件"这件事本身防不胜防 ——
+ *  surfaceOwner 未定、事件被其它过滤器吃掉、对话框不走 Show/Hide 都能再犯一次。）
+ *
+ * 代价：每秒一次 4 次指针判空 + 一次 setVisible（Java 侧幂等，状态没变就直接返回，
+ * 不触 relayout）。相对"永久黑屏"这个后果，这个代价可以忽略。 */
+static void androidStartPreviewVisibilityWatchdog()
+{
+	static QTimer *watchdog = nullptr;
+	if (watchdog)
+		return;
+	watchdog = new QTimer(qApp);
+	/* 5 秒够快（用户不会盯着黑屏超过几秒），又远低于"每秒都去动一次 view"的打扰阈值。 */
+	watchdog->setInterval(5000);
+	QObject::connect(watchdog, &QTimer::timeout, qApp, [] { androidSyncPreviewVisibility(); });
+	watchdog->start();
 }
 #endif // __ANDROID__
 

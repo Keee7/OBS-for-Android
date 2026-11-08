@@ -9,7 +9,10 @@ if(ENABLE_WHATSNEW AND TARGET OBS::browser-panels)
     set(CMAKE_FIND_PACKAGE_PREFER_CONFIG TRUE)
     find_package(MbedTLS 3...<4 REQUIRED)
     set(CMAKE_FIND_PACKAGE_PREFER_CONFIG FALSE)
-    find_package(nlohmann_json 3.11 REQUIRED)
+    # deps/nlohmann 提供 vendored 目标（见 frontend/CMakeLists.txt 顶部）；有就不再找宿主包。
+if(NOT TARGET nlohmann_json::nlohmann_json)
+  find_package(nlohmann_json 3.11 REQUIRED)
+endif()
 
     if(NOT TARGET OBS::blake2)
       add_subdirectory("${CMAKE_SOURCE_DIR}/deps/blake2" "${CMAKE_BINARY_DIR}/deps/blake2")

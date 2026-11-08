@@ -5,6 +5,12 @@
 #include <QFont>
 #include <QFontDialog>
 #include <QLineEdit>
+// RefreshProperties 重建后要恢复光标/选区（见该函数）：需要一个"当前焦点控件"的问答口，
+// 以及多行/富文本两种属性控件的光标 API。
+#include <QApplication>
+#include <QPlainTextEdit>
+#include <QTextEdit>
+#include <QTextCursor>
 #include <QSpinBox>
 #include <QSlider>
 #include <QDoubleSpinBox>
@@ -117,6 +123,32 @@ void OBSPropertiesView::RefreshProperties()
 	int h, v, hend, vend;
 	GetScrollPos(h, v, hend, vend);
 
+	/* 拆树之前先记下"光标在这棵树的哪个控件里、第几个字符、选了什么"。
+	 * 必须用 QApplication::focusWidget() 现读：lastWidget 是**上一轮**重建留下的，
+	 * 拆树后就悬垂了。限定"焦点在本视图子树里"，否则会把别的对话框的光标位置
+	 * 照抄到这里的控件上。 */
+	lastCursorPos = -1;
+	lastSelStart = -1;
+	lastSelEnd = -1;
+	QWidget *focus = QApplication::focusWidget();
+	if (focus && focus != this && this->isAncestorOf(focus)) {
+		if (QLineEdit *edit = qobject_cast<QLineEdit *>(focus)) {
+			lastCursorPos = edit->cursorPosition();
+			lastSelStart = edit->selectionStart();
+			lastSelEnd = edit->selectionEnd() < 0 ? lastCursorPos : edit->selectionEnd();
+		} else if (QPlainTextEdit *plain = qobject_cast<QPlainTextEdit *>(focus)) {
+			const QTextCursor cur = plain->textCursor();
+			lastSelStart = cur.selectionStart();
+			lastSelEnd = cur.selectionEnd();
+			lastCursorPos = cur.position();
+		} else if (QTextEdit *rich = qobject_cast<QTextEdit *>(focus)) {
+			const QTextCursor cur = rich->textCursor();
+			lastSelStart = cur.selectionStart();
+			lastSelEnd = cur.selectionEnd();
+			lastCursorPos = cur.position();
+		}
+	}
+
 	children.clear();
 	if (widget) {
 		widget->deleteLater();
@@ -154,8 +186,40 @@ void OBSPropertiesView::RefreshProperties()
 	lastFocused.clear();
 	if (lastWidget) {
 		lastWidget->setFocus(Qt::OtherFocusReason);
+		/* 把拆树前记下的光标/选区放回去。AddText 走 setText()，光标默认停在行尾；
+		 * 不恢复的话，一次刷新就把用户输到一半的位置丢掉 —— Android 上更明显：
+		 * 编辑语境（IME composing）绑在控件上，光标一跳行尾就等于把正在输入的字扔掉。 */
+		if (lastCursorPos >= 0) {
+			if (QLineEdit *edit = qobject_cast<QLineEdit *>(lastWidget)) {
+				if (lastSelStart >= 0 && lastSelEnd > lastSelStart)
+					edit->setSelection(lastSelStart, lastSelEnd - lastSelStart);
+				else
+					edit->setCursorPosition(lastCursorPos);
+			} else if (QPlainTextEdit *plain = qobject_cast<QPlainTextEdit *>(lastWidget)) {
+				QTextCursor cur = plain->textCursor();
+				if (lastSelStart >= 0 && lastSelEnd > lastSelStart) {
+					cur.setPosition(lastSelStart);
+					cur.setPosition(lastSelEnd, QTextCursor::KeepAnchor);
+				} else {
+					cur.setPosition(lastCursorPos);
+				}
+				plain->setTextCursor(cur);
+			} else if (QTextEdit *rich = qobject_cast<QTextEdit *>(lastWidget)) {
+				QTextCursor cur = rich->textCursor();
+				if (lastSelStart >= 0 && lastSelEnd > lastSelStart) {
+					cur.setPosition(lastSelStart);
+					cur.setPosition(lastSelEnd, QTextCursor::KeepAnchor);
+				} else {
+					cur.setPosition(lastCursorPos);
+				}
+				rich->setTextCursor(cur);
+			}
+		}
 		lastWidget = nullptr;
 	}
+	lastCursorPos = -1;
+	lastSelStart = -1;
+	lastSelEnd = -1;
 
 	if (hasNoProperties) {
 		QLabel *noPropertiesLabel = new QLabel(NO_PROPERTIES_STRING);

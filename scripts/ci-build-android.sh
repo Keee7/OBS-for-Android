@@ -324,7 +324,11 @@ install_nlohmann_json() {
     [ -d "$tmp/json" ] || { echo "FATAL: json.tar.xz 解包后没有 json/ 目录" >&2; exit 1; }
     # 头文件 → $PREFIX/include；CMake 包 → $PREFIX/share/cmake（官方布局）
     mkdir -p "$PREFIX/include/nlohmann" "$PREFIX/share/cmake"
-    cp -f "$tmp/json/single_include/nlohmann/json.hpp" "$PREFIX/include/nlohmann/"
+    # json_fwd.hpp must ship alongside json.hpp: GoLiveAPI_CensoredJson.hpp includes
+    # only the former, and its absence is exactly what broke frontend target 345/457.
+    for _h in json.hpp json_fwd.hpp; do
+        cp -f "$tmp/json/single_include/nlohmann/$_h" "$PREFIX/include/nlohmann/"
+    done
     rm -rf "$PREFIX/share/cmake/nlohmann_json"
     cp -r "$tmp/json/cmake" "$PREFIX/share/cmake/nlohmann_json" 2>/dev/null || true
     # 官方 release 里带的是 *.in 模板（给 install 用的），find_package 需要的是生成好的

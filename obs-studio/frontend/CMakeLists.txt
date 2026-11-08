@@ -12,6 +12,18 @@ endif()
 find_package(FFmpeg REQUIRED COMPONENTS avcodec avutil avformat)
 find_package(CURL REQUIRED)
 
+# nlohmann/json: vendored single-header copy under deps/nlohmann.
+# Upstream used a bare find_package(nlohmann_json 3.11 REQUIRED) here, which only
+# worked on machines that happened to have it installed (a conda copy on the Windows
+# dev box). On a clean CI runner the frontend build failed at target 345/457 with:
+#   fatal error: 'nlohmann/json_fwd.hpp' file not found
+# GoLiveAPI_CensoredJson.hpp includes only json_fwd.hpp, so BOTH headers matter.
+if(EXISTS "${CMAKE_SOURCE_DIR}/deps/nlohmann/CMakeLists.txt")
+  if(NOT TARGET nlohmann_json::nlohmann_json)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/deps/nlohmann" nlohmann)
+  endif()
+endif()
+
 if(NOT TARGET OBS::json11)
   add_subdirectory("${CMAKE_SOURCE_DIR}/deps/json11" json11)
 endif()
