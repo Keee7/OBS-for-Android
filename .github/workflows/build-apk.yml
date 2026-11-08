@@ -51,10 +51,15 @@ jobs:
       GRADLE_VERSION: 8.14.3
       BUILD_TOOLS: 36.0.0
       PLATFORM: android-35
-      # 缓存目录（必须与下面 cache 的 path 一致）
+      # 两个落盘目录都只用 github 上下文（job 级 env 的可用上下文里没有 runner.*，
+      # 写 runner.temp 会直接 "Unrecognized named-value: 'runner'"）。
+      # 也别写成裸 $GITHUB_WORKSPACE：env 的值不会做二次展开，那会变成一个字面量目录名，
+      # 连带把下面的缓存 path 也搞错。
+      # TOOLS_ROOT 必须与 cache 的 path 一致。
       TOOLS_ROOT: ${{ github.workspace }}/.ci-tools
-      # 下载物落在工作区外：它有几 GB，不该被工具链缓存反复打包。
-      DL_ROOT: ${{ runner.temp }}/obs-dl
+      # 下载物放到工作区**外**（$GITHUB_WORKSPACE/.. 就是 runner 的 work 目录）：
+      # 它有几 GB，放进 TOOLS_ROOT 会被工具链缓存反复打包。
+      DL_ROOT: ${{ github.workspace }}/../obs-dl
 
     steps:
       - uses: actions/checkout@v4
