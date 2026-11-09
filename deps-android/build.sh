@@ -53,8 +53,26 @@ SYSROOT="$TOOLCHAIN/sysroot"
 [ -d "$SYSROOT" ] || { echo "FATAL: NDK sysroot 不存在：$SYSROOT" >&2; exit 1; }
 
 export ABI TRIPLE TOOLCHAIN SYSROOT
-export CC="$TOOLCHAIN/bin/${TRIPLE}${API}-clang"
-export CXX="$TOOLCHAIN/bin/${TRIPLE}${API}-clang++"
+# ccache：把 CC/CXX 包一层，让读 $CC 的依赖（autotools 系 / x264 / ffmpeg）也进缓存。
+# 生成与真实编译器同名的 wrapper，而不是 "ccache <abs>" —— configure 会对 $CC
+# 做 --version / test -x 等探测，带空格的字符串容易踩坑；CCACHE_* 由 ci-build-android.sh
+# 统一配置，主构建用 CMAKE_*_COMPILER_LAUNCHER，共用一份缓存。
+CC_REAL="$TOOLCHAIN/bin/${TRIPLE}${API}-clang"
+CXX_REAL="$TOOLCHAIN/bin/${TRIPLE}${API}-clang++"
+if [ "${USE_CCACHE:-0}" = "1" ] && command -v ccache >/dev/null 2>&1; then
+  SHIM="$WORK/ccache-shim"
+  mkdir -p "$SHIM"
+  CCACHE_BIN="$(command -v ccache)"
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$CCACHE_BIN" "$CC_REAL" > "$SHIM/${TRIPLE}${API}-clang"
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$CCACHE_BIN" "$CXX_REAL" > "$SHIM/${TRIPLE}${API}-clang++"
+  chmod +x "$SHIM/${TRIPLE}${API}-clang" "$SHIM/${TRIPLE}${API}-clang++"
+  CC="$SHIM/${TRIPLE}${API}-clang"
+  CXX="$SHIM/${TRIPLE}${API}-clang++"
+else
+  CC="$CC_REAL"
+  CXX="$CXX_REAL"
+fi
+export CC CXX
 export AR="$TOOLCHAIN/bin/llvm-ar"
 export AS=$CC
 export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"

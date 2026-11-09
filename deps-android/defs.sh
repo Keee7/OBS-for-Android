@@ -46,6 +46,12 @@ _run_cmake() {
   _common_env
   # 交叉 pkg-config：只准在 $PREFIX 里找，避免误用宿主 /usr/lib 的库
   export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+  # CMake 系依赖的编译器由 NDK toolchain 直接指定为绝对路径，$CC 环境变量
+  # 对它们无效，所以要显式挂 launcher（与 OBS 主构建一致）。
+  local -a cc_launcher=()
+  if [ "${USE_CCACHE:-0}" = "1" ] && command -v ccache >/dev/null 2>&1; then
+    cc_launcher=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+  fi
   rm -rf "$s/build"
   cmake -S "$s" -B "$s/build" \
     -G Ninja \
@@ -63,6 +69,7 @@ _run_cmake() {
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DBUILD_SHARED_LIBS=OFF \
     -DBUILD_TESTING=OFF \
+    "${cc_launcher[@]}" \
     "$@" || return 1
   cmake --build "$s/build" -j"$JOBS" || return 1
   cmake --install "$s/build" || return 1

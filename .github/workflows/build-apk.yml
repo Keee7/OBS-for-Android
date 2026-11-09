@@ -83,11 +83,22 @@ jobs:
           # pkg-config/dpkg-dev：交叉 pkg-config 与 dpkg 架构查询。
           sudo apt-get install -y --no-install-recommends \
             7zip ninja-build build-essential curl unzip zip ca-certificates \
-            patch pkg-config dpkg-dev autoconf automake libtool nasm yasm
+            patch pkg-config dpkg-dev autoconf automake libtool nasm yasm ccache
           # 确认解包器真的在（脚本也会自己找一遍；早点失败更好定位）
           for c in 7z 7zz 7za 7zr; do command -v "$c" >/dev/null 2>&1 && { echo "7-Zip: $c"; break; }; done
           # 确认 autoreconf 就位（依赖构建的硬前提）
           autoreconf --version | head -1
+
+      # ---- ccache：编译对象缓存（deps 与主构建共用一份） ----
+      # key 带 sha + run_attempt：同一提交的手动 re-run 不会因 immutable key 报
+      # Cache save failed；restore-keys 前缀不含 sha/attempt，历史缓存仍可命中。
+      - name: Cache ccache objects
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: obsccache-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-${{ github.sha }}-${{ github.run_attempt }}
+          restore-keys: |
+            obsccache-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-
 
       # ---- 依赖缓存：最慢的一环（FFmpeg + 13 个依赖）----
       # 键里带 versions.sh/defs.sh/ffmpeg 补丁的内容哈希：依赖定义一变缓存即失效，
