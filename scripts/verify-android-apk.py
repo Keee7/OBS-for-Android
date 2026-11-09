@@ -116,18 +116,46 @@ def main():
                     errors.append('FFmpeg named MediaCodec decoder patch missing from APK')
                 if short == 'android-screen.so' and b'alpha_mode' not in payload:
                     errors.append('screen capture Alpha modes missing from APK')
+                if short == 'android-mediacodec.so' and (b'dropped_load=' not in payload or b'event=bitrate-update-rejected' not in payload):
+                    errors.append('MediaCodec stability/bitrate recovery code missing from APK')
                 if short == 'android-capture.so' and b'yuv_low_latency' not in payload:
                     errors.append('UVC YUV low-latency mode missing from APK')
                 if short == 'android-capture.so' and b'event=acquire_stopped' not in payload:
                     errors.append('UVC transport recovery diagnostics missing from APK')
+                if short == 'android-capture.so' and b'yuv_unbuffered' not in payload:
+                    errors.append('UVC independent cadence/buffering control missing from APK')
+                if short == 'android-capture.so' and any(marker not in payload for marker in
+                        (b'event=cadence_input', b'event=cadence_pts', b'event=probe_clock')):
+                    errors.append('UVC input cadence diagnostics missing from APK')
+                if short == 'liblibobs.so' and b'event=cadence_select' not in payload:
+                    errors.append('OBS UVC frame-selection diagnostics missing from APK')
                 digest = hashlib.sha256(payload).hexdigest()
                 print(f'{path} SHA-256 {digest}')
                 if not check_elf_header(payload):
                     errors.append(path + ' is not little-endian AArch64 ELF64')
                 if args.native_dir:
-                    candidates = [p for p in args.native_dir.rglob(short) if p.is_file()]
-                    if candidates and not any(hashlib.sha256(p.read_bytes()).hexdigest() == digest for p in candidates):
-                        errors.append(path + ' differs from every matching build-tree file')
+                    # Qt/runtime binaries come from the SDK. Project binaries
+                    # must match a fresh compiler output, never a packaging cache.
+                    external = short.startswith(('libQt', 'libplugins_')) or short == 'libc++_shared.so'
+                    if not external:
+                        candidates = [p for p in args.native_dir.rglob(short) if p.is_file()
+                                      and not any(part in ('android-build', 'rundir') for part in p.relative_to(args.native_dir).parts)]
+                        if not candidates:
+                            errors.append(path + ' has no authoritative compiler output')
+                        else:
+                            strip = readelf.with_name('llvm-strip.exe')
+                            matched = False
+                            for index, candidate in enumerate(candidates):
+                                if hashlib.sha256(candidate.read_bytes()).hexdigest() == digest:
+                                    matched = True
+                                    break
+                                normalized = Path(tmp) / f'current-{index}-{short}'
+                                run_tool([strip, '--strip-unneeded', '-o', normalized, candidate])
+                                if hashlib.sha256(normalized.read_bytes()).hexdigest() == digest:
+                                    matched = True
+                                    break
+                            if not matched:
+                                errors.append(path + ' differs from authoritative compiler output (including fresh strip)')
                 if short not in REQUIRED:
                     continue
                 temp = Path(tmp) / short

@@ -123,6 +123,8 @@ jobs:
           (github.event_name != 'workflow_dispatch' || inputs.sign)
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
           set -euo pipefail
           if [ -z "${KEYSTORE_B64:-}" ]; then
@@ -135,8 +137,8 @@ jobs:
           chmod 600 "$RUNNER_TEMP/release.jks"
           # 立刻验一次：口令错/文件坏在这里暴露，而不是等到最后签名那一步。
           keytool -list -keystore "$RUNNER_TEMP/release.jks" \
-            -storepass "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
-            -alias "${{ secrets.ANDROID_KEY_ALIAS }}" >/dev/null
+            -storepass:env STORE_PASS \
+            -alias "$KEY_ALIAS" >/dev/null
           echo "密钥库可用"
           echo "available=true" >> "$GITHUB_OUTPUT"
 

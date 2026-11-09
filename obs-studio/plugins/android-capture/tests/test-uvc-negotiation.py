@@ -38,7 +38,7 @@ prefix = r'''
 #define LOG_ERROR 3
 enum {MODE_MJPEG, MODE_YUYV};
 struct uvc_mode { int kind, n_intervals; uint8_t fmt_index, frame_index; uint32_t max_frame_size, def_interval; unsigned w,h; };
-struct uvc_dev { void *h; int vs_iface, vs_alt, chosen, eff_fps; uint32_t uvc_version, probe_len, payload_size, frame_interval, frame_buf_size; struct uvc_mode modes[1]; };
+struct uvc_dev { void *h; int vs_iface, vs_alt, chosen, eff_fps; uint32_t uvc_version, probe_len, payload_size, frame_interval, frame_buf_size, clock_frequency; struct uvc_mode modes[1]; };
 struct uvc_source { bool raw; int fps; };
 static int calls, alt_calls, fail_call, fail_code, alt_fail_call, alt_fail_code, get_error, short_read, wrong_mode;
 static void blog(int l, const char *fmt, ...) {(void)l;(void)fmt;}

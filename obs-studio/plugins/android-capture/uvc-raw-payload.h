@@ -16,7 +16,7 @@ struct uvc_raw_payload_state {
 	uint64_t bad_frames;
 	uint32_t pts;
 	uint8_t fid;
-	bool have_identity, have_pts, active, discarding;
+	bool have_identity, have_pts, active, discarding, completed;
 };
 static inline void uvc_raw_payload_init(struct uvc_raw_payload_state *s, uint8_t *frame, size_t expected_size)
 {
@@ -33,6 +33,7 @@ static inline void uvc_raw_payload_reset(struct uvc_raw_payload_state *s)
 	s->bytes = 0;
 	s->active = false;
 	s->discarding = false;
+	s->completed = false;
 	s->have_identity = false;
 	s->have_pts = false;
 }
@@ -67,11 +68,12 @@ static inline int uvc_raw_payload_feed(struct uvc_raw_payload_state *s, const ui
 	bool changed = s->have_identity && (fid != s->fid || (s->have_pts && pts_present && pts != s->pts));
 	if (changed) {
 		if (s->active) {
-			s->bad_frames++; /* No EOF before the next frame. */
+			s->bad_frames++; /* Incomplete frame before the next identity. */
 		}
 		s->bytes = 0;
 		s->active = false;
 		s->discarding = false;
+		s->completed = false;
 		s->have_identity = false;
 	}
 	if (!s->have_identity) {
@@ -84,6 +86,12 @@ static inline int uvc_raw_payload_feed(struct uvc_raw_payload_state *s, const ui
 		s->pts = pts;
 	}
 	if (s->discarding) {
+		/* A header-only terminator is valid after a size-complete frame.
+		 * Further image bytes or ERR cannot belong to that completed frame. */
+		if (s->completed && ((bmh & 0x40) || length > hle)) {
+			s->bad_frames++;
+			s->completed = false;
+		}
 		return 0;
 	}
 	if (bmh & 0x40) {
@@ -98,7 +106,7 @@ static inline int uvc_raw_payload_feed(struct uvc_raw_payload_state *s, const ui
 	}
 	memcpy(s->frame + s->bytes, payload + hle, count);
 	s->bytes += count;
-	if (!(bmh & 0x02)) {
+	if (s->bytes != s->expected_size && !(bmh & 0x02)) {
 		return 0;
 	}
 	if (s->bytes != s->expected_size) {
@@ -106,6 +114,7 @@ static inline int uvc_raw_payload_feed(struct uvc_raw_payload_state *s, const ui
 		return 0;
 	}
 	s->active = false;
-	s->discarding = true; /* Ignore duplicate same-frame payloads until new identity. */
+	s->discarding = true; /* Keep identity to reject extra same-frame data. */
+	s->completed = true;
 	return 1;
 }

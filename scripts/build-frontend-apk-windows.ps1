@@ -1,7 +1,9 @@
 param(
     [ValidateSet('configure','build','package','all')][string]$Action = 'all',
     [string]$ToolsRoot = (Join-Path (Split-Path $PSScriptRoot -Parent | Split-Path -Parent) 'build-tools'),
-    [int]$Jobs = 8
+    [int]$Jobs = 8,
+    [string]$SigningConfigFile = $env:OBS_ANDROID_SIGNING_CONFIG,
+    [switch]$DebugSigning
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -22,6 +24,9 @@ $env:ANDROID_NDK_ROOT = $ndk
 $env:ANDROID_NDK_HOME = $ndk
 $env:ANDROID_USER_HOME = Join-Path $tools 'android-user-home'
 $env:GRADLE_USER_HOME = Join-Path $tools 'gradle-cache'
+# Qt invokes Gradle internally. A persistent daemon can retain this script's
+# redirected output handle after a successful build and block the pipeline.
+$env:GRADLE_OPTS = ($env:GRADLE_OPTS + ' -Dorg.gradle.daemon=false').Trim()
 $env:PATH = "$tools/gradle/gradle-8.14.3/bin;$env:JAVA_HOME/bin;$hostQt/bin;$tools/ninja;$env:PATH"
 New-Item -ItemType Directory -Force -Path $build,$logs,$env:ANDROID_USER_HOME | Out-Null
 $revision = ((Get-Content -LiteralPath "$ndk/source.properties" | Where-Object { $_ -match '^Pkg.Revision\s*=' }) -split '=',2)[1].Trim()
@@ -58,7 +63,7 @@ if ($Action -in @('configure','all')) {
         '-DENABLE_SCRIPTING=OFF', '-DENABLE_HEVC=ON', "-DANDROID_SDK_ROOT=$sdk", "-DCMAKE_INSTALL_PREFIX=$build/install")
     Invoke-BuildTool $cmake $argsConfigure 'configure.log'
 }
-if ($Action -in @('build','all')) {
+if ($Action -in @('build','package','all')) {
     Invoke-BuildTool $cmake @('--build', $build, '--parallel', "$Jobs") 'native-build.log'
 }
 if ($Action -in @('package','all')) {
@@ -83,8 +88,15 @@ if ($Action -in @('package','all')) {
     $aligned = Join-Path $build 'obs-test-aligned.apk'
     $signed = Join-Path $releases ('OBS-Android-arm64-hwcodec-browser-' + (Get-Date -Format 'yyyyMMdd-HHmm') + '.apk')
     Invoke-BuildTool "$sdk/build-tools/36.0.0/zipalign.exe" @('-f', '-P', '16', '4', $apk.FullName, $aligned) 'zipalign.log'
-    Invoke-BuildTool "$sdk/build-tools/36.0.0/apksigner.bat" @('sign','--ks',"$repo/android-shell/debug.keystore",
-        '--ks-key-alias','androiddebugkey','--ks-pass','pass:android','--key-pass','pass:android','--out',$signed,$aligned) 'sign.log'
+    if ($DebugSigning) {
+        Invoke-BuildTool "$sdk/build-tools/36.0.0/apksigner.bat" @('sign','--ks',"$repo/android-shell/debug.keystore",
+            '--ks-key-alias','androiddebugkey','--ks-pass','pass:android','--key-pass','pass:android','--out',$signed,$aligned) 'sign.log'
+    } else {
+        if (!$SigningConfigFile) { $SigningConfigFile = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'release key.txt' }
+        if (!(Test-Path -LiteralPath $SigningConfigFile)) { throw 'Release signing configuration missing; pass -SigningConfigFile or explicitly choose -DebugSigning.' }
+        Invoke-BuildTool 'python' @("$PSScriptRoot/sign-android-apk.py", '--config', $SigningConfigFile,
+            '--input', $aligned, '--output', $signed, '--tools-root', $tools) 'sign.log'
+    }
     Invoke-BuildTool "$sdk/build-tools/36.0.0/apksigner.bat" @('verify','--verbose',$signed) 'verify-signature.log'
     Invoke-BuildTool "$sdk/build-tools/36.0.0/zipalign.exe" @('-c','-P','16','-v','4',$signed) 'verify-alignment.log'
     Get-FileHash -Algorithm SHA256 -LiteralPath $signed

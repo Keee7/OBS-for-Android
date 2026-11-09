@@ -74,6 +74,7 @@ struct encoder {
 	int fps_num, fps_den;
 	int64_t bitrate, last_output_us;
 	bool have_output_pts;
+	bool bitrate_update_disabled;
 	const char *failure_message;
 	uint8_t *pending_config;
 	size_t pending_size;
@@ -889,6 +890,7 @@ static bool update(void *data, obs_data_t *s)
 	struct encoder *e = data;
 	int64_t kbps = obs_data_get_int(s, "bitrate");
 	if (e->mode == 0) return true;
+	if (e->bitrate_update_disabled) return false;
 	if (kbps <= 0 || kbps > INT32_MAX / 1000)
 		return false;
 	int64_t rate = kbps * 1000;
@@ -901,8 +903,12 @@ static bool update(void *data, obs_data_t *s)
 	media_status_t st = AMediaCodec_setParameters(e->codec, f);
 	AMediaFormat_delete(f);
 	if (st != AMEDIA_OK) {
-		fail(e, "MediaCodec dynamic bitrate update failed");
-		publish_failure(e);
+		/* A component may encode correctly but reject runtime parameters.
+		 * Preserve the last accepted rate; the output watchdog still detects
+		 * a genuinely dead codec. Avoid retrying a rejected change every frame. */
+		e->bitrate_update_disabled = true;
+		mc_log(LOG_WARNING, "[android-mediacodec] event=bitrate-update-rejected status=%d retained_bitrate=%lld",
+		       (int)st, (long long)e->bitrate);
 		return false;
 	}
 	e->bitrate = rate;

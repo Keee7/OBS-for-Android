@@ -1,8 +1,8 @@
 # Building OBS for Android / 构建说明
 
-The current test APK is `0.1.19-alpha-stability` (20), arm64-v8a, minSdk 29 / targetSdk 35. Full native/Qt/Java/APK builds were completed on Windows for this version. WSL/Linux is the original port's build route; the additional WSL script preparation changes below have host checks, not a new full Linux build.
+The current test APK is `0.1.22-cadence-diagnostics` (23), package `com.antutu.ABenchMark`, arm64-v8a, minSdk 29 / targetSdk 35. This is a separate Android package from the previous `com.obsproject.studio` build, so it installs alongside it with independent private data; no OBS settings or service credentials are migrated. Java/JNI classes retain the `com.obsproject.studio` namespace. Full native/Qt/Java/APK builds and strict artifact checks passed on Windows for this version. WSL/Linux is the original port's build route; the additional WSL script preparation changes below have host checks, not a new full Linux build.
 
-当前测试包已完成 Windows 全量构建。下面分别说明 Windows 工具布局和原项目的 WSL 构建路径；工具链和依赖源码不随仓库提供，需要自行安装/下载。
+当前 versionCode 23 测试包已完成 Windows 全量 configure、native/Qt/Java/APK 构建、release 签名与 APK 严格核验。下面分别说明 Windows 工具布局和原项目的 WSL 构建路径；工具链和依赖源码不随仓库提供，需要自行安装/下载。
 
 ## Clone
 
@@ -82,7 +82,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-frontend-apk-w
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-frontend-apk-windows.ps1 -Action package -ToolsRoot D:/build-tools
 ```
 
-Packaging stages the latest plugin libraries, deploys Java/resources, aligns the APK and signs/verifies it with the development debug key. The signed APK appears under `releases/`; these files are ignored by Git. A native build alone is insufficient to guarantee the latest plugins are in the installable APK.
+Packaging first builds current sources, stages the latest plugin libraries, deploys Java/resources, aligns the APK and signs/verifies it with the external release key. Set `OBS_ANDROID_SIGNING_CONFIG` or pass `-SigningConfigFile`; the default is `Documents/release key.txt` outside the repository. Missing credentials fail signing. Use `-DebugSigning` only when explicitly choosing the public development key. The signed APK appears under `releases/`; these files are ignored by Git. A native build alone is insufficient to guarantee the latest plugins are in the installable APK.
 
 ### Inspect the APK
 

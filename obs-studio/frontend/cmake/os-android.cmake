@@ -183,13 +183,15 @@ set_target_properties(
     QT_ANDROID_EXTRA_LIBS "${_extra_libs}"
     # 清单与 FileProvider 的 paths 都在 cmake/android/ 下自带；一旦设了这个变量，
     # androiddeployqt 就不再拿自己的模板覆盖清单（同 android-shell 的做法）。
+    # package 是独立安装用的 application ID；应用代码和 JNI descriptor 继续使用旧 Java 包名。
     QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/android"
+    QT_ANDROID_PACKAGE_NAME "com.antutu.ABenchMark"
     # 真正生效的是 cmake/android/AndroidManifest.xml 里那对 versionCode/versionName
     # （设了 QT_ANDROID_PACKAGE_SOURCE_DIR 之后 androiddeployqt 用自带清单，不再拿模板覆盖）。
     # 这两行只是 androiddeployqt 的默认值，出包前必须与清单保持一致，否则 aapt2 报的版本
     # 和这里看到的是两个数 —— 三处版本号不一致就是这么来的。
-    QT_ANDROID_VERSION_NAME "0.1.19-alpha-stability"
-    QT_ANDROID_VERSION_CODE 20
+    QT_ANDROID_VERSION_NAME "0.1.22-cadence-diagnostics"
+    QT_ANDROID_VERSION_CODE 23
     QT_ANDROID_COMPILE_SDK_VERSION 35
     QT_ANDROID_TARGET_SDK_VERSION 35
     QT_ANDROID_MIN_SDK_VERSION 29)

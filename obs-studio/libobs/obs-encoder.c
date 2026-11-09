@@ -26,6 +26,29 @@
 
 static void encoder_set_video(obs_encoder_t *encoder, video_t *video);
 
+/* Diagnostic history must stay bounded even when an encoder drops input.
+ * Keep only an exact match on output: other entries can be pending B frames.
+ * Batched eviction bounds both memory and the cost of pruning abandoned entries. */
+#define MAX_ENCODER_PACKET_TIMES 4096
+struct encoder_packet_time *encoder_packet_time_push(obs_encoder_t *encoder)
+{
+	if (encoder->encoder_packet_times.num >= MAX_ENCODER_PACKET_TIMES)
+		da_erase_range(encoder->encoder_packet_times, 0, MAX_ENCODER_PACKET_TIMES / 4);
+	return da_push_back_new(encoder->encoder_packet_times);
+}
+
+static bool encoder_packet_time_take(obs_encoder_t *encoder, int64_t pts, struct encoder_packet_time *out)
+{
+	for (size_t i = encoder->encoder_packet_times.num; i > 0; i--) {
+		if (encoder->encoder_packet_times.array[i - 1].pts == pts) {
+			*out = encoder->encoder_packet_times.array[i - 1];
+			da_erase(encoder->encoder_packet_times, i - 1);
+			return true;
+		}
+	}
+	return false;
+}
+
 struct obs_encoder_info *find_encoder(const char *id)
 {
 	for (size_t i = 0; i < obs->encoder_types.num; i++) {
@@ -1608,34 +1631,9 @@ void send_off_encoder_packet(obs_encoder_t *encoder, bool success, bool received
 		pkt->sys_dts_usec += encoder->pause.ts_offset / 1000;
 		pthread_mutex_unlock(&encoder->pause.mutex);
 
-		/* Find the encoder packet timing entry for this PTS and discard
-		 * it together with every older entry, so the array cannot grow
-		 * without bound when frames are dropped upstream.
-		 */
 		struct encoder_packet_time ept_local;
-		struct encoder_packet_time *ept = NULL;
-		bool found_ept = false;
-		if (pkt->type == OBS_ENCODER_VIDEO) {
-			for (size_t i = encoder->encoder_packet_times.num; i > 0; i--) {
-				ept = &encoder->encoder_packet_times.array[i - 1];
-				if (ept->pts == pkt->pts) {
-					ept_local = *ept;
-					/* Drop everything older than the match, not just the match
-					 * itself. An encoder that accepts a frame without producing
-					 * a packet leaves its timing entry behind -- the MediaCodec
-					 * load-shedding path does exactly that -- and those stale
-					 * entries would otherwise accumulate for the whole stream.
-					 * Video PTS is strictly monotonic here (no B frames), so any
-					 * earlier entry is either already reported or unreachable. */
-					da_erase_range(encoder->encoder_packet_times, 0, i);
-					found_ept = true;
-					break;
-				}
-			}
-			if (!found_ept)
-				blog(LOG_DEBUG, "%s: Encoder packet timing for PTS %" PRId64 " not found", __FUNCTION__,
-				     pkt->pts);
-		}
+		bool found_ept = pkt->type == OBS_ENCODER_VIDEO &&
+			encoder_packet_time_take(encoder, pkt->pts, &ept_local);
 
 		pthread_mutex_lock(&encoder->callbacks_mutex);
 
@@ -1689,7 +1687,7 @@ bool do_encode(struct obs_encoder *encoder, struct encoder_frame *frame, const u
 	 * (frame encode request complete) and current PTS. PTS is used to
 	 * associate the frame timing data with the encode packet. */
 	if (frame_cts) {
-		struct encoder_packet_time *ept = da_push_back_new(encoder->encoder_packet_times);
+		struct encoder_packet_time *ept = encoder_packet_time_push(encoder);
 		// Get the frame encode request complete timestamp
 		if (success) {
 			ept->ferc = os_gettime_ns();

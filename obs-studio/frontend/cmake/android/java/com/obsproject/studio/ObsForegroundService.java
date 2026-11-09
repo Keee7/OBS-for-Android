@@ -26,6 +26,11 @@
  */
 package com.obsproject.studio;
 
+import com.antutu.ABenchMark.R;
+
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.app.ActivityManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -70,6 +75,32 @@ public final class ObsForegroundService extends Service {
     /** 这个服务是不是我们替投影空手起起来的 —— 决定令牌换不成时该不该把它停掉 */
     private static volatile boolean startedForProjection = false;
 
+    private static volatile boolean cameraSourceActive;
+    private static volatile boolean microphoneSourceActive;
+
+    /** Called by the output watchdog when active source membership changes. */
+    public static synchronized boolean setCaptureSources(Context context, boolean camera, boolean microphone) {
+        boolean changed = cameraSourceActive != camera || microphoneSourceActive != microphone;
+        cameraSourceActive = camera;
+        microphoneSourceActive = microphone;
+        // Retry a deferred upgrade once the app returns to the foreground.
+        ObsForegroundService svc = instance;
+        if (changed || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && svc != null && appIsForeground() &&
+                ((camera && !svc.promotedCamera && svc.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) ||
+                 (microphone && !svc.promotedMicrophone && svc.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED))))
+            retypeIfNeeded();
+        return (camera && context.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) ||
+                (microphone && context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED);
+    }
+
+    private static boolean appIsForeground() {
+        ActivityManager.RunningAppProcessInfo info = new ActivityManager.RunningAppProcessInfo();
+        ActivityManager.getMyMemoryState(info);
+        return info.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
+    }
+
+    private boolean promotedCamera;
+    private boolean promotedMicrophone;
     private PowerManager.WakeLock wakeLock;
     private NotificationManager nm;
 
@@ -88,6 +119,10 @@ public final class ObsForegroundService extends Service {
             return false;
         }
         final Context app = ctx.getApplicationContext();
+        if (!appIsForeground() && instance == null && (cameraSourceActive || microphoneSourceActive)) {
+            lastError = "Capture foreground service start deferred until app is foreground";
+            return false;
+        }
         final Intent it = new Intent(app, ObsForegroundService.class);
         it.putExtra(EXTRA_STATE, state == null ? "running" : state);
         startRequests++;
@@ -226,7 +261,8 @@ public final class ObsForegroundService extends Service {
      * 类型跟着"手上有没有投影令牌"走，而不是固定一种：Android 14+ 要求**投影在进行期间**必须由
      * 一个 mediaProjection 类型的前台服务持有，而 OBS 只有这一个保活服务（开两个就是两条常驻
      * 通知）。所以：没有投影时只报 specialUse（推流/录制的原状），有令牌时把这一位或上去。
-     * 清单里那条 foregroundServiceType 必须同时声明 specialUse|mediaProjection 两个，
+     * 清单还声明 camera|microphone；这些类型仅在对应采集源活跃且获权时加入。
+     * 清单里那条 foregroundServiceType 必须声明所有使用的类型，
      * 只改这里不改清单 = 一到录屏就 SecurityException。
      */
     private boolean promoteToForeground() {
@@ -251,14 +287,37 @@ public final class ObsForegroundService extends Service {
         int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
         if (projecting)
             type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
-        final String typeName = projecting ? "specialUse|mediaProjection" : "specialUse";
+        String typeName = projecting ? "specialUse|mediaProjection" : "specialUse";
+        boolean camera = cameraSourceActive && checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                && (promotedCamera || appIsForeground());
+        boolean microphone = microphoneSourceActive && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                && (promotedMicrophone || appIsForeground());
+        if (camera) {
+            type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
+            typeName += "|camera";
+        }
+        if (microphone) {
+            type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+            typeName += "|microphone";
+        }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                lastPromoteType = typeName;
                 startForeground(NOTIF_ID, n, type);
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // specialUse was introduced in API 34; camera and microphone in API 30.
+                int legacyType = type & ~ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
+                if (legacyType != 0) startForeground(NOTIF_ID, n, legacyType);
+                else startForeground(NOTIF_ID, n);
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && projecting) {
+                startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
             } else {
                 startForeground(NOTIF_ID, n);
             }
+            lastPromoteType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ? typeName :
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ? typeName.replace("specialUse|", "").replace("specialUse", "<default>") :
+                    projecting && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ? "mediaProjection" : "<default>";
+            promotedCamera = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && camera;
+            promotedMicrophone = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && microphone;
             lastError = "<none>";
             Log.i(TAG, "startForeground 类型=" + typeName);
             return true;

@@ -17,6 +17,7 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -95,12 +96,12 @@ struct aaudio_source {
 	int32_t device_id;
 	/* 设备重新枚举后 id 会变：记住产品名，重开时按名字找回同一台设备。 */
 	char product[128];
-	uint64_t last_pushes;
+	uint32_t last_pushes;
 	uint64_t dropped_fast;
 	uint64_t clock_start_ns;   /* 本次流的实时基准；重开时清零 */
 	uint64_t frames_pushed;    /* 已推送的音频时长（帧数） */
-	uint64_t cb_count;         /* 回调次数，用于识别"空转" */
-	uint64_t last_cb_count;
+	_Atomic uint32_t cb_count; /* callback writes, watchdog samples; wraps modulo 2^32 */
+	uint32_t last_cb_count;
 	uint64_t last_rate_check_ns;
 	uint64_t last_push_ns;
 	int32_t sample_rate;
@@ -120,7 +121,7 @@ struct aaudio_source {
 	enum audio_format obf;
 	enum speaker_layout layout;
 
-	uint64_t pushes;
+	_Atomic uint32_t pushes;
 	uint64_t frames_total;
 };
 
@@ -538,7 +539,7 @@ static aaudio_data_callback_result_t aaudio_data_cb(AAudioStream *stream, void *
 	 * 突发，长期严格锁在实时；超出的块丢掉，不把时间线冲垮。 */
 	const uint64_t now = os_gettime_ns();
 	const uint64_t dur_ns = (uint64_t) frames * 1000000000ULL / (uint64_t) data->rate;
-	data->cb_count++;
+	atomic_fetch_add_explicit(&data->cb_count, 1, memory_order_relaxed);
 	if (!data->clock_start_ns) {
 		data->clock_start_ns = now;
 		data->frames_pushed = 0;
@@ -549,7 +550,6 @@ static aaudio_data_callback_result_t aaudio_data_cb(AAudioStream *stream, void *
 		data->dropped_fast++;
 		return AAUDIO_CALLBACK_RESULT_CONTINUE;
 	}
-	data->last_push_ns = now;
 
 	struct obs_source_audio out = {0};
 	out.data[0] = audio;
@@ -560,10 +560,11 @@ static aaudio_data_callback_result_t aaudio_data_cb(AAudioStream *stream, void *
 	/* 回调给的是刚采到的最后一段：块尾视为"现在"，块首据此回推。 */
 	out.timestamp = now - dur_ns;
 
+	const uint32_t prior_pushes = atomic_load_explicit(&data->pushes, memory_order_relaxed);
 	/* 诊断：前几次与每 2000 次打印一次峰值，用来区分"回调在跑但设备给的全是 0"
 	 * 与"回调根本没拿到数据"。16bit 路径才有意义。 */
 	if (data->obf == AUDIO_FORMAT_16BIT && data->nch > 0 &&
-	    (data->pushes < 5 || data->pushes % 2000 == 0)) {
+	    (prior_pushes < 5 || prior_pushes % 2000 == 0)) {
 		const int16_t *pcm = audio;
 		int peak = 0;
 		const int samples = frames * (int) data->nch;
@@ -580,12 +581,12 @@ static aaudio_data_callback_result_t aaudio_data_cb(AAudioStream *stream, void *
 
 	obs_source_output_audio(data->source, &out);
 
-	data->pushes++;
+	const uint32_t pushes = atomic_fetch_add_explicit(&data->pushes, 1, memory_order_relaxed) + 1;
 	data->frames_pushed += (uint64_t) frames;
 	data->frames_total += (uint64_t) frames;
-	if (data->pushes == 1 || data->pushes % 500 == 0)
+	if (pushes == 1 || pushes % 500 == 0)
 		blog(LOG_INFO, "aaudio: 第 %llu 次回调（本批 %d 帧，累计 %llu 帧 ≈ %.2f 秒）",
-		     (unsigned long long) data->pushes, (int) frames, (unsigned long long) data->frames_total,
+		     (unsigned long long) pushes, (int) frames, (unsigned long long) data->frames_total,
 		     (double) data->frames_total / (double) data->rate);
 	return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
@@ -608,8 +609,9 @@ static void *aaudio_watch_thread(void *param)
 		}
 
 		const uint64_t now = os_gettime_ns();
-		if (data->pushes != data->last_pushes) {
-			data->last_pushes = data->pushes;
+		const uint32_t pushes = atomic_load_explicit(&data->pushes, memory_order_relaxed);
+		if (pushes != data->last_pushes) {
+			data->last_pushes = pushes;
 			data->last_push_ns = now;
 		}
 		const aaudio_stream_state_t st = AAudioStream_getState(data->stream);
@@ -619,8 +621,9 @@ static void *aaudio_watch_thread(void *param)
 		 * 拿重复数据兜圈子，state 还停在 3/4 之间，只能靠频率认出来。 */
 		bool spinning = false;
 		if (now - data->last_rate_check_ns >= 500000000ULL) {
-			const uint64_t delta = data->cb_count - data->last_cb_count;
-			data->last_cb_count = data->cb_count;
+			const uint32_t cb_count = atomic_load_explicit(&data->cb_count, memory_order_relaxed);
+			const uint32_t delta = cb_count - data->last_cb_count;
+			data->last_cb_count = cb_count;
 			data->last_rate_check_ns = now;
 			spinning = delta > 250;
 		}
@@ -633,7 +636,7 @@ static void *aaudio_watch_thread(void *param)
 			aaudio_stream_close(data);
 			data->last_push_ns = 0;
 			data->clock_start_ns = 0;
-			data->last_cb_count = data->cb_count;
+			data->last_cb_count = atomic_load_explicit(&data->cb_count, memory_order_relaxed);
 			data->last_rate_check_ns = 0;
 			os_sleep_ms(300);
 		}
@@ -647,11 +650,19 @@ static void aaudio_capture_stop(struct aaudio_source *data)
 		os_event_signal(data->stop_event);
 		pthread_join(data->thread, NULL);
 		data->thread_started = false;
-		blog(LOG_INFO, "aaudio: 采集已停止（共回调 %llu 次 / %llu 帧）", (unsigned long long) data->pushes,
-		     (unsigned long long) data->frames_total);
 	}
 
 	aaudio_stream_close(data);
+	/* close has returned; no callback can observe these resets. */
+	data->clock_start_ns = 0;
+	data->last_push_ns = 0;
+	data->last_pushes = atomic_load_explicit(&data->pushes, memory_order_relaxed);
+	data->last_cb_count = atomic_load_explicit(&data->cb_count, memory_order_relaxed);
+	data->last_rate_check_ns = 0;
+	/* Callback-owned frames_total is now stable. */
+	blog(LOG_INFO, "aaudio: 采集已停止（共回调 %llu 次 / %llu 帧）",
+	     (unsigned long long) atomic_load_explicit(&data->pushes, memory_order_relaxed),
+	     (unsigned long long) data->frames_total);
 
 	if (data->buf) {
 		bfree(data->buf);
@@ -691,6 +702,8 @@ static void *aaudio_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct aaudio_source *data = bzalloc(sizeof(*data));
 	data->source = source;
+	atomic_init(&data->cb_count, 0);
+	atomic_init(&data->pushes, 0);
 
 	if (os_event_init(&data->stop_event, OS_EVENT_TYPE_MANUAL) != 0) {
 		blog(LOG_ERROR, "aaudio: os_event_init 失败");
