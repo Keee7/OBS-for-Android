@@ -128,21 +128,6 @@ _autoconf_dep() {
 }
 
 build_rnnoise()  { _autoconf_dep rnnoise  --disable-examples; }
-build_fdk_aac() {
-  # NDK 30 的 sysroot 已删除 <log/log.h>，而 fdk-aac 2.0.3 在 __ANDROID__ 分支里
-  # 无条件 #include "log/log.h" 并调用 AOSP 私有的 android_errorWriteLog()。
-  # 该函数只用于把畸形码流事件写进内核 event log，去掉不影响编解码 → 提供 no-op 垫片。
-  mkdir -p "$PREFIX/include/log"
-  cat > "$PREFIX/include/log/log.h" <<'EOF'
-#pragma once
-#include <android/log.h>
-static inline void android_errorWriteLog(int tag, const char *subTag) {
-  (void) tag;
-  (void) subTag;
-}
-EOF
-  _autoconf_dep fdk-aac --disable-programs
-}
 build_speexdsp() { _autoconf_dep speexdsp --disable-doc; }
 
 build_freetype() {
