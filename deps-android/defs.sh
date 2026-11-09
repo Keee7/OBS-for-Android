@@ -22,18 +22,21 @@ _common_env() {
 }
 
 # ---------------------------------------------------------------- header-only
+# 这两个是 header-only：没有 make/cmake 的显式失败码，若 cp 失败（源码包解压不全、
+# 权限、磁盘）而最后一句 echo 成功，整个函数会返回 0，build.sh 就会打上永久 stamp。
+# 因此每条可能失败的命令都显式检查返回值。
 build_simde() {
   local s; s=$(src_dir simde)
-  mkdir -p "$PREFIX/include"
-  rm -rf "$PREFIX/include/simde"
-  cp -r "$s/simde" "$PREFIX/include/"
+  mkdir -p "$PREFIX/include" || return 1
+  rm -rf "$PREFIX/include/simde" || return 1
+  cp -r "$s/simde" "$PREFIX/include/" || return 1
   echo "       SIMDe 头文件已安装 (header-only)"
 }
 
 build_uthash() {
   local s; s=$(src_dir uthash)
-  mkdir -p "$PREFIX/include"
-  cp "$s/src/"*.h "$PREFIX/include/"
+  mkdir -p "$PREFIX/include" || return 1
+  cp "$s/src/"*.h "$PREFIX/include/" || return 1
   echo "       uthash 头文件已安装 (header-only)"
 }
 

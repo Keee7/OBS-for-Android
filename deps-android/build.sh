@@ -159,7 +159,11 @@ for dep in $TARGETS; do
   echo "[$dep $(dep_version "$dep")] ABI=$ABI 开始构建"
   _extract "$dep" || { FAILED="$FAILED $dep"; continue; }
   start=$(date +%s)
-  if ( set -e; "$fn" ); then
+  # 子 shell 放在 if 条件里时，bash 会让内部所有命令都忽略 -e（即使里面再 set -e），
+  # 于是失败会被后面的 echo 掩盖成"成功"并打上永久 stamp。改成普通上下文执行、
+  # 显式取返回码，才能保持"失败记入 FAILED、成功才落 stamp"的原语义。
+  ( set -e; "$fn" ); rc=$?
+  if [ "$rc" -eq 0 ]; then
     if ! _audit_arch; then
       echo "[$dep] 架构校验失败（$ABI 的产物里混进了别的架构），需 --clean 重做"
       FAILED="$FAILED $dep"
