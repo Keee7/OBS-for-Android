@@ -1888,13 +1888,16 @@ static void androidSyncPreviewVisibility()
 		for (const QWidget *w : tops) {
 			if (!w->isVisible() || !w->isWindow() || w == main || w == faceOwner || w == ownerWindow)
 				continue;
+			/* 这里原本还有 `case Qt::Desktop:`。它是 Qt 3/4 时代给"桌面控件"用的
+			 * 窗口类型，**Qt 6 起就是 no-op**（6.11 起标了 deprecated，配上本项目的
+			 * -Werror 会直接编不过）。任何 widget 的 windowType() 都不可能是它，
+			 * 所以删掉这个分支不改变任何行为。 */
 			switch (w->windowType()) {
 			case Qt::Tool:
 			case Qt::ToolTip:
 			case Qt::Popup:
 			case Qt::SplashScreen:
 			case Qt::SubWindow:
-			case Qt::Desktop:
 				continue;
 			default:
 				break;

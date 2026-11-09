@@ -129,11 +129,11 @@ bash scripts/ci-build-android.sh
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `NDK_VERSION` | `r30` | 与仓库 Windows 构建一致 |
-| `QT_VERSION` | `6.9.3` | |
+| `QT_VERSION` | `6.11.1` | 由 aqt 按版本解析官方仓库 |
 | `CMAKE_VERSION` | `3.31.6` | 必须 ≥ 3.28（obs-studio 的要求） |
 | `GRADLE_VERSION` | `8.14.3` | |
 | `BUILD_TOOLS` | `36.0.0` | 也用于 zipalign / apksigner |
-| `PLATFORM` | `android-35` | |
+| `PLATFORM` | `android-36` | Qt 6.11.1 的 Gradle 模板要 platform 36 |
 | `JOBS` | `nproc` | |
 | `TOOLS_ROOT` | `$HOME/android-ci-tools` | 工具链落盘（CI 缓存它） |
 | `DL_ROOT` | `$TOOLS_ROOT-dl` | 下载物落盘（**不**缓存） |
@@ -145,8 +145,8 @@ bash scripts/ci-build-android.sh
 - **CI 只跑构建**。它证明"能编译、能出包、签名有效"，**不**证明设备上能跑。
   真机验证仍需按 `scripts/DEVICE_TEST_QUICKSTART.md` 等文档手动进行。
 - **只有 arm64-v8a**。与本仓其余构建路径一致（x86_64 需要改 ABI 与依赖构建参数）。
-- **Qt 包来自官方公开直链**（`download.qt.io`），不需要 Qt 账号。若 Qt 换了目录结构，
-  `scripts/ci-build-android.sh` 的 `fetch_qt` 需要跟着改（函数里注释了实测可用的 URL 形态）。
+- **Qt 由 `aqt install-qt` 安装**（`all_os/android` + `linux/desktop`），不需要 Qt 账号。
+  升版本只改 `QT_VERSION`，不再需要找 7z 时间戳或手工拼 URL。
 - **依赖构建是源码级**：`fetch.sh` 里 `x264`/`rnnoise` 用的是分支（`master`）而不是 tag，
   所以不同时间构建出来的依赖**不是逐字节可复现**的。要严格复现请把版本钉到具体 commit。
 - **Release 只在该次构建真的签过名时才创建**（避免发出装不上的包）。
@@ -163,7 +163,7 @@ bash scripts/ci-build-android.sh
 | `CMake 版本过低` | 脚本会自拉 3.31.6，别用系统那个；确认 `PATH` 里 `$TOOLS_ROOT/cmake-*/bin` 在前 |
 | `Unrecognized named-value: 'runner'` | job 级 `env` 里用了 `runner.*`。`runner` 上下文只在 step 级可用；job 级改用 `github.*` |
 | `Could not find ... nlohmann_json` | 前端 `CMakeLists.txt:73` 无条件要它，但它不在 `deps-android` 清单里。脚本的 `install_nlohmann_json()` 会装；若报错看该函数日志 |
-| `uic: error while loading shared libraries: libicui18n.so.73` / `AutoUic subprocess error` / exit 127 | Qt 的 Linux 宿主工具（RHEL 8 构建）要 **ICU 73**，而 Ubuntu 24.04 自带 74。脚本的 `ensure_qt_icu()` 会装 Qt 那份 `icu-linux-Rhel8.6` 到 `$HOST/lib` 并加入 `LD_LIBRARY_PATH` |
+| `uic: error while loading shared libraries: libicui18n.so.73` / `AutoUic subprocess error` / exit 127 | **旧版 6.9.3 手工解包**漏了独立的 ICU 73 运行时包（Ubuntu 24.04 自带 74）。现在用 aqt 装完整 Qt 6.11.1 宿主包，不再缺 ICU；若换回 6.9.x 手工解包才需要重新处理 |
 | `Host tool ... 跑不起来` / 工具自检 FATAL | 宿主 Qt 工具缺共享库。脚本的 `probe_host_tools()` 在装配阶段就会撞出来（秒级），不必等构建 |
 | 签名步骤报口令错 | Secrets 里的四项要来自**同一次** `generate-release-key.sh` 输出 |
 | `base64: invalid input` | `ANDROID_KEYSTORE_BASE64` 粘贴时断行/带了多余字符；重新整行复制 |

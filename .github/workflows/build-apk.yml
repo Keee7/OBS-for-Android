@@ -46,11 +46,11 @@ jobs:
     env:
       # 工具链版本。改这里 = 改 CI 工具链；缓存键里带这些值，改动会自动失效重建。
       NDK_VERSION: r30
-      QT_VERSION: 6.9.3
+      QT_VERSION: 6.11.1
       CMAKE_VERSION: 3.31.6
       GRADLE_VERSION: 8.14.3
       BUILD_TOOLS: 36.0.0
-      PLATFORM: android-35
+      PLATFORM: android-36
       # 两个落盘目录都只用 github 上下文（job 级 env 的可用上下文里没有 runner.*，
       # 写 runner.temp 会直接 "Unrecognized named-value: 'runner'"）。
       # 也别写成裸 $GITHUB_WORKSPACE：env 的值不会做二次展开，那会变成一个字面量目录名，
