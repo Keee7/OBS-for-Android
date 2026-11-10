@@ -21,6 +21,41 @@
 
 #include <qt-wrappers.hpp>
 
+#ifdef __ANDROID__
+#include "OBSAndroidDisplay.hpp"
+#include <QTimer>
+#include <QToolBar>
+
+void OBSBasic::ResizeAndroidDocks()
+{
+	/* Keep all five panels visible. Reserve room for the complete touch
+	 * toolbars, then share the remaining width between the bottom panels. */
+	const int toolbarWidth = qMax(ui->scenesToolbar->sizeHint().width(), ui->sourcesToolbar->sizeHint().width());
+
+	/* 左栏宽度：下界保证工具栏的 5 个按钮放得下，上界防止在宽屏上无限膨胀。
+	 *
+	 * 上界 280 沿用上游 on_resetDocks_triggered 的写法（那里是
+	 * min(width*30%, 280)）。没有它的话，1280 宽的平板上这里是 358、
+	 * 1600 宽是 448 —— 左栏随屏幕变宽一直涨，把预览挤掉。
+	 *
+	 * 手写 qMax/qMin 而不是 qBound：下界可能大于上界（工具栏特别宽时），
+	 * 那种情况应该保工具栏完整、让上限失效，而 qBound 要求 min <= max。 */
+	const int side = qMax(toolbarWidth + 8, qMin(width() * 28 / 100, 280));
+	const int rest = qMax(1, width() - side);
+	resizeDocks({ui->scenesDock, ui->sourcesDock}, {side, side}, Qt::Horizontal);
+	resizeDocks({ui->mixerDock, ui->transitionsDock, controlsDock},
+		    {rest * 35 / 100, rest * 25 / 100, rest * 40 / 100}, Qt::Horizontal);
+
+	/* Give spare height to the preview without overriding content minima. */
+	const int bottom = qMax(ui->mixerDock->minimumSizeHint().height(),
+				qMax(ui->transitionsDock->minimumSizeHint().height(),
+				     controlsDock->minimumSizeHint().height()));
+	resizeDocks({ui->mixerDock, ui->transitionsDock, controlsDock}, {bottom, bottom, bottom}, Qt::Vertical);
+	obsAndroidDisplayLog("Android layout: side=%d bottom=%d preview=%dx%d", side, bottom,
+			     ui->preview->width(), ui->preview->height());
+}
+#endif
+
 void setupDockAction(QDockWidget *dock)
 {
 	QAction *action = dock->toggleViewAction();
@@ -98,6 +133,10 @@ void OBSBasic::on_resetDocks_triggered(bool force)
 	int sideDockWidth = std::min(width() * 30 / 100, 280);
 	resizeDocks({ui->scenesDock, ui->sourcesDock}, {sideDockWidth, sideDockWidth}, Qt::Horizontal);
 
+#ifdef __ANDROID__
+	QTimer::singleShot(0, this, &OBSBasic::ResizeAndroidDocks);
+#endif
+
 	activateWindow();
 }
 
@@ -107,6 +146,14 @@ void OBSBasic::on_lockDocks_toggled(bool lock)
 		lock ? QDockWidget::NoDockWidgetFeatures
 		     : (QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
 			QDockWidget::DockWidgetFloatable);
+
+#ifdef __ANDROID__
+	/* 渲染期把 dock 浮成独立原生窗口会销毁当前 Surface：makeCurrent() 拿不到
+	 * EGLSurface → QRhiGles2 初始化失败 → SIGSEGV（PORTING.md「浮动 dock 崩溃」），
+	 * 小屏上浮动后也找不回。仅去掉 Floatable，Movable/Closable 按上游原值保留；
+	 * 桌面不受影响。放在 mainFeatures 派生之前，几个主 dock 一并生效。 */
+	features &= ~QDockWidget::DockWidgetFloatable;
+#endif
 
 	QDockWidget::DockWidgetFeatures mainFeatures = features;
 	mainFeatures &= ~QDockWidget::QDockWidget::DockWidgetClosable;
@@ -151,6 +198,11 @@ void OBSBasic::AddDockWidget(QDockWidget *dock, Qt::DockWidgetArea area, bool ex
 		lock ? QDockWidget::NoDockWidgetFeatures
 		     : (QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
 			QDockWidget::DockWidgetFloatable);
+
+#ifdef __ANDROID__
+	/* 同上（PORTING.md「浮动 dock 崩溃」）：Android 上不给新增 dock 浮动能力。 */
+	features &= ~QDockWidget::DockWidgetFloatable;
+#endif
 
 	setupDockAction(dock);
 	dock->setFeatures(features);
@@ -220,6 +272,11 @@ void OBSBasic::AddCustomDockWidget(QDockWidget *dock)
 		lock ? QDockWidget::NoDockWidgetFeatures
 		     : (QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
 			QDockWidget::DockWidgetFloatable);
+
+#ifdef __ANDROID__
+	/* 同上（PORTING.md「浮动 dock 崩溃」）：Android 上不给新增 dock 浮动能力。 */
+	features &= ~QDockWidget::DockWidgetFloatable;
+#endif
 
 	dock->setFeatures(features);
 	addDockWidget(Qt::RightDockWidgetArea, dock);

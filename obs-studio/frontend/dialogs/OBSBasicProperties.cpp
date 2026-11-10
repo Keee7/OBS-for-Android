@@ -18,6 +18,9 @@
 #include "OBSBasicProperties.hpp"
 
 #include <utility/display-helpers.hpp>
+#ifdef __ANDROID__
+#include <utility/android-window-fit.hpp>
+#endif
 #include <widgets/OBSBasic.hpp>
 
 #include <properties-view.hpp>
@@ -66,9 +69,34 @@ OBSBasicProperties::OBSBasicProperties(QWidget *parent, OBSSource source_)
 	ui->setupUi(this);
 	ui->buttonBox->button(QDialogButtonBox::Ok)->setFocus();
 
+#ifdef __ANDROID__
+	/* .ui 里 windowSplitter 写死了 minimumSize 0x400，而手机横屏的可用高只有 393
+	 * —— 对话框被锁在 456 高（400 + 按钮行 56），底部「恢复默认/预览转场/取消/确定」
+	 * 整行落在屏外。日志里的证据：
+	 *   CLAMP-BLOCKED OBSBasicProperties：目标 720x377 实际 720x456；
+	 *   最占高度=QSplitter/windowSplitter minH=400 sizeHint=430
+	 *
+	 * 清掉这个下限后，splitter 的最小高由两个子控件决定：预览 150 + 属性视图 150
+	 * + 分隔条 ≈ 305，加上按钮行 56 = 361 < 393，装得下。
+	 *
+	 * 同时把预览的最小高从 150 降下来：393 的高度里给预览 150 的话，属性区只剩
+	 * 一百多像素，调参数很难受。具体值按屏幕可用高推导（androidPreviewMinHeight，
+	 * 约可用高的 1/5，夹在 60~120），不是写死的 80。用户还能拖分隔条自己调
+	 * （childrenCollapsible=false，不会拖没）。 */
+	ui->windowSplitter->setMinimumHeight(0);
+	ui->preview->setMinimumHeight(androidPreviewMinHeight(this));
+#endif
+
 	if (cx > 400 && cy > 400) {
 		resize(cx, cy);
 	}
+
+#ifdef __ANDROID__
+	/* 必须在上面那次 resize(cx, cy) **之后** —— 否则会把刚从配置里恢复的尺寸
+	 * 又覆盖回 .ui 的设计尺寸。放在 show 之前是为了避免"先大后小"闪一下
+	 * （见 android-window-fit.hpp）。 */
+	androidFitTopLevelToScreen(this);
+#endif
 
 	/* The OBSData constructor increments the reference once */
 	obs_data_release(oldSettings);

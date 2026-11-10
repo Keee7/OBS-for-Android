@@ -487,8 +487,15 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 
 	statsDock = new OBSDock();
 	statsDock->setObjectName(QStringLiteral("statsDock"));
+#ifdef __ANDROID__
+	/* 渲染期把 dock 浮成独立原生窗口会销毁当前 Surface：makeCurrent() 拿不到
+	 * EGLSurface → QRhiGles2 初始化失败 → SIGSEGV（PORTING.md「浮动 dock 崩溃」），
+	 * 小屏上浮动后也找不回。仅去掉 Floatable，Closable/Movable 按上游原值保留。 */
+	statsDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
+#else
 	statsDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
 			       QDockWidget::DockWidgetFloatable);
+#endif
 	statsDock->setWindowTitle(QTStr("Basic.Stats"));
 	addDockWidget(Qt::BottomDockWidgetArea, statsDock);
 	statsDock->setVisible(false);
@@ -1456,78 +1463,42 @@ void OBSBasic::OBSInit()
 	}
 
 #ifdef __ANDROID__
-	/* 3-4 16:10 校形。上面恢复回来的 DockState 是上一轮 saveState() 存的原样，那套比例是给桌面
-	 * 键鼠的：1600x1000 实测下排占 325 px（顶它的是控制按钮那一竖列 5 行，本轮已改两列）、
-	 * 空混音器还横吃 710 px，预览面因此左右各黑 179 px。
-	 * 恢复完再按屏幕尺寸重给一遍。每轮启动都强制 —— Android 上 dock 分隔条拖不动，没有"用户手动值"
-	 * 会被覆盖。resizeDocks 会被各 dock 的 minimumSizeHint 顶住，实际落点看下面那条回读。
-	 *
-	 * 左栏给到 30% 不是审美：命中区抬到 48 dp 以后，场景/源那两排工具栏是 6 个钮 = 288 逻辑像素，
-	 * 34i 实测 24%（=265）装不下，**下移按钮被裁掉点不到了**。下排三个 dock 按"左栏剩下的宽度"分
-	 * （不是整窗宽）—— 34i 那版按整窗宽算，加起来 992 > 可用的 799，等于让 Qt 自己去归一化，
-	 * 落点不可控。比例沿用 34i 实测落点：混音器 51 / 转场 16 / 控制 33。 */
+	/* Match the transition buttons instead of imposing oversized touch controls.
+	 * Row sizing lives in SceneTree and SourceTreeDelegate. */
 	{
-		const int w = width();
-		const int h = height();
-		const int side = w * 30 / 100;
-		const int bottom = h * 20 / 100;
-		const int restW = w - side;
-		const int mixerW = restW * 51 / 100;
-		const int transW = restW * 16 / 100;
-		const int controlsW = restW * 33 / 100;
-		resizeDocks({ui->scenesDock, ui->sourcesDock}, {side, side}, Qt::Horizontal);
-		resizeDocks({ui->mixerDock, ui->transitionsDock, controlsDock},
-			    {mixerW, transW, controlsW}, Qt::Horizontal);
-		resizeDocks({ui->mixerDock, ui->transitionsDock, controlsDock}, {bottom, bottom, bottom},
-			    Qt::Vertical);
-		obsAndroidDisplayLog("3-4 校形：窗口 %dx%d → 请求 左栏%d 下排高%d（下排总宽%d 控制%d）", w, h, side,
-				     bottom, restW, controlsW);
-		QTimer::singleShot(0, this, [this] {
-			obsAndroidDisplayLog("3-4 校形：落定 混音器=%dx%d 转场=%dx%d 控制=%dx%d",
-					     ui->mixerDock->width(), ui->mixerDock->height(),
-					     ui->transitionsDock->width(), ui->transitionsDock->height(),
-					     controlsDock->width(), controlsDock->height());
-		});
-	}
-
-	/* 3-4 触摸命中区。Android 触摸目标下限 48 dp，Qt 在 Android 上的逻辑像素就是 dp（1600x1000 物理
-	 * = 1067x667 逻辑，密度 1.5 —— 34h 用 updateRect 的 px/逻辑比反推过）。而 .ui 里
-	 * scenesToolbar/sourcesToolbar 的 iconSize 是 16x16，够不上。
-	 * 工具按钮用 setMinimumSize 而不是样式表：样式表一沾 QToolButton，主题画的那层底就没了。
-	 *
-	 * 两个列表的行高走两条路，因为是两套机制：
-	 *  - 源列表：SourceTreeDelegate::sizeHint 直接返回行高，样式表盖不过它（34i 实测 30→30 无效），
-	 *    那一刀夹在 SourceTreeDelegate.cpp；34j 实测 48 ✓。
-	 *  - 场景列表：走默认 QStyledItemDelegate，样式表说了算（34i 实测 25→58 ✓）；34j 回读还是 25，
-	 *    量了一下选中行那条蓝带只有 40 物理 px = 27 dp，所以这条得留着。
-	 *    已知代价：SceneTree::SetGridMode() 会整个覆盖 widget 样式表，切一次网格模式这条就没了。 */
-	{
-		/* 只给"真挂在 toolbar 上的动作按钮"设最小尺寸，别用 findChildren<QToolButton*>：
-		 * 那还会捞到 QToolBar 的扩展钮（">>"，平时不可见）—— 两排工具栏各 5 个动作，探针却都数到 6，
-		 * 多的就是它。给它也塞 48x48 下限，toolbar 算溢出时要替它留出 48 px，真实宽度不够就把
-		 * 后面的动作全收进扩展菜单：34k 实测 16:9→16:10 实时改分辨率后，两排从 5 个钮掉到 2 个
-		 * （b34k-03-1610-after-rotate.png）。走 actions()+widgetForAction 才只碰得到真按钮。 */
-		auto bumpToolbar = [](QToolBar *bar) {
-			bar->setIconSize(QSize(24, 24));
+		const QSize buttonSize = ui->transitionAdd->sizeHint();
+		const QSize iconSize = ui->transitionAdd->iconSize();
+		auto configureToolbar = [buttonSize, iconSize](QToolBar *bar) {
+			bar->setIconSize(iconSize);
 			int bumped = 0;
 			const auto actions = bar->actions();
 			for (QAction *act : actions) {
 				if (act->isSeparator())
 					continue;
 				if (auto *b = qobject_cast<QToolButton *>(bar->widgetForAction(act))) {
-					b->setMinimumSize(48, 48);
+					b->setProperty("androidTouchAction", true);
 					++bumped;
 				}
 			}
+			/* Scope button dimensions to real actions, leaving Qt's overflow
+			 * button alone. Zero border/padding makes these the outer dimensions. */
+			bar->setStyleSheet(QStringLiteral(
+					  "QToolBar { min-height: %1px; max-height: %1px; padding: 1px; }"
+					  "QToolButton[androidTouchAction=\"true\"] { min-width: %2px; max-width: %2px;"
+					  " min-height: %3px; max-height: %3px; padding: 0px; margin: 0px; border: none; }")
+					  .arg(buttonSize.height() + 2)
+					  .arg(buttonSize.width())
+					  .arg(buttonSize.height()));
 			return bumped;
 		};
-		const int sceneButtons = bumpToolbar(ui->scenesToolbar);
-		const int sourceButtons = bumpToolbar(ui->sourcesToolbar);
+		const int sceneButtons = configureToolbar(ui->scenesToolbar);
+		const int sourceButtons = configureToolbar(ui->sourcesToolbar);
+		/* Size docks after the touch controls and restored layout have settled. */
+		QTimer::singleShot(0, this, &OBSBasic::ResizeAndroidDocks);
 
-		ui->scenes->setStyleSheet(ui->scenes->styleSheet() + " QListView::item { min-height: 48px; }");
-
-		obsAndroidDisplayLog("3-4 命中区：动作钮 场景=%d 源=%d → 48dp；行高 场景=%d 源=%d", sceneButtons,
-				     sourceButtons, ui->scenes->sizeHintForRow(0), ui->sources->sizeHintForRow(0));
+		obsAndroidDisplayLog("Android toolbar: scenes=%d sources=%d button=%dx%d rows=%d/%d", sceneButtons,
+				     sourceButtons, buttonSize.width(), buttonSize.height(), ui->scenes->sizeHintForRow(0),
+				     ui->sources->sizeHintForRow(0));
 		QTimer::singleShot(0, this, [this] {
 			auto visibleCount = [](QToolBar *bar) {
 				int n = 0;
