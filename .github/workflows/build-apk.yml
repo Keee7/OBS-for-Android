@@ -253,6 +253,8 @@ jobs:
         with:
           name: build-logs-${{ github.run_attempt }}
           path: |
+            build-fe-*/CMakeFiles/CMakeConfigureLog.yaml
+            build-fe-*/CMakeCache.txt
             build-fe-*/CMakeFiles/CMakeOutput.log
             build-fe-*/CMakeFiles/CMakeError.log
             build-fe-*/frontend/android-*-deployment-settings.json
@@ -269,9 +271,13 @@ jobs:
             echo "=== 工具链目录 ==="
             ls -1 "$TOOLS_ROOT" 2>/dev/null || true
             echo "=== SDK 平台 / build-tools ==="
-            ls -1 "$SDK/platforms" "$SDK/build-tools" 2>/dev/null || true
-            echo "=== CMake 错误日志尾部 ==="
-            tail -n 60 build-fe-*/CMakeFiles/CMakeError.log 2>/dev/null || true
+            ls -1 "$TOOLS_ROOT/android-sdk/platforms" "$TOOLS_ROOT/android-sdk/build-tools" 2>/dev/null || true
+            echo "=== CMake 配置日志尾部 ==="
+            for f in build-fe-*/CMakeFiles/CMakeConfigureLog.yaml build-fe-*/CMakeFiles/CMakeError.log; do
+              [ -f "$f" ] || continue
+              echo "--- $f"
+              tail -n 60 "$f" || true
+            done
             echo "=== deployment settings ==="
             for f in build-fe-*/frontend/android-*-deployment-settings.json; do
               [ -f "$f" ] || continue
