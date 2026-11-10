@@ -62,6 +62,25 @@ export PATH="$CMAKE_HOME/bin:$GRADLE_HOME/bin:$SDK/platform-tools:$SDK/cmdline-t
 
 log() { echo ""; echo "########## $* ##########"; }
 
+# ccache：按「预处理后的源码 + 编译器 + 完整编译选项」的内容哈希复用 .o。
+# 三层共用一份缓存：deps 的 autotools/x264/ffmpeg 走 build.sh 里的同名 wrapper，
+# deps 的 CMake 系与 OBS 主构建走 CMAKE_{C,CXX}_COMPILER_LAUNCHER。
+# COMPILERCHECK=content 是因为 NDK 是解压出来的，不同 runner 上 mtime 不同。
+setup_ccache() {
+    if ! command -v ccache >/dev/null 2>&1; then
+        log "ccache 未安装，跳过编译缓存"
+        return 0
+    fi
+    export USE_CCACHE=1
+    export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
+    export CCACHE_BASEDIR="${CCACHE_BASEDIR:-$ROOT}"
+    export CCACHE_NOHASHDIR=true
+    export CCACHE_COMPILERCHECK=content
+    export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-3G}"
+    export CCACHE_COMPRESS=true
+    log "ccache 已启用：$(ccache --version | head -1) dir=$CCACHE_DIR"
+}
+
 # 7-Zip 的二进制名随发行版而变：Ubuntu 24.04 的 7zip 包给 7zz 与 7z/7za/7zr，
 # 旧版 p7zip 给 7z。Qt 的 .7z 必须解包，所以这里把常见名字都认一遍，不写死。
 SEVENZIP=""
@@ -292,7 +311,7 @@ build_deps() {
     log "拉取依赖源码"
     ( cd "$ROOT/deps-android" && bash fetch.sh )
     log "交叉编译依赖（含 FFmpeg/x264，最慢的一环）"
-    ( cd "$ROOT/deps-android" && NDK="$NDK" API="$API" JOBS="$JOBS" bash build.sh "$ABI" )
+    ( cd "$ROOT/deps-android" && NDK="$NDK" API="$API" JOBS="$JOBS" USE_CCACHE="${USE_CCACHE:-0}" bash build.sh "$ABI" )
     for lib in libavcodec.a libusb-1.0.a libturbojpeg.a; do
         [ -f "$PREFIX/lib/$lib" ] || { echo "FATAL: 依赖缺失：$PREFIX/lib/$lib" >&2; exit 1; }
     done
@@ -368,6 +387,10 @@ EOF
 configure_obs() {
     log "CMake configure"
     rm -rf "$BUILD_DIR"
+    local -a cc_launcher=()
+    if [ "${USE_CCACHE:-0}" = "1" ] && command -v ccache >/dev/null 2>&1; then
+        cc_launcher=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+    fi
     cmake -S "$ROOT/obs-studio" -B "$BUILD_DIR" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
         -DANDROID_ABI="$ABI" \
@@ -382,7 +405,8 @@ configure_obs() {
         -DENABLE_SCRIPTING=OFF \
         -DENABLE_HEVC=ON \
         -DANDROID_SDK_ROOT="$SDK" \
-        -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/install"
+        -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/install" \
+        "${cc_launcher[@]}"
 }
 
 build_obs() {
@@ -478,6 +502,7 @@ sign_apk() {
 # ---------------------------------------------------------------- main
 
 find_sevenzip
+setup_ccache
 
 log "环境"
 echo "repo      : $ROOT"

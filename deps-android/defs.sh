@@ -22,18 +22,21 @@ _common_env() {
 }
 
 # ---------------------------------------------------------------- header-only
+# 这两个是 header-only：没有 make/cmake 的显式失败码，若 cp 失败（源码包解压不全、
+# 权限、磁盘）而最后一句 echo 成功，整个函数会返回 0，build.sh 就会打上永久 stamp。
+# 因此每条可能失败的命令都显式检查返回值。
 build_simde() {
   local s; s=$(src_dir simde)
-  mkdir -p "$PREFIX/include"
-  rm -rf "$PREFIX/include/simde"
-  cp -r "$s/simde" "$PREFIX/include/"
+  mkdir -p "$PREFIX/include" || return 1
+  rm -rf "$PREFIX/include/simde" || return 1
+  cp -r "$s/simde" "$PREFIX/include/" || return 1
   echo "       SIMDe 头文件已安装 (header-only)"
 }
 
 build_uthash() {
   local s; s=$(src_dir uthash)
-  mkdir -p "$PREFIX/include"
-  cp "$s/src/"*.h "$PREFIX/include/"
+  mkdir -p "$PREFIX/include" || return 1
+  cp "$s/src/"*.h "$PREFIX/include/" || return 1
   echo "       uthash 头文件已安装 (header-only)"
 }
 
@@ -43,6 +46,12 @@ _run_cmake() {
   _common_env
   # 交叉 pkg-config：只准在 $PREFIX 里找，避免误用宿主 /usr/lib 的库
   export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+  # CMake 系依赖的编译器由 NDK toolchain 直接指定为绝对路径，$CC 环境变量
+  # 对它们无效，所以要显式挂 launcher（与 OBS 主构建一致）。
+  local -a cc_launcher=()
+  if [ "${USE_CCACHE:-0}" = "1" ] && command -v ccache >/dev/null 2>&1; then
+    cc_launcher=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+  fi
   rm -rf "$s/build"
   cmake -S "$s" -B "$s/build" \
     -G Ninja \
@@ -60,6 +69,7 @@ _run_cmake() {
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DBUILD_SHARED_LIBS=OFF \
     -DBUILD_TESTING=OFF \
+    "${cc_launcher[@]}" \
     "$@" || return 1
   cmake --build "$s/build" -j"$JOBS" || return 1
   cmake --install "$s/build" || return 1
@@ -128,21 +138,6 @@ _autoconf_dep() {
 }
 
 build_rnnoise()  { _autoconf_dep rnnoise  --disable-examples; }
-build_fdk_aac() {
-  # NDK 30 的 sysroot 已删除 <log/log.h>，而 fdk-aac 2.0.3 在 __ANDROID__ 分支里
-  # 无条件 #include "log/log.h" 并调用 AOSP 私有的 android_errorWriteLog()。
-  # 该函数只用于把畸形码流事件写进内核 event log，去掉不影响编解码 → 提供 no-op 垫片。
-  mkdir -p "$PREFIX/include/log"
-  cat > "$PREFIX/include/log/log.h" <<'EOF'
-#pragma once
-#include <android/log.h>
-static inline void android_errorWriteLog(int tag, const char *subTag) {
-  (void) tag;
-  (void) subTag;
-}
-EOF
-  _autoconf_dep fdk-aac --disable-programs
-}
 build_speexdsp() { _autoconf_dep speexdsp --disable-doc; }
 
 build_freetype() {

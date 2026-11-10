@@ -3,6 +3,8 @@
 # 网络：fetch.sh 默认使用 curl 的网络配置；需要额外代理时设置 OBS_PROXY。
 #
 # zlib 不在此列：直接使用 NDK sysroot 自带的 libz.a / zlib.h。
+# fdk-aac 已移除：其授权与 GPLv2+ 不兼容，且 obs-libfdk 默认 ENABLE_LIBFDK=OFF
+# （plugins/obs-libfdk/CMakeLists.txt 会 target_disable），不随包分发。
 
 # 依赖分组（按移植阶段）：
 #   core    -> 阶段1 libobs 必需
@@ -26,7 +28,6 @@ dep_version() {
     freetype) echo 2.13.3 ;;
     mbedtls)  echo 3.6.4 ;;
     curl)     echo 8.15.0 ;;
-    fdk-aac)  echo 2.0.3 ;;
     *)        echo "" ;;
   esac
 }
@@ -48,7 +49,6 @@ dep_url() {
     freetype) echo "https://downloads.sourceforge.net/project/freetype/freetype2/${v}/freetype-${v}.tar.gz" ;;
     mbedtls)  echo "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${v}/mbedtls-${v}.tar.bz2" ;;
     curl)     echo "https://github.com/curl/curl/archive/refs/tags/curl-$(echo "$v" | tr '.' '_').tar.gz" ;;
-    fdk-aac)  echo "https://github.com/mstorsjo/fdk-aac/archive/refs/tags/v${v}.tar.gz" ;;
     *)        echo "" ;;
   esac
 }
@@ -59,7 +59,7 @@ dep_batch() {
     simde|uthash|jansson|x264|ffmpeg) echo core ;;
     libusb|libuvc|libjpeg-turbo)     echo usb ;;
     speexdsp|rnnoise|freetype)       echo filters ;;
-    mbedtls|curl|fdk-aac)            echo output ;;
+    mbedtls|curl)                   echo output ;;
     *)                               echo unknown ;;
   esac
 }
@@ -70,7 +70,7 @@ batch_deps() {
     core)    echo "simde uthash jansson x264 ffmpeg" ;;
     usb)     echo "libusb libjpeg-turbo libuvc" ;;
     filters) echo "speexdsp rnnoise freetype" ;;
-    output)  echo "mbedtls curl fdk-aac" ;;
+    output)  echo "mbedtls curl" ;;
     *)       echo "" ;;
   esac
 }
