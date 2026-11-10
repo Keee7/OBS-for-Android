@@ -24,6 +24,14 @@ QT="${QT_DIR:?缺 QT_DIR}"
 HOST="${QT_HOST_PATH:?缺 QT_HOST_PATH}"
 NDK="${NDK_ROOT:?缺 NDK_ROOT}"
 GRADLE_BIN="${GRADLE_BIN:-$HOME/toolchain/gradle-8.14.5/bin}"
+COMPILE_SDK_VERSION="${OBS_ANDROID_COMPILE_SDK_VERSION:-36}"
+case "$COMPILE_SDK_VERSION" in
+  ''|*[!0-9]*) echo "FATAL: OBS_ANDROID_COMPILE_SDK_VERSION 必须为 SDK 平台版本号" >&2; exit 1 ;;
+esac
+[ -f "$SDK/platforms/android-$COMPILE_SDK_VERSION/android.jar" ] || {
+  echo "FATAL: 缺少 SDK platform android-$COMPILE_SDK_VERSION，请先运行 sdkmanager \"platforms;android-$COMPILE_SDK_VERSION\"" >&2
+  exit 1
+}
 
 export PATH="$HOME/.venv/bin:$GRADLE_BIN:$SDK/platform-tools:$PATH"
 export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"
@@ -68,6 +76,7 @@ cmake -S "$ROOT/obs-studio" -B "$BUILD_DIR" -G Ninja \
   -DENABLE_SCRIPTING=OFF \
   -DENABLE_HEVC=ON \
   -DANDROID_SDK_ROOT="$SDK" \
+  -DOBS_ANDROID_COMPILE_SDK_VERSION="$COMPILE_SDK_VERSION" \
   -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/install" 2>&1 | tee "$LOGDIR/fe-$ABI-apk-configure-wsl.log" | tail -25
 CFG=${PIPESTATUS[0]}
 echo "=== configure exit=$CFG ==="
@@ -120,6 +129,7 @@ echo "=== androiddeployqt 出包（日志 $LOGDIR/fe-$ABI-apk-wsl.log） ==="
     --output "$FE/android-build" \
     --apk "$FE/android-build/obs-studio.apk" \
     --depfile "$FE/android-build/obs-studio.d" \
+    --android-platform "android-$COMPILE_SDK_VERSION" \
     --builddir "$FE" --release ) > "$LOGDIR/fe-$ABI-apk-wsl.log" 2>&1
 APK_RC=$?
 echo "=== androiddeployqt exit=$APK_RC ==="

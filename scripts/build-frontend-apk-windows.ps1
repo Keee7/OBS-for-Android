@@ -85,6 +85,8 @@ if ($Action -in @('configure','build','package','all')) {
         '-DCMAKE_BUILD_TYPE=RelWithDebInfo', "-DCMAKE_PREFIX_PATH=$prefix;$qt", "-DQT_HOST_PATH=$hostQt",
         '-DCMAKE_POLICY_VERSION_MINIMUM=3.5', '-DENABLE_PLUGINS=ON', '-DENABLE_FRONTEND=ON',
         '-DENABLE_SCRIPTING=OFF', '-DENABLE_HEVC=ON', "-DANDROID_SDK_ROOT=$sdk", "-DCMAKE_INSTALL_PREFIX=$build/install")
+    # This local route uses Qt 6.9.3 and explicitly deploys against platform 35.
+    $argsConfigure += '-DOBS_ANDROID_COMPILE_SDK_VERSION=35'
     $argsConfigure += "-DOBS_ANDROID_PACKAGE_NAME=$packageId", "-DOBS_ANDROID_PACKAGE_SOURCE_DIR=$packageSource"
     Invoke-BuildTool $cmake $argsConfigure 'configure.log'
 }

@@ -332,6 +332,7 @@ configure_obs() {
         -DENABLE_SCRIPTING=OFF \
         -DENABLE_HEVC=ON \
         -DANDROID_SDK_ROOT="$SDK" \
+        -DOBS_ANDROID_COMPILE_SDK_VERSION="${PLATFORM#android-}" \
         -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/install" \
         "${cc_launcher[@]}"
 }
