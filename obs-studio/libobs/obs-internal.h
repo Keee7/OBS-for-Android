@@ -858,6 +858,10 @@ struct obs_source {
 	uint64_t next_audio_sys_ts_min;
 	uint64_t last_frame_ts;
 	uint64_t last_sys_timestamp;
+#ifdef __ANDROID__
+	uint64_t android_uvc_cadence_start, android_uvc_selected, android_uvc_empty, android_uvc_waiting, android_uvc_skipped;
+	bool android_uvc_cadence_valid, android_uvc_showing, android_uvc_active, android_uvc_has_data;
+#endif
 	bool async_rendered;
 
 	/* audio */
@@ -1489,6 +1493,7 @@ extern void obs_encoder_gpu_error(obs_encoder_t *encoder);
 extern bool obs_encoder_start_checked(obs_encoder_t *encoder, encoded_callback_t new_packet, void *param);
 
 extern bool do_encode(struct obs_encoder *encoder, struct encoder_frame *frame, const uint64_t *frame_cts);
+extern struct encoder_packet_time *encoder_packet_time_push(obs_encoder_t *encoder);
 extern void send_off_encoder_packet(obs_encoder_t *encoder, bool success, bool received, struct encoder_packet *pkt);
 
 void obs_encoder_destroy(obs_encoder_t *encoder);

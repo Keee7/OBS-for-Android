@@ -60,19 +60,21 @@ static void video_format_get_parameters_for_format(int cs,int range,enum video_f
  { (void)fmt;(void)mn;(void)mx;assert(cs==709&&range==0);matrix_calls++;matrix[0]=709; }
 static void obs_source_output_video(void *source,struct obs_source_frame *out) { (void)source;output_calls++;delivered=*out; }
 '''
+    prefix += (SOURCE.parent / 'uvc-cadence-stats.h').read_text(encoding='utf-8-sig').replace('#pragma once', '')
     structures = r'''
 struct uvc_source {
  int width,height,fps,prefer_fmt;
  bool yuv_low_latency;
  char fmt_setting[16];
  struct obs_source_frame yuv_frame;
+ struct uvc_cadence_stats cadence;
  uint64_t last_frame_timestamp,frames_dropped;
  void *source;
 };
 struct uvc_dev {
  struct uvc_mode modes[64];
  int n_modes,eff_fmt,eff_w,eff_h,eff_fps;
- uint32_t quirks,frame_interval,frame_buf_size,payload_size;
+ uint32_t quirks,frame_interval,frame_buf_size,payload_size,clock_frequency;
 };
 '''
     body = '\n'.join(function(source, name) for name in (
@@ -100,7 +102,7 @@ int main(void) {
  probe[22]=0;probe[23]=0x80;
  probe[26]=0;probe[27]=0x6c;probe[28]=0xdc;probe[29]=2;
  probe_readback(&d,probe,sizeof(probe));
- assert(d.frame_buf_size==4147200&&d.payload_size==32768&&d.frame_interval==166666);
+ assert(d.frame_buf_size==4147200&&d.payload_size==32768&&d.frame_interval==166666&&d.clock_frequency==48000000);
  uint8_t *pixels=malloc(1920U*1080U*2U);assert(pixels);
  struct uvc_mode m={.kind=MODE_YUYV,.w=1920,.h=1080};
  assert(push_frame_yuv(&s,&m,pixels,4147200,200));

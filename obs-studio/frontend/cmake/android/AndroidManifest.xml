@@ -51,8 +51,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.obsproject.studio"
     android:installLocation="auto"
-    android:versionCode="19"
-    android:versionName="0.1.18-alpha-vsync-fix">
+    android:versionCode="23"
+    android:versionName="0.1.22-cadence-diagnostics">
     <uses-permission android:name="android.permission.INTERNET"  />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"  />
     <uses-permission android:name="android.permission.RECORD_AUDIO"  />
@@ -61,6 +61,8 @@
     <uses-permission android:name="android.permission.CAMERA"  />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"  />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"  />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <!-- P-18-a：Android 14+ 要求"投影进行期间"由一个 mediaProjection 档的前台服务兜着，
          而这一档要单独的权限（与下面 service 的类型声明成套，缺任何一处就是不一致）。
          b109 已实测到缺这一档的后果（不是推定）：只报 specialUse 时换令牌当场抛
@@ -107,7 +109,7 @@
         <service
             android:name="com.obsproject.studio.ObsForegroundService"
             android:exported="false"
-            android:foregroundServiceType="specialUse|mediaProjection">
+            android:foregroundServiceType="specialUse|mediaProjection|camera|microphone">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="OBS Studio 推流/录制期间的编码与上传保活" />

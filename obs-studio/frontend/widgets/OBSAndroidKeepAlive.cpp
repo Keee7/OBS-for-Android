@@ -6,6 +6,7 @@
 #include <QJniObject>
 
 #include <mutex>
+#include <cstring>
 
 #include <obs.hpp>
 
@@ -33,8 +34,29 @@ static std::mutex g_keepAliveMutex;
 static bool g_running = false;
 static QString g_state;
 
+struct CaptureSources { bool camera = false; bool microphone = false; };
+
+static bool collectCaptureSource(void *data, obs_source_t *source)
+{
+    auto *sources = static_cast<CaptureSources *>(data);
+    if (!obs_source_active(source)) return true;
+    const char *id = obs_source_get_id(source);
+    if (id && strcmp(id, "android_camera_input") == 0) sources->camera = true;
+    if (id && strcmp(id, "android_audio_input") == 0) sources->microphone = true;
+    return true;
+}
+
 bool obsAndroidKeepAliveSetRunning(bool running, const char *state, QString *detail)
 {
+    CaptureSources sources;
+    obs_enum_sources(collectCaptureSource, &sources);
+    const QJniObject activity = hostActivity();
+    const bool capture = activity.isValid() &&
+        QJniObject::callStaticMethod<jboolean>(kServiceClass, "setCaptureSources",
+            "(Landroid/content/Context;ZZ)Z", activity.object<jobject>(),
+            jboolean(sources.camera), jboolean(sources.microphone));
+    if (!running && capture) state = "capturing";
+    running = running || capture;
 	const QString what = state ? QString::fromUtf8(state) : QStringLiteral("running");
 	QString jstatus;
 	bool repeat = false;

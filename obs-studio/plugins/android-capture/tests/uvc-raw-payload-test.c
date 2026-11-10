@@ -20,8 +20,8 @@ int main(void)
 	assert(uvc_raw_payload_feed(&s, single, sizeof(single)) == 1);
 	const uint8_t first[] = {2, 0x80, 1, 2, 3, 4, 5, 6, 7, 8};
 	const uint8_t eof[] = {2, 0x82};
-	assert(!uvc_raw_payload_feed(&s, first, sizeof(first)));
-	assert(uvc_raw_payload_feed(&s, eof, sizeof(eof)) == 1);
+	assert(uvc_raw_payload_feed(&s, first, sizeof(first)) == 1);
+	assert(!uvc_raw_payload_feed(&s, eof, sizeof(eof)));
 	const uint8_t shortf[] = {2, 0x83, 1, 2};
 	assert(!uvc_raw_payload_feed(&s, shortf, sizeof(shortf)) && s.bad_frames == 1);
 	assert(!uvc_raw_payload_feed(&s, single, sizeof(single)) && s.bad_frames == 1);
@@ -64,5 +64,27 @@ int main(void)
 	assert(!uvc_raw_payload_feed(&s, missing_pts, sizeof(missing_pts)) && s.bad_frames == 2);
 	const uint8_t reserved[] = {2, 0x12, 1, 2, 3, 4, 5, 6, 7, 8};
 	assert(!uvc_raw_payload_feed(&s, reserved, sizeof(reserved)) && s.bad_frames == 3);
+	/* FID-only frames are delivered at the exact size, even without EOF. */
+	uvc_raw_payload_init(&s, frame, 8);
+	const uint8_t fid0a[] = {2, 0x80, 1, 2, 3, 4};
+	const uint8_t fid0b[] = {2, 0x80, 5, 6, 7, 8};
+	const uint8_t fid1[] = {2, 0x81, 8, 7, 6, 5, 4, 3, 2, 1};
+	assert(!uvc_raw_payload_feed(&s, fid0a, sizeof(fid0a)));
+	assert(uvc_raw_payload_feed(&s, fid0b, sizeof(fid0b)) == 1);
+	assert(!memcmp(frame, (const uint8_t[]){1,2,3,4,5,6,7,8}, 8));
+	assert(uvc_raw_payload_feed(&s, fid1, sizeof(fid1)) == 1);
+	assert(!uvc_raw_payload_feed(&s, (const uint8_t[]){2, 0x81, 9}, 3));
+	assert(s.bad_frames == 1); /* extra image data is not another frame */
+	assert(!uvc_raw_payload_feed(&s, (const uint8_t[]){2, 0x81, 10}, 3));
+	assert(s.bad_frames == 1);
+	assert(!uvc_raw_payload_feed(&s, fid0a, sizeof(fid0a)));
+	assert(uvc_raw_payload_feed(&s, fid1, sizeof(fid1)) == 1);
+	assert(s.bad_frames == 2); /* short FID-only frame */
+	assert(!uvc_raw_payload_feed(&s, fid0a, sizeof(fid0a)));
+	uvc_raw_payload_reset(&s); /* transport sequence gap */
+	assert(s.bad_frames == 3);
+	assert(!uvc_raw_payload_feed(&s, (const uint8_t[]){2, 0x82, 5, 6, 7, 8}, 6));
+	assert(s.bad_frames == 4); /* tail after gap is short */
+	assert(uvc_raw_payload_feed(&s, fid1, sizeof(fid1)) == 1);
 	puts("uvc raw payload tests passed");
 }

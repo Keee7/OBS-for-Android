@@ -1,12 +1,12 @@
 # Android 测试包与实机记录
 
-测试包：`releases/OBS-Android-arm64-hwcodec-browser-20261107-2022.apk`
+测试包：`releases/OBS-Android-arm64-hwcodec-browser-20261109-0722.apk`
 
-- 应用版本：`0.1.18-alpha-vsync-fix`，versionCode `19`。
-- 包名：`com.obsproject.studio`；arm64-v8a；最低 Android 10，目标 API 35。
-- 文件大小：97,673,246 字节。
-- SHA-256：`51dedc66751af38e977feb27e04e889c3ace11cd526fbbae4adaec830dfcff21`。
-- 使用仓库标准开发测试密钥，保留 debuggable 以便提取日志。
+- 应用版本：`0.1.22-cadence-diagnostics`，versionCode `23`。
+- 历史版本 23 Antutu 测试 APK 包名：`com.antutu.ABenchMark`；arm64-v8a；最低 Android 10，目标 API 35。当前 Windows 默认构建包名是 `com.obsproject.studio`，加 `-AntutuPackage` 才生成上述 Antutu ID。Java/JNI 类始终使用 `com.obsproject.studio` 命名空间。
+- 文件大小：97,693,726 字节。
+- SHA-256：`7be3b92d64594cca3f96016d8d618851c10fd385260376a8f003d24d33a67edf`。
+- 使用仓库外 release 签名配置；安装前请先确认目标设备上没有同包名应用。
 
 ## 本轮：采集回调的源/reader 生命周期（P1-6/P1-7）与保活重试
 
@@ -167,13 +167,13 @@ python scripts/verify-1080p60.py recording.mp4
 
 ```text
 adb logcat -d -s ObsCodecCapabilities:* OBS-browser:* OBS-storage:* OBS-screen:*
-adb shell run-as com.obsproject.studio ls files/.config/obs-studio/logs
+adb shell run-as com.antutu.ABenchMark ls files/.config/obs-studio/logs
 ```
 
 按列出的具体文件名读取 OBS 日志，例如：
 
 ```text
-adb exec-out run-as com.obsproject.studio cat files/.config/obs-studio/logs/<具体日志文件名>
+adb exec-out run-as com.antutu.ABenchMark cat files/.config/obs-studio/logs/<具体日志文件名>
 ```
 
 反馈时附设备系统版本、场景源、编码组件名、输出参数、问题发生时间、录像样本及相关日志；分享前移除推流密钥、登录信息等私人数据。

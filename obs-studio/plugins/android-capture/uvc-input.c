@@ -56,6 +56,7 @@
 #include "uvc-stream-buffer.h"
 #include "uvc-bulk-pump.h"
 #include "uvc-raw-payload.h"
+#include "uvc-cadence-stats.h"
 #include "uvc-recovery.h"
 
 /* ---------------- UVC 常量（规范 4.3.1.1 / A.9） ---------------- */
@@ -158,6 +159,7 @@ struct uvc_source {
 	bool yuv_low_latency;
 	struct obs_source_frame yuv_frame;
 	uint64_t last_frame_timestamp;
+	struct uvc_cadence_stats cadence;
 	struct uvc_reset_limit reset_limit; /* persists across sessions for this source */
 	char fmt_setting[16]; /* video_format 设置的原始字符串，打日志消歧义用 */
 	char usb_id[16];      /* 首台匹配设备的 "vid:pid"（label 前缀），拔插换号后按它认设备 */
@@ -191,6 +193,7 @@ struct uvc_dev {
 	uint8_t ep_in;
 	uint16_t uvc_version;  /* bcdUVC，决定 probe 结构长度 */
 	uint32_t probe_len;    /* 26（1.0）/ 34（1.1）/ 48（1.5），GET_LEN 优先 */
+	uint32_t clock_frequency; /* raw PROBE dwClockFrequency, diagnostic only */
 	uint32_t payload_size; /* dwMaxPayloadTransferSize（0 = 设备没报，读块用固定大块） */
 	int usb_speed;
 
@@ -711,6 +714,7 @@ static int probe_struct_len(struct uvc_dev *d)
 /* 把协商结果从 probe 结构里读回 d（间隔 / 帧长 / payload 长） */
 static void probe_readback(struct uvc_dev *d, const uint8_t *p, uint32_t len)
 {
+	d->clock_frequency = len >= 30 ? get_u32le(p + 26) : 0;
 	if (len >= 26) {
 		d->frame_interval = get_u32le(p + 4);
 		d->frame_buf_size = get_u32le(p + 18);
@@ -738,6 +742,7 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 		return probe_len;
 	d->probe_len = (uint32_t)probe_len;
 	d->payload_size = 0;
+	d->clock_frequency = 0;
 	memset(probe, 0, sizeof(probe));
 	memset(back, 0, sizeof(back));
 
@@ -854,6 +859,7 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 	     mode_kind_name(m->kind), (unsigned)m->w, (unsigned)m->h, (unsigned)d->frame_interval,
 	     d->frame_interval ? 10000000U / d->frame_interval : 0U, (unsigned)d->frame_buf_size,
 	     (unsigned)d->payload_size, (unsigned)d->probe_len, (unsigned)d->uvc_version, got ? "成功" : "跳过");
+	blog(LOG_INFO, "uvc: event=probe_clock readback=%d clock_frequency=%u", got, (unsigned)d->clock_frequency);
 	return 0;
 }
 
@@ -1030,6 +1036,7 @@ static bool push_frame_yuv(struct uvc_source *s, const struct uvc_mode *m, const
 		out->data[1] = (uint8_t *)buf + (size_t)m->w * m->h;
 		out->linesize[1] = m->w;
 	}
+	uvc_cadence_observe(&s->cadence, buf, m->w, m->h, m->kind == MODE_YUYV, received_ns);
 	out->timestamp = frame_timestamp(s, received_ns);
 	/* Keep raw YUV through the OBS upload/conversion path; no CPU BGRA conversion. */
 	obs_source_output_video(s->source, out);
@@ -1531,12 +1538,13 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	}
 	raw_packets = use_raw_packets(&d, s);
 	uvc_raw_payload_init(&raw, st.frame_buf, st.frame_total);
+	memset(&s->cadence, 0, sizeof(s->cadence));
 	stats_start_ns = os_gettime_ns();
 	blog(LOG_INFO,
-	     "uvc: event=started format=%s width=%u height=%u negotiated_fps=%.3f raw_packets=%d low_latency=%d usb_speed=%d payload=%u",
+	     "uvc: event=started format=%s width=%u height=%u negotiated_fps=%.3f raw_packets=%d low_latency=%d usb_speed=%d payload=%u unbuffered=%d",
 	     mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h,
 	     d.frame_interval ? 10000000.0 / d.frame_interval : 0.0, raw_packets, raw_low_latency(s), d.usb_speed,
-	     d.payload_size);
+	     d.payload_size, obs_source_async_unbuffered(s->source));
 
 	streaming = true;
 	set_status(s, "采集中：%s %ux%u", mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h);
@@ -1675,15 +1683,19 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			const uint64_t bad_before = raw.bad_frames;
 			size_t offset = 0;
 			for (; offset + payload <= block.size; offset += payload) {
-				if (uvc_raw_payload_feed(&raw, block.data + offset, payload))
+				if (uvc_raw_payload_feed(&raw, block.data + offset, payload)) {
+					uvc_cadence_observe_pts(&s->cadence, raw.have_pts, raw.pts);
 					deliver_raw_frame(s, mode, &st, &delivery, &recovery, received_ns);
+				}
 			}
 			/* UVC allows the last payload of a frame to be shorter than
 			 * dwMaxPayloadTransferSize. The short packet still ends a payload,
 			 * so feed the remainder instead of treating it as data loss. */
 			if (offset < block.size &&
-			    uvc_raw_payload_feed(&raw, block.data + offset, block.size - offset))
+			    uvc_raw_payload_feed(&raw, block.data + offset, block.size - offset)) {
+				uvc_cadence_observe_pts(&s->cadence, raw.have_pts, raw.pts);
 				deliver_raw_frame(s, mode, &st, &delivery, &recovery, received_ns);
+			}
 			s->frames_dropped += raw.bad_frames - bad_before;
 			uvc_bulk_pump_release(pump, &block);
 			fps_window_start = delivery.fps_window_start;
@@ -1949,6 +1961,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				s->cur_w = (uint32_t)jw;
 				s->cur_h = (uint32_t)jh;
 			} else {
+				uvc_cadence_observe_pts(&s->cadence, st.has_pts, st.frame_pts);
 				if (!push_frame_yuv(s, mode, st.frame_buf, flen, received_ns))
 					continue;
 				s->cur_w = mode->w;
@@ -2076,6 +2089,20 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 						  (stats_now - stats_start_ns)),
 			     (unsigned long long)(submit_count ? submit_total_ns / submit_count / 1000 : 0),
 			     (unsigned long long)(submit_max_ns / 1000), (unsigned long long)(max_queue_age_ns / 1000));
+			if (mode->kind != MODE_MJPEG) {
+				struct uvc_cadence_stats *c = &s->cadence;
+				blog(LOG_INFO, "uvc: event=cadence_input samples=%llu same_luma_sample=%llu "
+				     "dt_lt8ms=%llu dt_8_14ms=%llu dt_14_19ms=%llu dt_19_25ms=%llu dt_ge25ms=%llu dt_max_us=%llu",
+				     (unsigned long long)c->samples, (unsigned long long)c->same_hash,
+				     (unsigned long long)c->dt[0], (unsigned long long)c->dt[1],
+				     (unsigned long long)c->dt[2], (unsigned long long)c->dt[3],
+				     (unsigned long long)c->dt[4], (unsigned long long)(c->max_dt / 1000));
+				blog(LOG_INFO, "uvc: event=cadence_pts frames=%llu pairs=%llu same=%llu backwards=%llu delta_min=%u delta_max=%u",
+				     (unsigned long long)c->pts_frames, (unsigned long long)c->pts_pairs,
+				     (unsigned long long)c->pts_same, (unsigned long long)c->pts_wraps,
+				     (unsigned)c->pts_delta_min, (unsigned)c->pts_delta_max);
+				uvc_cadence_reset_window(c);
+			}
 			stats_start_ns = stats_now;
 			stats_bytes = stats.received_bytes;
 			stats_urbs = stats.transfers;
@@ -2197,6 +2224,7 @@ static void uvc_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "fps", 60);
 	obs_data_set_default_string(settings, "video_format", "mjpeg");
 	obs_data_set_default_bool(settings, "yuv_low_latency", true);
+	obs_data_set_default_bool(settings, "yuv_unbuffered", false);
 }
 
 static int fmt_string_to_kind(const char *fmt)
@@ -2223,7 +2251,7 @@ static void uvc_settings_apply(struct uvc_source *s, obs_data_t *settings)
 	snprintf(s->fmt_setting, sizeof(s->fmt_setting), "%s", fmt ? fmt : "");
 	s->prefer_fmt = fmt_string_to_kind(fmt);
 	s->yuv_low_latency = obs_data_get_bool(settings, "yuv_low_latency");
-	obs_source_set_async_unbuffered(s->source, raw_low_latency(s));
+	obs_source_set_async_unbuffered(s->source, raw_low_latency(s) && obs_data_get_bool(settings, "yuv_unbuffered"));
 
 	if (s->width < 16 || s->width > 7680 || s->height < 16 || s->height > 4320) {
 		blog(LOG_WARNING, "uvc: 分辨率 %dx%d 不合理，回落到 1920x1080", s->width, s->height);
@@ -2357,10 +2385,14 @@ static obs_properties_t *uvc_properties(void *data)
 	obs_property_list_add_string(p, "NV12（未压缩半平面）", "nv12");
 	obs_property_list_add_string(p, "（自动：优先 MJPEG 1080p）", "");
 
-	obs_property_t *latency = obs_properties_add_bool(props, "yuv_low_latency", "YUV 低延迟推流模式");
+	obs_property_t *latency = obs_properties_add_bool(props, "yuv_low_latency", "YUV 直通采集（保持所选格式和帧率）");
 	obs_property_set_long_description(
 		latency,
-		"仅对 YUYV/NV12 生效：保持所选格式、尺寸和帧率，不自动切 MJPEG/降分辨率；优先显示最新帧。关闭可恢复兼容协商和缓冲。");
+		"仅对 YUYV/NV12 生效：保持所选格式、尺寸和帧率，不自动切 MJPEG/降分辨率。关闭可恢复兼容协商。");
+
+	obs_property_t *unbuffered = obs_properties_add_bool(props, "yuv_unbuffered", "最低延迟（优先最新帧）");
+	obs_property_set_long_description(unbuffered,
+		"仅对 YUV 直通采集生效。默认关闭以平滑采集与输出的时钟抖动；开启后丢弃排队的中间帧，可能增加重复帧和卡顿。");
 
 	if (s) {
 		char state[512];

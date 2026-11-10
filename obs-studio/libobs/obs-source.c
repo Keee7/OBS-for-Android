@@ -1376,7 +1376,46 @@ static void async_tick(obs_source_t *source)
 			source->cur_async_frame = NULL;
 		}
 
+#ifdef __ANDROID__
+		const bool uvc_cadence = strcmp(source->info.id, "android_video_input") == 0;
+		const size_t queued_before = uvc_cadence ? source->async_frames.num : 0;
+#endif
 		source->cur_async_frame = get_closest_frame(source, sys_time);
+#ifdef __ANDROID__
+		if (uvc_cadence) {
+			const bool showing = os_atomic_load_long(&source->show_refs) != 0;
+			const bool active = os_atomic_load_long(&source->activate_refs) != 0;
+			const bool has_data = source->async_active;
+			if (!source->android_uvc_cadence_valid || sys_time < source->android_uvc_cadence_start ||
+			    showing != source->android_uvc_showing || active != source->android_uvc_active ||
+			    has_data != source->android_uvc_has_data) {
+				source->android_uvc_cadence_valid = true;
+				source->android_uvc_cadence_start = sys_time;
+				source->android_uvc_selected = source->android_uvc_empty = source->android_uvc_waiting =
+					source->android_uvc_skipped = 0;
+				source->android_uvc_showing = showing;
+				source->android_uvc_active = active;
+				source->android_uvc_has_data = has_data;
+			}
+			const size_t selected = source->cur_async_frame ? 1 : 0;
+			source->android_uvc_selected += selected;
+			source->android_uvc_empty += !selected && !queued_before;
+			source->android_uvc_waiting += !selected && queued_before;
+			source->android_uvc_skipped += queued_before - source->async_frames.num - selected;
+			if (sys_time - source->android_uvc_cadence_start >= 5000000000ULL) {
+				blog(LOG_INFO, "uvc: event=cadence_select selected=%llu no_frame_empty=%llu no_frame_waiting=%llu "
+				     "skipped=%llu queued=%zu showing=%d active=%d async_active=%d",
+				     (unsigned long long)source->android_uvc_selected,
+				     (unsigned long long)source->android_uvc_empty,
+				     (unsigned long long)source->android_uvc_waiting,
+				     (unsigned long long)source->android_uvc_skipped, source->async_frames.num,
+				     showing, active, has_data);
+				source->android_uvc_cadence_start = sys_time;
+				source->android_uvc_selected = source->android_uvc_empty = source->android_uvc_waiting =
+					source->android_uvc_skipped = 0;
+			}
+		}
+#endif
 	}
 
 	source->last_sys_timestamp = sys_time;
