@@ -12,12 +12,12 @@
 #
 # 环境变量（都有默认值）：
 #   NDK_VERSION     默认 r30
-#   QT_VERSION      默认 6.9.3
+#   QT_VERSION      默认 6.11.1
 #   CMAKE_VERSION   默认 3.31.6（必须 >= 3.28：obs-studio 的 cmake_minimum_required 是 3.28...3.30）
 #   CMDLINE_TOOLS   默认 13114758
 #   GRADLE_VERSION  默认 8.14.3
 #   BUILD_TOOLS     默认 36.0.0
-#   PLATFORM        默认 android-35
+#   PLATFORM        默认 android-36
 #   JOBS            默认 nproc
 #   TOOLS_ROOT      工具链落盘位置（workflow 缓存它），默认 $HOME/android-ci-tools
 #   DL_ROOT         下载物落盘位置（**不**缓存），默认 $TOOLS_ROOT-dl
@@ -33,12 +33,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${OBS_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 NDK_VERSION="${NDK_VERSION:-r30}"
-QT_VERSION="${QT_VERSION:-6.9.3}"
+QT_VERSION="${QT_VERSION:-6.11.1}"
 CMAKE_VERSION="${CMAKE_VERSION:-3.31.6}"
 CMDLINE_TOOLS="${CMDLINE_TOOLS:-13114758}"
 GRADLE_VERSION="${GRADLE_VERSION:-8.14.3}"
 BUILD_TOOLS="${BUILD_TOOLS:-36.0.0}"
-PLATFORM="${PLATFORM:-android-35}"
+PLATFORM="${PLATFORM:-android-36}"
 JOBS="${JOBS:-$(nproc)}"
 TOOLS_ROOT="${TOOLS_ROOT:-$HOME/android-ci-tools}"
 DL_ROOT="${DL_ROOT:-$TOOLS_ROOT-dl}"
@@ -131,98 +131,25 @@ fetch_ndk() {
 fetch_qt() {
     if [ -x "$HOST/bin/androiddeployqt" ]; then
         echo "Qt 已就位：$QT"
-        ensure_qt_icu      # 工具链缓存里那份 Qt 也可能缺 ICU，不能只在首次下载时补
         probe_host_tools
         return
     fi
-    log "下载 Qt $QT_VERSION（Android arm64 目标 + Linux gcc_64 宿主）"
-    # 目录布局：桌面宿主在 linux_x64/desktop；Android 目标是 all_os/android。
-    # 包名前缀是**完整的 6.9.3-0-<时间戳>**（不只时间戳），宿主与目标各一套时间戳，
-    # 必须是同一批产物（混用会在 configure 时报 Qt6 版本/工具链不匹配）。
-    # 目标包名带 "MacOS" 字样是 Qt 的打包命名习惯 —— 它是跨平台产物，与谁来构建无关
-    #（本仓 Windows 构建用的也是同一个包）。
-    #
-    # 下面这几条 URL 都是**实测可下载**的（HTTP 206 + 真实字节），改动前请重新验证：
-    #   https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_693/qt6_693/qt.qt6.693.linux_gcc_64/
-    #   https://download.qt.io/online/qtsdkrepository/all_os/android/qt6_693/qt6_693_arm64_v8a/
-    local host_tag="${QT_VERSION}-0-202509261207"
-    local and_tag="${QT_VERSION}-0-202509261208"
-    local dst="$QT"
-    mkdir -p "$DL_ROOT" "$dst/android_arm64_v8a" "$dst/gcc_64"
-
-    qt_get() { # url, outfile
-        [ -s "$2" ] || curl -fL --retry 3 --retry-delay 5 -o "$2" "$1"
-    }
-    local host_base="https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_693/qt6_693"
-    local and_base="https://download.qt.io/online/qtsdkrepository/all_os/android/qt6_693/qt6_693_arm64_v8a"
-    local host_tail="Linux-RHEL_8_10-GCC-Linux-RHEL_8_10-X86_64.7z"
-    local and_tail="MacOS-MacOS_13-Clang-Android-Android_ANY-ARM64.7z"
-
-    qt_get "$host_base/qt.qt6.693.linux_gcc_64/${host_tag}qtbase-$host_tail" \
-           "$DL_ROOT/qtbase-host.7z"
-    qt_get "$host_base/qt.qt6.693.linux_gcc_64/${host_tag}qtsvg-$host_tail" \
-           "$DL_ROOT/qtsvg-host.7z"
-    qt_get "$host_base/qt.qt6.693.addons.qtnetworkauth.linux_gcc_64/${host_tag}qtnetworkauth-$host_tail" \
-           "$DL_ROOT/qtnetworkauth-host.7z"
-    qt_get "$and_base/qt.qt6.693.android_arm64_v8a/${and_tag}qtbase-$and_tail" \
-           "$DL_ROOT/qtbase-android.7z"
-    qt_get "$and_base/qt.qt6.693.android_arm64_v8a/${and_tag}qtsvg-$and_tail" \
-           "$DL_ROOT/qtsvg-android.7z"
-    qt_get "$and_base/qt.qt6.693.addons.qtnetworkauth.android_arm64_v8a/${and_tag}qtnetworkauth-$and_tail" \
-           "$DL_ROOT/qtnetworkauth-android.7z"
-
-    local f
-    for f in qtbase-host qtsvg-host qtnetworkauth-host; do
-        echo "  解包 $f → gcc_64"
-        "$SEVENZIP" x -y -o"$dst/gcc_64" "$DL_ROOT/$f.7z" >/dev/null
-    done
-    for f in qtbase-android qtsvg-android qtnetworkauth-android; do
-        echo "  解包 $f → android_arm64_v8a"
-        "$SEVENZIP" x -y -o"$dst/android_arm64_v8a" "$DL_ROOT/$f.7z" >/dev/null
-    done
-
-    # Android 包里的 target_qt.conf 指向 Qt 官方构建机，必须改指到我们这份 Linux 宿主，
-    # 否则 androiddeployqt 找不到宿主的 moc/rcc/uic（Linux Qt6 把它们放在 libexec 下）。
-    # 本仓 setup-qt-6.9.3.ps1 对 Windows 做过同一件事（那边指向 msvc2022_64、且 libexec→bin）。
-    local conf="$dst/android_arm64_v8a/bin/target_qt.conf"
-    if [ -f "$conf" ]; then
-        sed -i 's|^HostPrefix=.*|HostPrefix=../../gcc_64|' "$conf"
-        sed -i 's|^HostLibraryExecutables=.*|HostLibraryExecutables=libexec|' "$conf"
-        sed -i 's|^HostData=.*|HostData=.|' "$conf"
-        echo "  已改写 target_qt.conf → 宿主 $HOST"
-    fi
-    [ -x "$HOST/bin/androiddeployqt" ] || { echo "FATAL: Qt 宿主缺 androiddeployqt（解包不完整？）" >&2; exit 1; }
-
-    ensure_qt_icu
-    probe_host_tools
-}
-
-# Qt 的 Linux 预编译宿主工具（uic/moc/rcc/androiddeployqt）是在 RHEL 8 上构建的，
-# 动态依赖 **ICU 73**；Ubuntu 24.04 自带的 ICU 是 74，于是：
-#   .ci-tools/Qt/6.9.3/gcc_64/libexec/uic: error while loading shared libraries:
-#     libicui18n.so.73: cannot open shared object file
-#   → AutoUic subprocess error / exit 127
-# Qt 把这份运行时单独打了个包（icu-linux-Rhel8.6-x86_64.7z），必须跟着宿主一起装。
-# 包内是**扁平结构**（libicu*.so.73 直接在根），所以解到 $HOST/lib 即可 —— 宿主工具的
-# RPATH 指向 $ORIGIN/../lib；下面再把 $HOST/lib 挂进 LD_LIBRARY_PATH 兜底。
-ensure_qt_icu() {
-    if [ -f "$HOST/lib/libicui18n.so.73" ] && [ -f "$HOST/lib/libicuuc.so.73" ]; then
-        export LD_LIBRARY_PATH="$HOST/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-        return
-    fi
-    log "安装 Qt 宿主工具依赖的 ICU 73（Ubuntu 自带 74，宿主 uic/moc 找不到 73）"
-    local tag="${QT_VERSION}-0-202509261207"
-    local url="https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_693/qt6_693/qt.qt6.693.linux_gcc_64/${tag}icu-linux-Rhel8.6-x86_64.7z"
-    local f="$DL_ROOT/icu-host.7z"
-    mkdir -p "$DL_ROOT" "$HOST/lib"
-    [ -s "$f" ] || curl -fL --retry 3 --retry-delay 5 -o "$f" "$url"
-    "$SEVENZIP" x -y -o"$HOST/lib" "$f" >/dev/null
-    [ -f "$HOST/lib/libicui18n.so.73" ] || {
-        echo "FATAL: ICU 解包后没有 libicui18n.so.73（$HOST/lib）" >&2
+    log "下载 Qt $QT_VERSION（Android arm64 目标 + Linux gcc_64 宿主，aqt）"
+    # 用 aqt 按版本/目标解析官方仓库，不再手工拼 download.qt.io 的 7z URL：
+    # 旧实现把 6.9.3 的构建时间戳与 RHEL 后缀写死，升版本要重新找包，
+    # 还漏过单独的 ICU 73 运行时包（Ubuntu 24.04 自带 74）。
+    # aqt 输出到 $TOOLS_ROOT/Qt，会建出 $QT_VERSION/{android_arm64_v8a,gcc_64}，
+    # 与 configure_obs 的 -DCMAKE_PREFIX_PATH / -DQT_HOST_PATH 对齐；
+    # 完整桌面宿主包自带所需运行时，不需要额外补 ICU。
+    pip install --quiet aqtinstall
+    mkdir -p "$TOOLS_ROOT/Qt"
+    aqt install-qt all_os android "$QT_VERSION" android_arm64_v8a -O "$TOOLS_ROOT/Qt"
+    aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O "$TOOLS_ROOT/Qt"
+    [ -x "$HOST/bin/androiddeployqt" ] || {
+        echo "FATAL: Qt 宿主缺 androiddeployqt（aqt 安装不完整？）" >&2
         exit 1
     }
-    export LD_LIBRARY_PATH="$HOST/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    echo "  已装：$HOST/lib/libicu*.so.73（并加入 LD_LIBRARY_PATH）"
+    probe_host_tools
 }
 
 # 宿主工具自检。**这是为了 fail fast**：宿主 uic/moc 缺共享库时，CMake 要到 AutoUic
@@ -405,6 +332,7 @@ configure_obs() {
         -DENABLE_SCRIPTING=OFF \
         -DENABLE_HEVC=ON \
         -DANDROID_SDK_ROOT="$SDK" \
+        -DOBS_ANDROID_COMPILE_SDK_VERSION="${PLATFORM#android-}" \
         -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/install" \
         "${cc_launcher[@]}"
 }
@@ -447,7 +375,9 @@ package_apk() {
         --output "$ab_dir" \
         --apk "$ab_dir/obs-studio.apk" \
         --depfile "$ab_dir/obs-studio.d" \
-        --builddir "$fe" --release )
+        --builddir "$fe" \
+        --android-platform "$PLATFORM" \
+        --release )
 
     local apk
     apk="$(find "$ab_dir/build/outputs/apk/release" -name '*-unsigned.apk' 2>/dev/null | head -1)"

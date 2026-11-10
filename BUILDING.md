@@ -18,9 +18,9 @@ cd OBS-for-Android
 | Component | Version used / requirement |
 | --- | --- |
 | Android ABI / native API | arm64-v8a / android-29 |
-| Android SDK | Platform android-35; build-tools 36.0.0; platform-tools for ADB |
+| Android SDK | Windows Qt 6.9.3: platform android-35; WSL/CI default: android-36; build-tools 36.0.0; platform-tools for ADB |
 | NDK | r30; Windows test environment: 30.0.16248370 |
-| Qt | 6.9.3 Android arm64 plus matching host Qt with `androiddeployqt` |
+| Qt | Windows: 6.9.3; CI: 6.11.1; Android arm64 plus matching host Qt with `androiddeployqt` |
 | Java | JDK 17; Windows script expects directory `jdk-17.0.12` |
 | CMake / Ninja | CMake 3.31.6; Ninja |
 | Gradle | Windows 8.14.3; original WSL layout 8.14.5 |
@@ -98,18 +98,21 @@ This Windows verifier checks the source manifest version, required Java classes/
 
 ## WSL / Linux
 
-Install the Linux NDK, Qt Android plus host Qt, SDK, JDK 17, CMake, Ninja, Gradle and host build tools. Set environment variables for your installation:
+Install the Linux NDK, Qt Android plus matching host Qt, SDK, JDK 17, CMake, Ninja, Gradle and host build tools. WSL defaults to compile SDK 36, which Qt 6.11.1 requires. Native minSdk remains 29 and targetSdk remains 35. Set environment variables for your installation:
 
 ```sh
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
 export NDK_ROOT="$ANDROID_SDK_ROOT/ndk/<installed-r30-version>"
-export QT_DIR="$HOME/Qt/6.9.3"
+export QT_DIR="$HOME/Qt/6.11.1"
 export QT_HOST_PATH="$QT_DIR/gcc_64"
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 export GRADLE_BIN="$HOME/toolchain/gradle-8.14.5/bin"
+"$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0"
 ```
 
 The WSL frontend script also reads `~/.obs-android-env.sh` when present. Repository location is derived from the script path; `OBS_SOURCE_ROOT` may override it.
+
+The script checks that the selected platform is installed before compiling and passes the same compile SDK to CMake and `androiddeployqt`. Existing Qt 6.9.3 installations can explicitly retain SDK 35 with `OBS_ANDROID_COMPILE_SDK_VERSION=35 bash scripts/build-frontend-apk-wsl.sh`. Qt 6.11.1 builds need SDK 36 or newer. The Windows script continues to select SDK 35 for its bundled Qt 6.9.3 route.
 
 Download and build the dependency groups, then build the APK:
 
