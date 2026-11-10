@@ -181,7 +181,7 @@ jobs:
       - name: Check document images and encoder backpressure on host
         run: |
           set -euo pipefail
-          python3 scripts/test-image-document.py --ffmpeg-prefix /usr
+          /usr/bin/python3 scripts/test-image-document.py --ffmpeg-prefix /usr
           cc -std=c11 -Wall -Wextra -Werror scripts/ffmpeg-submit-test/test.c -o "$RUNNER_TEMP/ffmpeg-submit-test"
           "$RUNNER_TEMP/ffmpeg-submit-test"
 
