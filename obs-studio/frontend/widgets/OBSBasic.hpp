@@ -16,6 +16,9 @@
 ******************************************************************************/
 
 #pragma once
+#ifdef __ANDROID__
+#include <QTimer>
+#endif
 
 #include "ui_OBSBasic.h"
 #include "OBSMainWindow.hpp"
@@ -331,6 +334,9 @@ protected:
 	virtual void closeEvent(QCloseEvent *event) override;
 	virtual bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
 	virtual void changeEvent(QEvent *event) override;
+#ifdef __ANDROID__
+	void resizeEvent(QResizeEvent *event) override;
+#endif
 
 signals:
 	void mainWindowClosed();
@@ -470,6 +476,13 @@ public:
 	bool IsDockObjectNameUsed(const QString &name);
 	void AddCustomDockWidget(QDockWidget *dock);
 	void setDockCornersVertical(bool vertical);
+
+#ifdef __ANDROID__
+private:
+	void ResizeAndroidDocks();
+	void InitAndroidResponsiveLayout();
+	QTimer *androidLayoutResizeTimer = nullptr;
+#endif
 
 private slots:
 	void on_resetDocks_triggered(bool force = false);

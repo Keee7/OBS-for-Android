@@ -25,7 +25,13 @@ void SceneTree::SetGridMode(bool grid)
 	} else {
 		setViewMode(QListView::ListMode);
 		setResizeMode(QListView::Fixed);
+#ifdef __ANDROID__
+		const int rowHeight = property("androidCompactLayout").toBool() ? 32 : 48;
+		setStyleSheet(QStringLiteral("QListView::item { min-height: %1px; padding-top: 0px; padding-bottom: 0px; }")
+				      .arg(rowHeight));
+#else
 		setStyleSheet("");
+#endif
 	}
 
 	QResizeEvent event(size(), size());

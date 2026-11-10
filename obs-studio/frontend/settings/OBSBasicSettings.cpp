@@ -28,6 +28,9 @@
 #include <docks/YouTubeAppDock.hpp>
 #endif
 #include <utility/audio-encoders.hpp>
+#ifdef __ANDROID__
+#include <utility/android-window-fit.hpp>
+#endif
 #include <utility/BaseLexer.hpp>
 #include <utility/FFmpegCodec.hpp>
 #include <utility/FFmpegFormat.hpp>
@@ -352,6 +355,21 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	main->EnableOutputs(false);
 
 	ui->listWidget->setAttribute(Qt::WA_MacShowFocusRect, false);
+
+#ifdef __ANDROID__
+	/* .ui 里写死了 minimumSize 700x512（桌面尺寸假设），而手机横屏可用高只有 393
+	 * —— 不放宽的话对话框被锁在 512 高，底部「应用/取消/确定」整行落在屏外。
+	 *
+	 * 内容本身装得下：每个设置页都自带 QScrollArea，实测布局最小高只有 330。
+	 * 所以只要去掉这个人为下限就够了，不需要在全局 clamp 里用
+	 * setMinimumSize(0,0)+SetNoConstraint 硬压窗口 —— 那种做法会造出
+	 * "窗口比内容小"的不一致状态，实测会把对话框里列表的滚动和命中判定搞坏
+	 * （添加源的源列表就是这么坏的，见 OBSBasicSourceSelect 的同类改动）。 */
+	setMinimumSize(0, 0);
+
+	/* 尺寸在 show 之前就定好，避免"先大后小"闪一下（见 android-window-fit.hpp）。 */
+	androidFitTopLevelToScreen(this);
+#endif
 
 	/* clang-format off */
 	HookWidget(ui->language,             COMBO_CHANGED,  GENERAL_CHANGED);

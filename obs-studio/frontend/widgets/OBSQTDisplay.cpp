@@ -100,6 +100,10 @@ OBSQTDisplay::OBSQTDisplay(QWidget *parent, Qt::WindowFlags flags) : QWidget(par
 			return;
 		}
 
+#ifdef __ANDROID__
+		syncAndroidGeometry();
+#endif
+
 		if (!display) {
 			CreateDisplay();
 		} else {
@@ -213,15 +217,16 @@ static QRect AndroidWindowRectPx(QWidget *w)
 
 void OBSQTDisplay::syncAndroidGeometry()
 {
-	if (destroying || androidSuspended || !display || !isVisible() ||
+	if (destroying || androidSuspended || !isVisible() ||
 	    !obsAndroidDisplayIsLifecycleOwner(this))
 		return;
 	const QRect r = AndroidWindowRectPx(this);
 	if (r.width() <= 0 || r.height() <= 0)
 		return;
-	uint32_t width, height;
-	obs_display_size(display, &width, &height);
-	if (width != (uint32_t)r.width() || height != (uint32_t)r.height()) {
+	uint32_t width = 0, height = 0;
+	if (display)
+		obs_display_size(display, &width, &height);
+	if (display && (width != (uint32_t)r.width() || height != (uint32_t)r.height())) {
 		obs_display_resize(display, r.width(), r.height());
 		emit DisplayResized();
 	}
@@ -451,12 +456,10 @@ void OBSQTDisplay::resizeEvent(QResizeEvent *event)
 	if (isVisible() && display) {
 		QSize size = GetPixelSize(this);
 		obs_display_resize(display, size.width(), size.height());
-#ifdef __ANDROID__
-		/* B-3：把同样的矩形推给 Java，让 SurfaceView 的 buffer 尺寸跟上 obs_display_resize，
-		 * 否则渲染视口与窗口面尺寸错位，多出来的部分是没清过的黑。 */
-		syncAndroidGeometry();
-#endif
 	}
+#ifdef __ANDROID__
+	syncAndroidGeometry();
+#endif
 
 	emit DisplayResized();
 }
@@ -470,11 +473,10 @@ void OBSQTDisplay::OnMove()
 {
 	if (display) {
 		obs_display_update_color_space(display);
-#ifdef __ANDROID__
-		/* 位置变了（尺寸可能没变）也要推给 Java，SurfaceView 才跟得住。 */
-		syncAndroidGeometry();
-#endif
 	}
+#ifdef __ANDROID__
+	syncAndroidGeometry();
+#endif
 }
 
 void OBSQTDisplay::OnDisplayChange()

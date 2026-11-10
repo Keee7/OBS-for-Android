@@ -21,6 +21,9 @@
 #include <components/VisibilityItemWidget.hpp>
 #include <dialogs/NameDialog.hpp>
 #include <utility/AndroidMenuPos.hpp>
+#ifdef __ANDROID__
+#include <utility/android-window-fit.hpp>
+#endif
 #include <utility/display-helpers.hpp>
 #include <utility/item-widget-helpers.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -30,7 +33,9 @@
 
 #include <QApplication>
 #include <QLineEdit>
+#ifndef __ANDROID__
 #include <QStyle>
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -61,6 +66,19 @@ OBSBasicFilters::OBSBasicFilters(QWidget *parent, OBSSource source_)
 	setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
 	ui->setupUi(this);
+
+#ifdef __ANDROID__
+	/* 同 OBSBasicProperties：.ui 里 rightLayout 这个 QSplitter 写死了 minimumSize
+	 * 0x400，而手机横屏可用高只有 393 —— 对话框被锁在 456 高，底部按钮行出屏。
+	 * 清掉下限后最小高由子控件决定（预览 150 + 右侧容器 + 分隔条）。
+	 * 预览最小高同样从 150 降下来，按可用高推导（androidPreviewMinHeight），
+	 * 把高度让给滤镜列表和属性区。 */
+	ui->rightLayout->setMinimumHeight(0);
+	ui->preview->setMinimumHeight(androidPreviewMinHeight(this));
+
+	/* 尺寸在 show 之前就定好，避免"先大后小"闪一下（见 android-window-fit.hpp）。 */
+	androidFitTopLevelToScreen(this);
+#endif
 
 	ui->asyncFilters->setItemDelegate(new VisibilityItemDelegate(ui->asyncFilters));
 	ui->effectFilters->setItemDelegate(new VisibilityItemDelegate(ui->effectFilters));
@@ -614,19 +632,16 @@ void OBSBasicFilters::closeEvent(QCloseEvent *event)
 	main->SaveProject();
 }
 
+#ifndef __ANDROID__
 void OBSBasicFilters::showEvent(QShowEvent *event)
 {
 	QDialog::showEvent(event);
-
-	/* 设计高 726 逻辑 px 高于 16:10 横屏的可用高（设备上 667 再减系统栏），
-	 * 底部那条含 addEffectFilter("+") 的工具条和关闭按钮全落在屏外。
-	 * 收高度的做法与 OBSBasicSettings::showEvent 一致，桌面大屏上条件不成立。 */
 	const int titleBarHeight = QApplication::style()->pixelMetric(QStyle::PM_TitleBarHeight);
-	const int maxHeight = round(screen()->availableGeometry().height() - titleBarHeight);
-	if (size().height() >= maxHeight) {
-		resize(size().width(), maxHeight);
-	}
+	const int maxHeight = screen()->availableGeometry().height() - titleBarHeight;
+	if (height() >= maxHeight)
+		resize(width(), maxHeight);
 }
+#endif
 
 bool OBSBasicFilters::nativeEvent(const QByteArray &, void *message, qintptr *)
 {
