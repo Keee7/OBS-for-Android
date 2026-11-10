@@ -17,6 +17,31 @@ static QList<OBSProjector *> multiviewProjectors;
 
 static bool updatingMultiview = false, mouseSwitching, transitionOnDoubleClick;
 
+/* 新窗口投影仪的默认尺寸。
+ *
+ * 480x270 是 dp 的设计值（16:9），任何设备上物理尺寸都一致 —— **不要**改成按
+ * 屏宽比例，否则平板上会变成大半个屏。Android 上唯一需要处理的是矮屏：
+ * 270 加标题栏可能超出可用区，所以只在装不下时等比缩小。 */
+static QSize defaultProjectorSize(const QWidget *w)
+{
+	QSize s(480, 270);
+#ifdef __ANDROID__
+	const QScreen *scr = w ? w->screen() : nullptr;
+	if (!scr)
+		return s;
+	const QRect avail = scr->availableGeometry();
+	const int maxW = avail.width() * 90 / 100;
+	const int maxH = avail.height() * 90 / 100;
+	if (s.width() > maxW)
+		s = QSize(maxW, maxW * 9 / 16);
+	if (s.height() > maxH)
+		s = QSize(maxH * 16 / 9, maxH);
+#else
+	Q_UNUSED(w);
+#endif
+	return s;
+}
+
 OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor, ProjectorType type_)
 	: OBSQTDisplay(widget, Qt::Window),
 	  weakSource(OBSGetWeakRef(source_))
@@ -48,7 +73,7 @@ OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor, 
 #endif
 
 	if (monitor == -1) {
-		resize(480, 270);
+		resize(defaultProjectorSize(this));
 	} else {
 		SetMonitor(monitor);
 	}
@@ -105,7 +130,7 @@ OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor, 
 	 * 少掉"调整窗口以适配内容"那一行）。同一个尺寸在 show 之后设就生效：OpenWindowedProjector()
 	 * 走的是后一条路，实测窗变 0,0-720,405（=480x270 逻辑 × dpr 1.5）、共享面重挂成 720x405。 */
 	if (monitor == -1) {
-		resize(480, 270);
+		resize(defaultProjectorSize(this));
 	}
 #endif
 
@@ -446,7 +471,7 @@ void OBSProjector::OpenWindowedProjector()
 	if (!prevGeometry.isNull()) {
 		setGeometry(prevGeometry);
 	} else {
-		resize(480, 270);
+		resize(defaultProjectorSize(this));
 	}
 
 	savedMonitor = -1;

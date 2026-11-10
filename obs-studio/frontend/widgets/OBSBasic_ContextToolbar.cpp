@@ -209,18 +209,23 @@ std::optional<QWidget *> OBSBasic::createContextBarWidget(obs_source_t *source)
 void OBSBasic::UpdateContextBar(bool force)
 {
 	SourceToolBarActionsSetEnabled();
+	OBSSceneItem item = GetCurrentSceneItem();
 
 #ifdef __ANDROID__
 	/* 刻意放在下面那道 contextContainer 可见性闸门之前：前后置按钮跟"上下文工具条显示不显示"无关，
 	 * 只跟"当前场景里有没有相机源"有关。 */
 	UpdateAndroidFlipCameraButton();
+	/* An empty source toolbar costs a full row of the phone's preview.
+	 * Evaluate before the visibility guard so selecting a source restores it. */
+	const bool showContextBar = config_get_bool(App()->GetUserConfig(), "BasicWindow", "ShowContextToolbars");
+	ui->contextContainer->setVisible(showContextBar && item != nullptr);
+	if (!item)
+		ClearContextBar();
 #endif
 
 	if (!ui->contextContainer->isVisible() && !force) {
 		return;
 	}
-
-	OBSSceneItem item = GetCurrentSceneItem();
 
 	if (item) {
 		obs_source_t *source = obs_sceneitem_get_source(item);

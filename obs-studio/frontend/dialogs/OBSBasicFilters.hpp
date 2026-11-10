@@ -122,9 +122,5 @@ public:
 
 protected:
 	virtual void closeEvent(QCloseEvent *event) override;
-	/* 设计高 726 逻辑 px 在 16:10 的横屏上比屏还高（设备上 667）⇒ 底部那条含
-	 * addEffectFilter("+") 的工具条落在屏外，一期触摸加不了滤镜。收高度的做法与
-	 * OBSBasicSettings::showEvent 一致，桌面大屏上条件不成立、行为不变。 */
-	virtual void showEvent(QShowEvent *event) override;
 	virtual bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
 };

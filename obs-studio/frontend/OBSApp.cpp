@@ -23,6 +23,9 @@
 #include <utility/CrashHandler.hpp>
 #include <utility/OBSEventFilter.hpp>
 #include <utility/OBSProxyStyle.hpp>
+#ifdef __ANDROID__
+#include <utility/android-window-fit.hpp>
+#endif
 #if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
 #include <utility/models/branches.hpp>
 #endif
@@ -53,6 +56,9 @@
 #include "widgets/OBSAndroidDisplay.hpp" // 3-3 模态遮挡：obsAndroidDisplaySetVisible
 #include "widgets/OBSAndroidPath.hpp" // 3-4：openUrl(本地路径) 的 Android 替代
 #include <QAbstractScrollArea> // 3-4 触摸：长按坐标要按 viewport 系给（itemAt/exec 都吃这个系）
+#include <QAbstractItemView>
+#include <QScroller>
+#include <QScreen>
 #include <QComboBox> // P-8 触摸：组合框弹层探针要认出按下落在的是不是 QComboBox
 #include <QContextMenuEvent> // 3-4 触摸：长按合成右键
 #include <QGestureEvent> // P-8 探针：认出 TapAndHold 手势
@@ -946,6 +952,140 @@ std::vector<UpdateBranch> OBSApp::GetBranches()
  * 什么都没弹就照常交回控件 —— 否则长按等于把按钮的 clicked 吃掉，见 fire() 的返回值注释。
  * ② 返回键 = Escape，见下面 KeyPress 那一格（build 74）。
  * 不用 Q_OBJECT：只要 eventFilter 虚函数 + 成员 QTimer，省掉一次 moc。 */
+/* 把顶层窗口压进屏幕可用区（全局兜底，B 方案）。
+ *
+ * 背景：OBS 的对话框尺寸是按桌面设计的 —— 添加源 1040x620、设置 981x730、
+ * 高级音频 1100x340、滤镜 861x726 …，而这块手机横屏的逻辑尺寸只有 873x393，
+ * 于是底部按钮和右侧内容直接落在屏外、点不到。之前零散地在几个对话框的 showEvent
+ * 里"收高度"处理过（OBSBasicSettings 是上游自带，OBSBasicFilters 是本移植早期加的），
+ * 但都只收高度、且没覆盖最常用的"添加源"。
+ *
+ * 这里改成全局兜底：任何顶层窗口显示后，只要比可用区大就压到可用区并居中。
+ * 覆盖全部对话框，以后新增的也自动受益。
+ *
+ * 两个注意点：
+ * 1) 用 singleShot(0) 延迟一拍，不在 Show 里同步 resize —— Show 那一刻布局还没跑完，
+ *    此时 size() 还是 .ui 里的设计尺寸，改完会被随后的布局覆盖。
+ * 2) resize() 受控件最小尺寸约束（minimumSize / 布局的 minimumSizeHint）。
+ *    压不下去时"实际"会大于"目标"——日志里两个数都打出来，一眼能看出是不是被挡住了。
+ *    那种情况需要单独处理（内部套 QScrollArea，或放宽布局约束）。 */
+static void clampTopLevelToScreen(QWidget *w)
+{
+	const AndroidFitResult r = androidFitTopLevelToScreen(w);
+	if (!r.resized)
+		return; /* 尺寸已经合适（或本来就不该压），不产生任何可见动作 */
+
+	/* resize 被挡住，说明这个对话框还带着"桌面尺寸假设"（.ui 里写死的 minimumSize
+	 * 或某个子控件的 minimumHeight），需要在它的构造函数里放宽 —— 见
+	 * OBSBasicSourceSelect / OBSBasicSettings 的 #ifdef __ANDROID__ 块。
+	 *
+	 * 踩过的三层留档，免得以后再摸一遍：
+	 *   ① .ui 里写死 minimumHeight（添加源的 sourceTypeList 是 460）；
+	 *   ② 布局首次 show 时把窗口自己的 minimumSize 设成布局最小尺寸
+	 *      （QLayout 默认 SetDefaultConstraint），QWidget::resize() 被它夹住；
+	 *   ③ QLayout 算最小尺寸走 qSmartMinSize()（qlayoutengine.cpp:321-333）：
+	 *      sizePolicy 没有 ShrinkFlag 时取 max(sizeHint, minimumSizeHint)。
+	 * ②③ 都能用"在源码里放宽最小尺寸"绕开，不需要去碰这些机制。 */
+	if (r.actual != r.target) {
+		/* 诊断：找出最占高度的那个子控件，够定位了（不再排前 5 名）。 */
+		QString worst;
+		int worstH = 0;
+		for (QWidget *c : w->findChildren<QWidget *>()) {
+			const int h = c->minimumSizeHint().height();
+			if (h > worstH) {
+				worstH = h;
+				worst = QStringLiteral("%1/%2 minH=%3 sizeHint=%4")
+						.arg(QString::fromLatin1(c->metaObject()->className()),
+						     c->objectName())
+						.arg(c->minimumHeight())
+						.arg(c->sizeHint().height());
+			}
+		}
+
+		/* 这里**故意不再硬压**。以前用 setMinimumSize(0,0)+SetNoConstraint 把窗口
+		 * 强行缩到目标尺寸，会造出"窗口比内容小"的不一致状态：布局仍按原来的最小
+		 * 尺寸摆放子控件，控件被裁在窗口外 —— 实测把添加源列表的滚动和命中判定都
+		 * 搞坏了（列表 viewport 比可视区大，滚动条范围算错）。
+		 *
+		 * 正确做法是在对话框自己的构造函数里放宽最小尺寸，参考
+		 * OBSBasicSourceSelect / OBSBasicSettings 里的 #ifdef __ANDROID__ 块。
+		 * 下面这行就是待办清单：出现了就说明该对话框还没做源码级修复。 */
+		obsAndroidDisplayLog(
+			"CLAMP-BLOCKED %s：目标 %dx%d 实际 %dx%d；最占高度=%s —— 该对话框需要在源码里放宽最小尺寸",
+			w->metaObject()->className(), r.target.width(), r.target.height(), r.actual.width(),
+			r.actual.height(), worst.toUtf8().constData());
+	}
+
+	obsAndroidDisplayLog("CLAMP %s %dx%d -> 目标 %dx%d 实际 %dx%d（可用 %dx%d）", w->metaObject()->className(),
+			     r.before.width(), r.before.height(), r.target.width(), r.target.height(),
+			     r.actual.width(), r.actual.height(), r.avail.width(), r.avail.height());
+}
+
+/* 给对话框里的滚动区开单指滑动（QScroller）。
+ *
+ * 背景：Qt 在 Android 上把单指触摸合成成鼠标事件，而 QAbstractScrollArea 只在
+ * wheelEvent 里滚动 —— 所以现在只有"双指拖"（Qt 把它合成成 QWheelEvent）能滚；
+ * 单指拖在桌面语义里是框选/拖拽，不滚。这是手机上最不习惯的一点。
+ *
+ * 用 TouchGesture（而不是 LeftMouseButtonGesture）：
+ *   TouchGesture 会给控件设 WA_AcceptTouchEvents（见 qscroller.cpp 的 grabGesture
+ *   :372-373），直接吃原始触摸事件 —— 滚动时**不会先按下选中列表项**，
+ *   这才是 Android 上正常的观感。
+ *   LeftMouseButtonGesture 走的是合成鼠标事件，拖动会先触发一次 press，
+ *   列表项被顺带选中，观感差一截。
+ *
+ * 代价与风险：控件接受触摸后，Qt 不再为它合成鼠标事件，**轻点是否还能选中/触发
+ * 列表项必须真机验证**。若点击失灵，把这里换回 LeftMouseButtonGesture 即可
+ * （它不动 WA_AcceptTouchEvents，鼠标合成照旧，代价是滚动时会误选中一次）。
+ *
+ * 只作用于对话框：本函数只从"非主窗"的 Show 分支里调，所以主窗口里的
+ * 场景/源列表不受影响 —— 那两个有拖拽排序，单指拖必须留给拖拽。 */
+static void enableFlickScroll(QWidget *w)
+{
+	if (!w || !w->isWindow())
+		return;
+
+	/* 排除表必须和 clampTopLevelToScreen 保持一致。尤其 Popup：QComboBox 的弹层
+	 * （QComboBoxPrivateContainer）是 Qt::Popup，给它挂 TouchGesture 会改变它的
+	 * 触摸/鼠标合成行为 —— 而那正是 P-8 补丁（组合框弹层被松手打死）刚修好的链路。 */
+	const Qt::WindowFlags f = w->windowFlags();
+	if (f.testFlag(Qt::Popup) || f.testFlag(Qt::ToolTip))
+		return;
+
+	const QList<QAbstractScrollArea *> areas = w->findChildren<QAbstractScrollArea *>();
+	int grabbed = 0;
+	int itemViews = 0;
+	for (QAbstractScrollArea *area : areas) {
+		QWidget *vp = area->viewport();
+		if (!vp || QScroller::hasScroller(vp))
+			continue; // 没有 viewport 或已经抓过，别重复挂
+
+		/* 手势模式必须按控件类型分开，实测两种都对不上是行不通的：
+		 *
+		 * QAbstractItemView（QListWidget/QTreeView…）用 TouchGesture **不生效**：
+		 * 它自己处理触摸，识别器抢不到，事件退回成"按住左键拖选"。在添加源的源列表上
+		 * 表现就是"列表不滚、手指滑过哪项就把哪项点开"——因为
+		 * OBSBasicSourceSelect 把 currentItemChanged 接到了 sourceTypeSelected，
+		 * 拖选改一次当前项，右边面板就换一次。
+		 *
+		 * 对这类控件改用 LeftMouseButtonGesture：QScroller 会抓走鼠标并消费移动事件，
+		 * 拖动变成滚动，视图收不到那些移动。代价是按下那一项仍会被选中一次
+		 * （按下先到控件），但那比"依次点开所有项"好得多。
+		 *
+		 * QScrollArea（设置页那种）继续用 TouchGesture —— 那边实测工作正常，
+		 * 而且不会出现"按下先选中"。 */
+		const bool isItemView = qobject_cast<QAbstractItemView *>(area) != nullptr;
+		QScroller::grabGesture(vp, isItemView ? QScroller::LeftMouseButtonGesture
+						      : QScroller::TouchGesture);
+		++grabbed;
+		if (isItemView)
+			++itemViews;
+	}
+
+	obsAndroidDisplayLog("FLICK %s：滚动区 %d 个，本次开 %d 个（其中 item view %d 个用鼠标手势）",
+			     w->metaObject()->className(), int(areas.size()), grabbed, itemViews);
+}
+
 class AndroidInputFilter : public QObject {
 public:
 	explicit AndroidInputFilter(QObject *parent = nullptr) : QObject(parent)
@@ -1032,6 +1172,15 @@ protected:
 				geo.width(), geo.height(), int(flags.testFlag(Qt::Popup)), int(flags.testFlag(Qt::Tool)),
 				int(flags.testFlag(Qt::Dialog)), int(pw->isVisible()),
 				int(qApp->activePopupWidget() == pw));
+
+			/* 顶层窗口显示后做两件事，都延后一拍等布局跑完：
+			 * ① 压进屏幕可用区（B 方案，见 clampTopLevelToScreen）
+			 * ② 给里面的滚动区开单指滑动（见 enableFlickScroll） */
+			if (ev->type() == QEvent::Show)
+				QTimer::singleShot(0, pw, [pw] {
+					clampTopLevelToScreen(pw);
+					enableFlickScroll(pw);
+				});
 			break;
 		}
 		case QEvent::Gesture: {

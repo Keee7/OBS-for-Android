@@ -469,6 +469,11 @@ public:
 	void AddCustomDockWidget(QDockWidget *dock);
 	void setDockCornersVertical(bool vertical);
 
+#ifdef __ANDROID__
+private:
+	void ResizeAndroidDocks();
+#endif
+
 private slots:
 	void on_resetDocks_triggered(bool force = false);
 	void on_lockDocks_toggled(bool lock);

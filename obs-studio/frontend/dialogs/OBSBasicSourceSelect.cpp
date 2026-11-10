@@ -17,6 +17,9 @@
 ******************************************************************************/
 
 #include "OBSApp.hpp"
+#ifdef __ANDROID__
+#include <utility/android-window-fit.hpp>
+#endif
 #include "OBSBasicSourceSelect.hpp"
 
 #include <utility/ResizeSignaler.hpp>
@@ -235,6 +238,32 @@ OBSBasicSourceSelect::OBSBasicSourceSelect(OBSBasic *parent, undo_stack &undo_s)
 	setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
 	ui->setupUi(this);
+
+#ifdef __ANDROID__
+	/* The desktop minimum height keeps the list viewport taller than a phone's
+	 * landscape dialog. Let the layout shrink it so overflow is scrollable
+	 * inside the visible list instead of being clipped outside the dialog.
+	 *
+	 * 两行缺一不可 —— 它们堵的是两条不同的路。QLayout 算最小尺寸走
+	 * qSmartMinSize()（qlayoutengine.cpp:321-333）：
+	 *     s = max(sizeHint, minimumSizeHint)          // sizePolicy 无 ShrinkFlag 时
+	 *     if (minSize.height() > 0) s = minSize       // 非零则无条件覆盖
+	 *
+	 *   * setMinimumHeight(0)：.ui 里写死 minimumSize 0x460，不清掉它就命中上面
+	 *     那条"无条件覆盖"，布局最小高直接是 460；
+	 *   * setSizeAdjustPolicy(AdjustIgnored)：.ui 把策略显式设成了 AdjustToContents，
+	 *     此时 sizeHint() = frame + scrollbars + viewportSizeHint()，会按内容长到
+	 *     ~460；AdjustIgnored 让 sizeHint() 固定返回 256x192
+	 *     （qabstractscrollarea.cpp:1426-1442）。
+	 *
+	 * 只做前者，460 会从 sizeHint 那条路回来；只做后者，460 会从 minSize 那条路
+	 * 回来。两条都做，布局最小高才降到 ~192，对话框才能在 393 高的屏幕上装下。 */
+	ui->sourceTypeList->setMinimumHeight(0);
+	ui->sourceTypeList->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+
+	/* 尺寸在 show 之前就定好，避免"先大后小"闪一下（见 android-window-fit.hpp）。 */
+	androidFitTopLevelToScreen(this);
+#endif
 
 	existingFlowLayout = ui->existingListFrame->flowLayout();
 	existingFlowLayout->setContentsMargins(0, 0, 0, 0);
