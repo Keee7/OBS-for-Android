@@ -8,6 +8,10 @@
 
 Windows Qt 6.9.3 全量 configure、native/Qt/Java 构建、签名（v3、单签名者）、16 KiB zipalign、严格 APK 校验均通过。核验包含实际 FFmpeg x265/AOM 编码器描述符、图像 URI 读取代码，以及包内项目二进制与本次编译输出的一致性。未安装或启动测试。
 
+同一源码的安兔兔包名测试包：`releases/OBS-Android-arm64-antutu-hwcodec-browser-20261110-055649.apk`，包名 `com.antutu.ABenchMark`，120,778,782 字节。SHA-256：`9645a306f3b7ad0ab3a5e8b079e325a4b7177b1f8215cc5dffd2282fbdf91467`。同样通过 release 签名、16 KiB 对齐和严格校验；仓库默认包名不变。
+
+首轮 Linux CI（run 42797080211）失败根因是通用 CMake helper 清理了 AOM 自带的 `build/cmake/` 源码，导致 AOM 缺少配置脚本、FFmpeg 随后找不到 AOM。已将生成目录改为 `.obs-android-build/`；隔离回归检查确认首次和重复调用都保留上游脚本。此修复只涉及 Linux 构建路径，不改变上述 Windows APK 的二进制。
+
 ## H.265 与 AV1 软件编码
 
 - 增加 `ffmpeg_x265`（Software HEVC / x265）并接入已有 `ffmpeg_aom_av1`（AOM AV1）。依赖固定为 x265 3.6、libaom 3.10.0、FFmpeg 7.1.3；两个构建路径均显式开启库支持，运行时按实际编码器存在与否注册。

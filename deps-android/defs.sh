@@ -43,6 +43,9 @@ build_uthash() {
 # ---------------------------------------------------------------- cmake 系
 _run_cmake() {
   local s=$1; shift
+  # AOM ships required build/cmake/*.cmake as source. Never use or clear
+  # the upstream build/ directory as our generated CMake binary directory.
+  local b="$s/.obs-android-build"
   _common_env
   # 交叉 pkg-config：只准在 $PREFIX 里找，避免误用宿主 /usr/lib 的库
   export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
@@ -52,8 +55,8 @@ _run_cmake() {
   if [ "${USE_CCACHE:-0}" = "1" ] && command -v ccache >/dev/null 2>&1; then
     cc_launcher=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
   fi
-  rm -rf "$s/build"
-  cmake -S "$s" -B "$s/build" \
+  rm -rf "$b" || return 1
+  cmake -S "$s" -B "$b" \
     -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI="$ABI" \
@@ -71,8 +74,8 @@ _run_cmake() {
     -DBUILD_TESTING=OFF \
     "${cc_launcher[@]}" \
     "$@" || return 1
-  cmake --build "$s/build" -j"$JOBS" || return 1
-  cmake --install "$s/build" || return 1
+  cmake --build "$b" -j"$JOBS" || return 1
+  cmake --install "$b" || return 1
 }
 
 build_jansson() {
