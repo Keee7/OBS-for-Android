@@ -9,8 +9,22 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    # 纯文档改动不触发 180 分钟构建。tag push 不受 paths 过滤影响，发版仍会触发。
+    # 布局：OBS 源码在 obs-studio/ 子目录，依赖/脚本在仓库根。
+    paths:
+      - 'obs-studio/**'
+      - 'deps-android/**'
+      - 'scripts/**'
+      - 'android-shell/**'
+      - '.github/workflows/build-apk.yml'
   pull_request:
     branches: [main]
+    paths:
+      - 'obs-studio/**'
+      - 'deps-android/**'
+      - 'scripts/**'
+      - 'android-shell/**'
+      - '.github/workflows/build-apk.yml'
   workflow_dispatch:
     inputs:
       sign:
@@ -230,3 +244,59 @@ jobs:
 
             未在真机验证的范围见仓库 README 的 Limitations 一节。
           fail_on_unmatched_files: true
+
+      # ---- 失败诊断：跑挂时把能定位问题的碎片留下来 ----
+      # 构建脚本 500 行、单次 10+ 分钟，失败后翻 16k 行日志成本太高。
+      - name: 失败时上传构建日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_attempt }}
+          path: |
+            build-fe-*/CMakeFiles/CMakeConfigureLog.yaml
+            build-fe-*/CMakeCache.txt
+            build-fe-*/CMakeFiles/CMakeOutput.log
+            build-fe-*/CMakeFiles/CMakeError.log
+            build-fe-*/frontend/android-*-deployment-settings.json
+            build-fe-*/frontend/android-build/build.gradle
+            build-fe-*/frontend/android-build/build/outputs/logs/*.txt
+            build-fe-*/.final-apk-path
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 失败时诊断
+        if: failure()
+        run: |
+          {
+            echo "=== 工具链目录 ==="
+            ls -1 "$TOOLS_ROOT" 2>/dev/null || true
+            echo "=== SDK 平台 / build-tools ==="
+            ls -1 "$TOOLS_ROOT/android-sdk/platforms" "$TOOLS_ROOT/android-sdk/build-tools" 2>/dev/null || true
+            echo "=== CMake 配置日志尾部 ==="
+            for f in build-fe-*/CMakeFiles/CMakeConfigureLog.yaml build-fe-*/CMakeFiles/CMakeError.log; do
+              [ -f "$f" ] || continue
+              echo "--- $f"
+              tail -n 60 "$f" || true
+            done
+            echo "=== deployment settings ==="
+            for f in build-fe-*/frontend/android-*-deployment-settings.json; do
+              [ -f "$f" ] || continue
+              echo "--- $f"
+              grep -E 'android-platform|sdk|target|min' "$f" || true
+            done
+            echo "=== 磁盘 ==="
+            df -h / 2>/dev/null || true
+            du -sh "$TOOLS_ROOT" "$DL_ROOT" 2>/dev/null || true
+          } | tee diagnostics.txt
+          echo "::group::失败诊断摘要"
+          cat diagnostics.txt
+          echo "::endgroup::"
+
+      - name: 失败时上传诊断摘要
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics-${{ github.run_attempt }}
+          path: diagnostics.txt
+          if-no-files-found: warn
+          retention-days: 7
