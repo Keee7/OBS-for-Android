@@ -33,6 +33,9 @@
 
 #include <QApplication>
 #include <QLineEdit>
+#ifndef __ANDROID__
+#include <QStyle>
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -628,6 +631,17 @@ void OBSBasicFilters::closeEvent(QCloseEvent *event)
 
 	main->SaveProject();
 }
+
+#ifndef __ANDROID__
+void OBSBasicFilters::showEvent(QShowEvent *event)
+{
+	QDialog::showEvent(event);
+	const int titleBarHeight = QApplication::style()->pixelMetric(QStyle::PM_TitleBarHeight);
+	const int maxHeight = screen()->availableGeometry().height() - titleBarHeight;
+	if (height() >= maxHeight)
+		resize(width(), maxHeight);
+}
+#endif
 
 bool OBSBasicFilters::nativeEvent(const QByteArray &, void *message, qintptr *)
 {

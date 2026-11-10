@@ -122,5 +122,8 @@ public:
 
 protected:
 	virtual void closeEvent(QCloseEvent *event) override;
+#ifndef __ANDROID__
+	void showEvent(QShowEvent *event) override;
+#endif
 	virtual bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
 };

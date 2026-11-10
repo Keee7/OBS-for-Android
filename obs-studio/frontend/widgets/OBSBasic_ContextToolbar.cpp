@@ -218,8 +218,9 @@ void OBSBasic::UpdateContextBar(bool force)
 	/* An empty source toolbar costs a full row of the phone's preview.
 	 * Evaluate before the visibility guard so selecting a source restores it. */
 	const bool showContextBar = config_get_bool(App()->GetUserConfig(), "BasicWindow", "ShowContextToolbars");
-	ui->contextContainer->setVisible(showContextBar && item != nullptr);
-	if (!item)
+	const bool compact = property("androidCompactLayout").toBool();
+	ui->contextContainer->setVisible(showContextBar && (!compact || item != nullptr));
+	if (compact && !item)
 		ClearContextBar();
 #endif
 

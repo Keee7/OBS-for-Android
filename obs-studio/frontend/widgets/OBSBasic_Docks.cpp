@@ -23,11 +23,64 @@
 
 #ifdef __ANDROID__
 #include "OBSAndroidDisplay.hpp"
+#include <utility/android-layout-policy.hpp>
+#include <QResizeEvent>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
+
+void OBSBasic::InitAndroidResponsiveLayout()
+{
+	androidLayoutResizeTimer = new QTimer(this);
+	androidLayoutResizeTimer->setSingleShot(true);
+	androidLayoutResizeTimer->setInterval(120);
+	connect(androidLayoutResizeTimer, &QTimer::timeout, this, &OBSBasic::ResizeAndroidDocks);
+	QTimer::singleShot(0, this, &OBSBasic::ResizeAndroidDocks);
+}
+
+void OBSBasic::resizeEvent(QResizeEvent *event)
+{
+	OBSMainWindow::resizeEvent(event);
+	// Coalesce live freeform resizing. Nothing runs periodically or per frame.
+	if (androidLayoutResizeTimer)
+		androidLayoutResizeTimer->start();
+}
 
 void OBSBasic::ResizeAndroidDocks()
 {
+	const QVariant previousMode = property("androidCompactLayout");
+	const bool compact = OBSAndroidLayout::compact(width(), height(), previousMode.toBool());
+	if (!previousMode.isValid() || compact != previousMode.toBool()) {
+		setProperty("androidCompactLayout", compact);
+		ui->scenes->setProperty("androidCompactLayout", compact);
+		ui->sources->setProperty("androidCompactLayout", compact);
+		const int rowHeight = OBSAndroidLayout::touchRowHeight(compact);
+		if (!ui->scenes->GetGridMode())
+			ui->scenes->setStyleSheet(QStringLiteral("QListView::item { min-height: %1px; padding-top: 0px; padding-bottom: 0px; }")
+						 .arg(rowHeight));
+		ui->scenes->doItemsLayout();
+		ui->sources->doItemsLayout();
+
+		const QSize preferred = ui->transitionAdd->sizeHint();
+		const QSize buttonSize = compact ? preferred : preferred.expandedTo(QSize(48, 48));
+		const QSize iconSize = compact ? ui->transitionAdd->iconSize() : QSize(24, 24);
+		for (QToolBar *bar : {ui->scenesToolbar, ui->sourcesToolbar}) {
+			bar->setIconSize(iconSize);
+			for (QAction *action : bar->actions()) {
+				if (!action->isSeparator()) {
+					if (auto *button = qobject_cast<QToolButton *>(bar->widgetForAction(action)))
+						button->setProperty("androidTouchAction", true);
+				}
+			}
+			bar->setStyleSheet(QStringLiteral(
+				"QToolBar { min-height: %1px; max-height: %1px; padding: 1px; }"
+				"QToolButton[androidTouchAction=\"true\"] { min-width: %2px; max-width: %2px;"
+				" min-height: %3px; max-height: %3px; padding: 0px; margin: 0px; border: none; }")
+				.arg(buttonSize.height() + 2).arg(buttonSize.width()).arg(buttonSize.height()));
+		}
+		UpdateContextBar(true);
+		obsAndroidDisplayLog("Android responsive mode: compact=%d window=%dx%d row=%d", int(compact), width(), height(), rowHeight);
+	}
 	/* Keep all five panels visible. Reserve room for the complete touch
 	 * toolbars, then share the remaining width between the bottom panels. */
 	const int toolbarWidth = qMax(ui->scenesToolbar->sizeHint().width(), ui->sourcesToolbar->sizeHint().width());

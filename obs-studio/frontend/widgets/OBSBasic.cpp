@@ -1463,65 +1463,7 @@ void OBSBasic::OBSInit()
 	}
 
 #ifdef __ANDROID__
-	/* Match the transition buttons instead of imposing oversized touch controls.
-	 * Row sizing lives in SceneTree and SourceTreeDelegate. */
-	{
-		const QSize buttonSize = ui->transitionAdd->sizeHint();
-		const QSize iconSize = ui->transitionAdd->iconSize();
-		auto configureToolbar = [buttonSize, iconSize](QToolBar *bar) {
-			bar->setIconSize(iconSize);
-			int bumped = 0;
-			const auto actions = bar->actions();
-			for (QAction *act : actions) {
-				if (act->isSeparator())
-					continue;
-				if (auto *b = qobject_cast<QToolButton *>(bar->widgetForAction(act))) {
-					b->setProperty("androidTouchAction", true);
-					++bumped;
-				}
-			}
-			/* Scope button dimensions to real actions, leaving Qt's overflow
-			 * button alone. Zero border/padding makes these the outer dimensions. */
-			bar->setStyleSheet(QStringLiteral(
-					  "QToolBar { min-height: %1px; max-height: %1px; padding: 1px; }"
-					  "QToolButton[androidTouchAction=\"true\"] { min-width: %2px; max-width: %2px;"
-					  " min-height: %3px; max-height: %3px; padding: 0px; margin: 0px; border: none; }")
-					  .arg(buttonSize.height() + 2)
-					  .arg(buttonSize.width())
-					  .arg(buttonSize.height()));
-			return bumped;
-		};
-		const int sceneButtons = configureToolbar(ui->scenesToolbar);
-		const int sourceButtons = configureToolbar(ui->sourcesToolbar);
-		/* Size docks after the touch controls and restored layout have settled. */
-		QTimer::singleShot(0, this, &OBSBasic::ResizeAndroidDocks);
-
-		obsAndroidDisplayLog("Android toolbar: scenes=%d sources=%d button=%dx%d rows=%d/%d", sceneButtons,
-				     sourceButtons, buttonSize.width(), buttonSize.height(), ui->scenes->sizeHintForRow(0),
-				     ui->sources->sizeHintForRow(0));
-		QTimer::singleShot(0, this, [this] {
-			auto visibleCount = [](QToolBar *bar) {
-				int n = 0;
-				const auto actions = bar->actions();
-				for (QAction *act : actions) {
-					if (act->isSeparator())
-						continue;
-					const QWidget *b = bar->widgetForAction(act);
-					if (b && b->isVisible())
-						++n;
-				}
-				return n;
-			};
-			const QToolButton *b = ui->scenesToolbar->findChild<QToolButton *>();
-			obsAndroidDisplayLog("3-4 命中区：落定 行高 场景=%d 源=%d 首个工具钮=%dx%d 可见动作钮 场景=%d/%d"
-					     " 源=%d/%d 工具栏宽=%d",
-					     ui->scenes->sizeHintForRow(0), ui->sources->sizeHintForRow(0),
-					     b ? b->width() : -1, b ? b->height() : -1,
-					     visibleCount(ui->scenesToolbar), ui->scenesToolbar->actions().size(),
-					     visibleCount(ui->sourcesToolbar), ui->sourcesToolbar->actions().size(),
-					     ui->scenesToolbar->width());
-		});
-	}
+	InitAndroidResponsiveLayout();
 #endif
 
 	bool pre23Defaults = config_get_bool(App()->GetUserConfig(), "General", "Pre23Defaults");

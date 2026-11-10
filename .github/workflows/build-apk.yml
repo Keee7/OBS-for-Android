@@ -117,6 +117,11 @@ jobs:
       # ---- 依赖缓存：最慢的一环（FFmpeg + 13 个依赖）----
       # 键里带 versions.sh/defs.sh/ffmpeg 补丁的内容哈希：依赖定义一变缓存即失效，
       # 避免"用了旧二进制却以为源码编译过了"。
+      - name: Check responsive Android layout policy
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror scripts/android-layout-test/policy.cpp -o "$RUNNER_TEMP/android-layout-test"
+          "$RUNNER_TEMP/android-layout-test"
+
       - name: Compute dependency cache key
         id: depkey
         run: |

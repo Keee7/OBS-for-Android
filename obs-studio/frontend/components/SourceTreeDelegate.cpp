@@ -15,8 +15,8 @@ QSize SourceTreeDelegate::sizeHint(const QStyleOptionViewItem &option, const QMo
 
 	QSize hint = item->sizeHint();
 #ifdef __ANDROID__
-	/* Keep phone rows compact without clipping the embedded source controls. */
-	hint.setHeight(qMax(hint.height(), 32));
+	/* Compact only in a small app window; retain tablet touch targets. */
+	hint.setHeight(qMax(hint.height(), tree->property("androidCompactLayout").toBool() ? 32 : 48));
 #endif
 	return hint;
 }
