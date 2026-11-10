@@ -32,6 +32,7 @@
 #include <QDesktopServices>
 #include <QUuid>
 
+#include "android-ime-diagnostics.hpp"
 #include "DoubleSpinBox.hpp"
 #include "SpinBox.hpp"
 #include "double-slider.hpp"
@@ -99,6 +100,7 @@ Q_DECLARE_METATYPE(media_frames_per_second);
 
 void OBSPropertiesView::ReloadProperties()
 {
+	OBSImeDiagnostics::refresh("reload", this);
 	if (weakObj || rawObj) {
 		OBSObject strongObj = GetObject();
 		void *obj = strongObj ? strongObj.Get() : rawObj;
@@ -120,6 +122,7 @@ void OBSPropertiesView::ReloadProperties()
 
 void OBSPropertiesView::RefreshProperties()
 {
+	OBSImeDiagnostics::refresh("rebuild", this);
 	int h, v, hend, vend;
 	GetScrollPos(h, v, hend, vend);
 
@@ -381,6 +384,7 @@ QWidget *OBSPropertiesView::AddText(obs_property_t *prop, QFormLayout *layout, Q
 
 	if (type == OBS_TEXT_MULTILINE) {
 		OBSPlainTextEdit *edit = new OBSPlainTextEdit(this, monospace);
+		OBSImeDiagnostics::install(edit);
 		edit->setPlainText(QT_UTF8(val));
 		edit->setTabStopDistance(40);
 		return NewWidget(prop, edit, &OBSPlainTextEdit::textChanged);
@@ -388,6 +392,7 @@ QWidget *OBSPropertiesView::AddText(obs_property_t *prop, QFormLayout *layout, Q
 	} else if (type == OBS_TEXT_PASSWORD) {
 		QLayout *subLayout = new QHBoxLayout();
 		QLineEdit *edit = new QLineEdit();
+		OBSImeDiagnostics::install(edit);
 		QPushButton *show = new QPushButton();
 
 		show->setText(tr("Show"));
@@ -459,6 +464,7 @@ QWidget *OBSPropertiesView::AddText(obs_property_t *prop, QFormLayout *layout, Q
 	}
 
 	QLineEdit *edit = new QLineEdit();
+	OBSImeDiagnostics::install(edit);
 
 	edit->setText(QT_UTF8(val));
 	edit->setToolTip(QT_UTF8(obs_property_long_description(prop)));
@@ -729,6 +735,7 @@ QWidget *OBSPropertiesView::AddList(obs_property_t *prop, bool &warning)
 
 	if (type == OBS_COMBO_TYPE_EDITABLE) {
 		combo->setEditable(true);
+		OBSImeDiagnostics::install(combo->lineEdit());
 	}
 
 	combo->setMaxVisibleItems(40);
@@ -2093,6 +2100,7 @@ void WidgetInfo::ButtonClicked()
 	OBSObject strongObj = view->GetObject();
 	void *obj = strongObj ? strongObj.Get() : view->rawObj;
 	if (obs_property_button_clicked(property, obj)) {
+		OBSImeDiagnostics::refresh("button-modified", view);
 		QMetaObject::invokeMethod(view, &OBSPropertiesView::RefreshProperties, Qt::QueuedConnection);
 	}
 }
@@ -2200,6 +2208,7 @@ void WidgetInfo::ControlChanged()
 	view->SignalChanged();
 
 	if (obs_property_modified(property, view->settings)) {
+		OBSImeDiagnostics::refresh("property-modified", view);
 		view->lastFocused = setting;
 		QMetaObject::invokeMethod(view, &OBSPropertiesView::RefreshProperties, Qt::QueuedConnection);
 	}

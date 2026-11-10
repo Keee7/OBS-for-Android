@@ -49,6 +49,7 @@ target_sources(
     $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:vaapi-utils.h>
     obs-ffmpeg-audio-encoders.c
     obs-ffmpeg-av1.c
+    obs-ffmpeg-x265.c
     obs-ffmpeg-compat.h
     obs-ffmpeg-formats.h
     obs-ffmpeg-openh264.c
@@ -59,6 +60,7 @@ target_sources(
     obs-ffmpeg-output.h
     obs-ffmpeg-source.c
     obs-ffmpeg-video-encoders.c
+    ffmpeg-submit-frame.h
     obs-ffmpeg.c
 )
 

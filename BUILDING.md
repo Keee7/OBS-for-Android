@@ -1,8 +1,8 @@
 # Building OBS for Android / 构建说明
 
-The default Android application ID is `com.obsproject.studio`. Windows builds can opt into `com.antutu.ABenchMark` with `-AntutuPackage`; Java/JNI classes always retain the `com.obsproject.studio` namespace. The current source version is `0.1.22-cadence-diagnostics` (23), arm64-v8a, minSdk 29 / targetSdk 35. WSL/Linux remains the original port's build route and uses the default application ID.
+The default Android application ID is `com.obsproject.studio`. Windows builds can opt into `com.antutu.ABenchMark` with `-AntutuPackage`; Java/JNI classes always retain the `com.obsproject.studio` namespace. The current source version is `0.1.23-softcodec-image-test` (24), arm64-v8a, minSdk 29 / targetSdk 35. WSL/Linux remains the original port's build route and uses the default application ID.
 
-当前 versionCode 23 测试包已完成 Windows 全量 configure、native/Qt/Java/APK 构建、release 签名与 APK 严格核验。下面分别说明 Windows 工具布局和原项目的 WSL 构建路径；工具链和依赖源码不随仓库提供，需要自行安装/下载。
+各版本的实际构建和测试范围见 [测试记录](scripts/SOFTWARE_IMAGE_IME_TEST.md)。下面分别说明 Windows 工具布局和原项目的 WSL 构建路径；工具链和依赖源码不随仓库提供，需要自行安装/下载。
 
 ## Clone
 
@@ -53,7 +53,7 @@ The build script does not install these tools or download a dependency prefix. T
 ### Preparing dependencies
 
 - [build-android-cmake-deps.py](scripts/build-android-cmake-deps.py) builds Jansson, libjpeg-turbo, FreeType, mbedTLS and curl. It expects the source directory layout listed in that script and copies SIMDe/uthash headers when present.
-- [build-deps-windows.sh](scripts/build-deps-windows.sh) builds x264 and FFmpeg under MSYS2. It requires `WORK_ROOT` (absolute, no spaces), `SYSROOT` (complete NDK sysroot), `SOURCES_ROOT` (containing `x264/` and `ffmpeg-7.1.3/`) and `OUTPUT_PREFIX`. `LLVM_BIN` can override the LLVM directory.
+- [build-deps-windows.sh](scripts/build-deps-windows.sh) builds x264, x265 3.6, libaom 3.10.0 and FFmpeg under MSYS2. It requires `WORK_ROOT` (absolute, no spaces), `SYSROOT` (complete NDK sysroot), `SOURCES_ROOT` (containing `x264/`, `x265_3.6/`, `libaom-3.10.0/` and `ffmpeg-7.1.3/`) and `OUTPUT_PREFIX`. `LLVM_BIN` must point to the NDK LLVM bin directory; if its path contains spaces, point it at a space-free junction to that directory. CMake, Ninja and pkg-config must be on PATH. FFmpeg links x265 under GPL; retain and distribute the corresponding sources and licenses.
 - USB/audio-filter dependencies also need to be present in the prefix; the Python helper is not an installer for the entire dependency set. The WSL route below covers the original dependency groups.
 
 Example for the Python helper (adapt paths to your installation):
@@ -154,3 +154,5 @@ For device checks, use [the latest test-package notes](scripts/DEVICE_TEST_QUICK
 The bundled `android-shell/debug.keystore` is the upstream project's **public development key** (alias `androiddebugkey`, password `android`). Current scripts produce debuggable test builds. For your own release process, keep a separate private signing key outside Git, configure signing accordingly, and review the debug manifest setting. Changing the key prevents ordinary in-place upgrades from differently signed builds.
 
 Preserve the source, dependency license notices and source/revision information corresponding to the binary you distribute. See [NOTICE.md](NOTICE.md).
+
+Android software HEVC (x265, 8-bit SDR) and AV1 (libaom) are registered only when present in the linked FFmpeg. Their throughput, especially 1080p60 sustained operation, depends on the device and thermal conditions and must be measured. Simple output uses fast presets; advanced output exposes encoder settings and thread counts.

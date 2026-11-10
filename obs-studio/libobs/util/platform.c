@@ -59,7 +59,7 @@ FILE *os_wfopen(const wchar_t *path, const char *mode)
 FILE *os_fopen(const char *path, const char *mode)
 {
 #ifdef __ANDROID__
-	if (path && strncmp(path, "content://", 10) == 0) {
+	if (path && (strncmp(path, "content://", 10) == 0 || strncmp(path, "file://", 7) == 0)) {
 		int fd = obs_android_storage_open(path, mode);
 		if (fd < 0) { errno = EACCES; return NULL; }
 		FILE *file = fdopen(fd, mode);

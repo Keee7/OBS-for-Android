@@ -51,8 +51,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.obsproject.studio"
     android:installLocation="auto"
-    android:versionCode="23"
-    android:versionName="0.1.22-cadence-diagnostics">
+    android:versionCode="24"
+    android:versionName="0.1.23-softcodec-image-test">
     <uses-permission android:name="android.permission.INTERNET"  />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"  />
     <uses-permission android:name="android.permission.RECORD_AUDIO"  />

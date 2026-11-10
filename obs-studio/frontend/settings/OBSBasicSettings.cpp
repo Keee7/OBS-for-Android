@@ -3565,7 +3565,8 @@ void OBSBasicSettings::SaveOutputSettings()
 	SaveCheckBox(ui->simpleNoSpace, "SimpleOutput", "FileNameWithoutSpace");
 	SaveComboData(ui->simpleOutRecFormat, "SimpleOutput", "RecFormat2");
 	SaveCheckBox(ui->simpleOutAdvanced, "SimpleOutput", "UseAdvanced");
-	if (encoder != SIMPLE_ENCODER_ANDROID_MEDIACODEC && encoder != SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC)
+	if (encoder != SIMPLE_ENCODER_ANDROID_MEDIACODEC && encoder != SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC &&
+	    encoder != SIMPLE_ENCODER_SOFTWARE_HEVC && encoder != SIMPLE_ENCODER_SOFTWARE_AV1)
 		SaveComboData(ui->simpleOutPreset, "SimpleOutput", presetType);
 	SaveEdit(ui->simpleOutCustom, "SimpleOutput", "x264Settings");
 	SaveComboData(ui->simpleOutRecQuality, "SimpleOutput", "RecQuality");
@@ -5032,6 +5033,10 @@ void OBSBasicSettings::FillSimpleRecordingValues()
 #endif
 
 #ifdef __ANDROID__
+	if (EncoderAvailable("ffmpeg_x265"))
+		ui->simpleOutRecEncoder->addItem(QStringLiteral("Software HEVC (x265)"), QString(SIMPLE_ENCODER_SOFTWARE_HEVC));
+	if (EncoderAvailable("ffmpeg_aom_av1"))
+		ui->simpleOutRecEncoder->addItem(QStringLiteral("Software AV1 (AOM)"), QString(SIMPLE_ENCODER_SOFTWARE_AV1));
 	if (EncoderAvailable("android_mediacodec_h264"))
 		ui->simpleOutRecEncoder->addItem(QStringLiteral("Android MediaCodec H.264"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC));
 	if (EncoderAvailable("android_mediacodec_hevc"))
@@ -5145,7 +5150,8 @@ void OBSBasicSettings::SimpleStreamingEncoderChanged()
 	ui->simpleOutCustom->setVisible(ui->simpleOutAdvanced->isChecked());
 	ui->simpleOutCustomLabel->setVisible(ui->simpleOutAdvanced->isChecked());
 
-	if (encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC || encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC) {
+	if (encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC || encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC ||
+	    encoder == SIMPLE_ENCODER_SOFTWARE_HEVC || encoder == SIMPLE_ENCODER_SOFTWARE_AV1) {
 		// Android hardware AVC has bitrate/keyframe settings, not x264 speed presets.
 		// Preserve the existing x264 settings when switching between encoders.
 		ui->simpleOutAdvanced->setVisible(false);

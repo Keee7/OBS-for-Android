@@ -125,6 +125,7 @@ export_to_windows() {
   ( cd "$PREFIX" && tar -cf - . ) | ( cd "$EXPORT" && tar -xf - ) \
     || echo "   ! 同步失败（Windows 侧 prebuilt 可能不完整）"
   _relocate_cmake_package "$EXPORT"
+  bash "$HERE/../scripts/relocate-android-pkgconfig.sh" "$EXPORT/lib/pkgconfig"
 }
 
 # 依赖是装在 $PREFIX（Linux 路径）下的，CMake 导出的 *Targets.cmake 会把某些

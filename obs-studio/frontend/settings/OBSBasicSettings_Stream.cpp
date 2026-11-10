@@ -1779,6 +1779,10 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 #define ENCODER_STR(str) QTStr("Basic.Settings.Output.Simple.Encoder." str)
 
 #ifdef __ANDROID__
+	if (service_supports_encoder(vcodecs, "ffmpeg_x265"))
+		ui->simpleOutStrEncoder->addItem(QStringLiteral("Software HEVC (x265)"), QString(SIMPLE_ENCODER_SOFTWARE_HEVC));
+	if (service_supports_encoder(vcodecs, "ffmpeg_aom_av1"))
+		ui->simpleOutStrEncoder->addItem(QStringLiteral("Software AV1 (AOM)"), QString(SIMPLE_ENCODER_SOFTWARE_AV1));
 	if (service_supports_encoder(vcodecs, "android_mediacodec_h264"))
 		ui->simpleOutStrEncoder->addItem(QStringLiteral("Android MediaCodec H.264"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC));
 	if (service_supports_encoder(vcodecs, "android_mediacodec_hevc"))

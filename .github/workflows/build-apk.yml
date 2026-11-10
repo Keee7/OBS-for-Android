@@ -97,7 +97,9 @@ jobs:
           # pkg-config/dpkg-dev：交叉 pkg-config 与 dpkg 架构查询。
           sudo apt-get install -y --no-install-recommends \
             7zip ninja-build build-essential curl unzip zip ca-certificates \
-            patch pkg-config dpkg-dev autoconf automake libtool nasm yasm ccache
+            patch pkg-config dpkg-dev autoconf automake libtool nasm yasm ccache \
+            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev python3-pil
           # 确认解包器真的在（脚本也会自己找一遍；早点失败更好定位）
           for c in 7z 7zz 7za 7zr; do command -v "$c" >/dev/null 2>&1 && { echo "7-Zip: $c"; break; }; done
           # 确认 autoreconf 就位（依赖构建的硬前提）
@@ -122,7 +124,8 @@ jobs:
         run: |
           set -euo pipefail
           HASH="$(cat deps-android/versions.sh deps-android/defs.sh deps-android/build.sh \
-                  scripts/android-native-deps/ffmpeg-*.patch | sha256sum | cut -c1-16)"
+                  scripts/android-native-deps/ffmpeg-*.patch scripts/android-native-deps/x265-*.patch \
+                  scripts/relocate-android-pkgconfig.sh | sha256sum | cut -c1-16)"
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
           echo "依赖缓存键哈希=$HASH"
 
@@ -174,6 +177,26 @@ jobs:
           SIGN_STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           SIGN_KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: bash scripts/ci-build-android.sh
+
+      - name: Check document images and encoder backpressure on host
+        run: |
+          set -euo pipefail
+          python3 scripts/test-image-document.py --ffmpeg-prefix /usr
+          cc -std=c11 -Wall -Wextra -Werror scripts/ffmpeg-submit-test/test.c -o "$RUNNER_TEMP/ffmpeg-submit-test"
+          "$RUNNER_TEMP/ffmpeg-submit-test"
+
+      - name: Check property editor diagnostics with host Qt
+        run: |
+          set -euo pipefail
+          HOST_QT="$TOOLS_ROOT/Qt/$QT_VERSION/gcc_64"
+          CMAKE_BIN="$TOOLS_ROOT/cmake-$CMAKE_VERSION-linux-x86_64/bin/cmake"
+          CTEST_BIN="$TOOLS_ROOT/cmake-$CMAKE_VERSION-linux-x86_64/bin/ctest"
+          "$CMAKE_BIN" -S scripts/ime-diagnostics-test -B "$RUNNER_TEMP/obs-ime-test" -G Ninja \
+            -DCMAKE_PREFIX_PATH="$HOST_QT" -DCMAKE_BUILD_TYPE=Release
+          "$CMAKE_BIN" --build "$RUNNER_TEMP/obs-ime-test" --parallel 2
+          QT_QPA_PLATFORM=offscreen QT_PLUGIN_PATH="$HOST_QT/plugins" \
+            LD_LIBRARY_PATH="$HOST_QT/lib:${LD_LIBRARY_PATH:-}" \
+            "$CTEST_BIN" --test-dir "$RUNNER_TEMP/obs-ime-test" --output-on-failure
 
       - name: Locate APK and checksum
         id: apk

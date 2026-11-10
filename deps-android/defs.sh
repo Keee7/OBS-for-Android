@@ -168,6 +168,25 @@ build_x264() {
   )
 }
 
+# Build CPU encoders before FFmpeg, as PIC static libraries.
+build_x265() {
+  local source patch_file
+  source=$(src_dir x265)
+  patch_file="$HERE/../scripts/android-native-deps/x265-3.6-android-asm-target.patch"
+  if ! patch -d "$source" -p1 -R --force --dry-run --silent < "$patch_file" >/dev/null 2>&1; then
+    patch -d "$source" -p1 --force < "$patch_file" || return 1
+  fi
+  _run_cmake "$(src_dir x265)/source" -DENABLE_SHARED=OFF -DENABLE_CLI=OFF \
+    -DENABLE_ASSEMBLY=ON -DENABLE_TESTS=OFF -DHIGH_BIT_DEPTH=OFF || return 1
+  # x265 3.6 writes invalid -l-l:libunwind.a entries with NDK r30.
+  sed -i 's/^Libs.private:.*/Libs.private: -lc++_static -lc++abi -lunwind -lm -ldl/' "$PREFIX/lib/pkgconfig/x265.pc"
+}
+
+build_aom() {
+  _run_cmake "$(src_dir aom)" -DENABLE_DOCS=OFF -DENABLE_TESTS=OFF \
+    -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_DECODER=0
+}
+
 # ---------------------------------------------------------------- ffmpeg
 build_ffmpeg() {
   local s; s=$(src_dir ffmpeg)
@@ -201,7 +220,8 @@ build_ffmpeg() {
       --sysroot="$SYSROOT" \
       --enable-static --disable-shared \
       --disable-doc --disable-programs --disable-debug --disable-stripping \
-      --disable-autodetect \
+      --disable-autodetect --enable-gpl --enable-libx265 --enable-libaom --disable-decoder=libaom_av1 \
+      --pkg-config-flags=--static \
       --enable-mediacodec --enable-jni \
       --enable-avcodec --enable-avformat --enable-avutil \
       --enable-swscale --enable-swresample --enable-avfilter --enable-avdevice \

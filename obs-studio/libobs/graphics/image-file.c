@@ -92,7 +92,7 @@ static bool init_animated_gif(gs_image_file_ex_t *image, const char *path, uint6
 	nsgif_error result;
 	uint64_t max_size;
 	size_t size, size_read;
-	FILE *file;
+	FILE *file = NULL;
 	nsgif_bitmap_t *bitmap;
 
 	image->internal->bitmap_callbacks.create = bi_def_bitmap_create;
@@ -102,7 +102,8 @@ static bool init_animated_gif(gs_image_file_ex_t *image, const char *path, uint6
 	image->internal->bitmap_callbacks.set_opaque = bi_def_bitmap_set_opaque;
 	image->internal->bitmap_callbacks.test_opaque = bi_def_bitmap_test_opaque;
 
-	nsgif_create(&image->internal->bitmap_callbacks, NSGIF_BITMAP_FMT_R8G8B8A8, &image->internal->gif);
+	if (nsgif_create(&image->internal->bitmap_callbacks, NSGIF_BITMAP_FMT_R8G8B8A8, &image->internal->gif) != NSGIF_OK)
+		goto fail;
 
 	file = os_fopen(path, "rb");
 	if (!file) {
@@ -110,9 +111,12 @@ static bool init_animated_gif(gs_image_file_ex_t *image, const char *path, uint6
 		goto fail;
 	}
 
-	fseek(file, 0, SEEK_END);
-	size = (size_t)os_ftelli64(file);
-	fseek(file, 0, SEEK_SET);
+	if (os_fseeki64(file, 0, SEEK_END) != 0)
+		goto fail;
+	const int64_t file_size = os_ftelli64(file);
+	if (file_size <= 0 || (uint64_t)file_size > SIZE_MAX || os_fseeki64(file, 0, SEEK_SET) != 0)
+		goto fail;
+	size = (size_t)file_size;
 
 	image->internal->gif_data = bmalloc(size);
 	size_read = fread(image->internal->gif_data, 1, size, file);
@@ -183,6 +187,7 @@ static bool init_animated_gif(gs_image_file_ex_t *image, const char *path, uint6
 		}
 	} else {
 		nsgif_destroy(image->internal->gif);
+		image->internal->gif = NULL;
 		bfree(image->internal->gif_data);
 		image->internal->gif_data = NULL;
 		is_animated_gif = false;
@@ -202,11 +207,31 @@ not_animated:
 	return is_animated_gif;
 }
 
+static bool image_file_is_gif(const char *file)
+{
+	const size_t len = strlen(file);
+	if (len > 4 && astrcmpi(file + len - 4, ".gif") == 0)
+		return true;
+#ifdef __ANDROID__
+	/* Document IDs often contain no filename/extension. Preserve animation
+	 * by checking the signature instead of guessing a filesystem path. */
+	if (strncmp(file, "content://", 10) == 0 || strncmp(file, "file://", 7) == 0) {
+		FILE *stream = os_fopen(file, "rb");
+		if (!stream)
+			return false;
+		char header[6];
+		const size_t count = fread(header, 1, sizeof(header), stream);
+		fclose(stream);
+		return count == sizeof(header) &&
+			(memcmp(header, "GIF87a", sizeof(header)) == 0 || memcmp(header, "GIF89a", sizeof(header)) == 0);
+	}
+#endif
+	return false;
+}
+
 static void gs_image_file_ex_init_internal(gs_image_file_ex_t *image, const char *file, uint64_t *mem_usage,
 					   enum gs_color_space *space, enum gs_image_alpha_mode alpha_mode)
 {
-	size_t len;
-
 	if (!image)
 		return;
 
@@ -217,9 +242,7 @@ static void gs_image_file_ex_init_internal(gs_image_file_ex_t *image, const char
 
 	image->internal = bzalloc(sizeof(struct gs_image_file_internal));
 
-	len = strlen(file);
-
-	if (len > 4 && astrcmpi(file + len - 4, ".gif") == 0) {
+	if (image_file_is_gif(file)) {
 		if (init_animated_gif(image, file, mem_usage, alpha_mode)) {
 			return;
 		}
@@ -251,17 +274,15 @@ void gs_image_file_ex_free(gs_image_file_ex_t *image)
 		return;
 
 	if (image->loaded) {
-		if (image->is_animated_gif && image->internal) {
-			nsgif_destroy(image->internal->gif);
-			bfree(image->internal->animation_frame_cache);
-			bfree(image->internal->animation_frame_data);
-		}
-
 		gs_texture_destroy(image->texture);
 	}
 
 	bfree(image->texture_data);
 	if (image->internal) {
+		if (image->internal->gif)
+			nsgif_destroy(image->internal->gif);
+		bfree(image->internal->animation_frame_cache);
+		bfree(image->internal->animation_frame_data);
 		bfree(image->internal->gif_data);
 		bfree(image->internal);
 	}

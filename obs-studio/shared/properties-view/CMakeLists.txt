@@ -38,6 +38,7 @@ add_library(OBS::properties-view ALIAS properties-view)
 target_sources(
   properties-view
   INTERFACE
+    android-ime-diagnostics.hpp
     double-slider.cpp
     double-slider.hpp
     properties-view.cpp
