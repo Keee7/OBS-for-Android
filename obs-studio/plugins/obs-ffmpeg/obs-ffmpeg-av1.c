@@ -65,6 +65,20 @@ static void av1_video_info(void *data, struct video_scale_info *info)
 
 static bool av1_update(struct av1_encoder *enc, obs_data_t *settings)
 {
+#ifdef __ANDROID__
+	const int64_t thread_count = obs_data_get_int(settings, "threads");
+	const int64_t bitrate_value = obs_data_get_int(settings, "bitrate");
+	const int64_t keyint_value = obs_data_get_int(settings, "keyint_sec");
+	const int64_t preset_value = obs_data_get_int(settings, "preset");
+	const int64_t cqp_value = obs_data_get_int(settings, "cqp");
+	if (thread_count < 0 || thread_count > 64 || bitrate_value < 50 || bitrate_value > 300000 ||
+	    keyint_value < 0 || keyint_value > 10 || preset_value < 0 ||
+	    preset_value > (enc->type == AV1_ENCODER_TYPE_AOM ? 8 : 12) ||
+	    cqp_value < 1 || cqp_value > 63) {
+		obs_encoder_set_last_error(enc->ffve.encoder, "Invalid AV1 bitrate, preset, keyframe interval or thread count.");
+		return false;
+	}
+#endif
 	const char *rc = obs_data_get_string(settings, "rate_control");
 	int bitrate = (int)obs_data_get_int(settings, "bitrate");
 	int cqp = (int)obs_data_get_int(settings, "cqp");
@@ -80,7 +94,11 @@ static bool av1_update(struct av1_encoder *enc, obs_data_t *settings)
 	info.colorspace = voi->colorspace;
 	info.range = voi->range;
 
+#ifdef __ANDROID__
+	enc->ffve.context->thread_count = (int)obs_data_get_int(settings, "threads");
+#else
 	enc->ffve.context->thread_count = 0;
+#endif
 
 	av1_video_info(enc, &info);
 
@@ -88,16 +106,24 @@ static bool av1_update(struct av1_encoder *enc, obs_data_t *settings)
 		av_opt_set_int(enc->ffve.context->priv_data, "preset", preset, 0);
 		av_dict_set_int(&svtav1_opts, "rc", 1, 0);
 	} else if (enc->type == AV1_ENCODER_TYPE_AOM) {
+#ifdef __ANDROID__
+		/* FFmpeg 7.1 accepts cpu-used up to 8. A rejected 9/10 must
+		 * not silently leave its much slower default (1) active. */
+		if (av_opt_set_int(enc->ffve.context->priv_data, "cpu-used", preset, 0) < 0 ||
+		    av_opt_set(enc->ffve.context->priv_data, "usage", "realtime", 0) < 0 ||
+		    av_opt_set_int(enc->ffve.context->priv_data, "tile-columns", 1, 0) < 0 ||
+		    av_opt_set_int(enc->ffve.context->priv_data, "tile-rows", 0, 0) < 0 ||
+		    av_opt_set_int(enc->ffve.context->priv_data, "row-mt", 1, 0) < 0) {
+			obs_encoder_set_last_error(enc->ffve.encoder, "Failed to configure AOM speed or threading.");
+			return false;
+		}
+#else
 		av_opt_set_int(enc->ffve.context->priv_data, "cpu-used", preset, 0);
 		av_opt_set(enc->ffve.context->priv_data, "usage", "realtime", 0);
-#if 0
-		av_opt_set_int(enc->ffve.context->priv_data, "tile-columns", 4, 0);
-		//av_opt_set_int(enc->ffve.context->priv_data, "tile-rows", 4, 0);
-#else
 		av_opt_set_int(enc->ffve.context->priv_data, "tile-columns", 2, 0);
 		av_opt_set_int(enc->ffve.context->priv_data, "tile-rows", 2, 0);
-#endif
 		av_opt_set_int(enc->ffve.context->priv_data, "row-mt", 1, 0);
+#endif
 	}
 
 	if (astrcmpi(rc, "cqp") == 0) {
@@ -233,7 +259,12 @@ void av1_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "keyint_sec", 0);
 	obs_data_set_default_int(settings, "cqp", 50);
 	obs_data_set_default_string(settings, "rate_control", "CBR");
+#ifdef __ANDROID__
 	obs_data_set_default_int(settings, "preset", 8);
+	obs_data_set_default_int(settings, "threads", 0);
+#else
+	obs_data_set_default_int(settings, "preset", 8);
+#endif
 }
 
 static bool rate_control_modified(obs_properties_t *ppts, obs_property_t *p, obs_data_t *settings)
@@ -287,10 +318,15 @@ obs_properties_t *av1_properties(enum av1_encoder_type type)
 	} else if (type == AV1_ENCODER_TYPE_AOM) {
 		obs_property_list_add_int(p, "Probably too slow (7)", 7);
 		obs_property_list_add_int(p, "Okay (8)", 8);
+#ifndef __ANDROID__
 		obs_property_list_add_int(p, "Fast (9)", 9);
 		obs_property_list_add_int(p, "Fastest (10)", 10);
+#endif
 	}
 
+#ifdef __ANDROID__
+	obs_properties_add_int(props, "threads", "Threads (0 = automatic)", 0, 64, 1);
+#endif
 	obs_properties_add_text(props, "ffmpeg_opts", obs_module_text("FFmpegOpts"), OBS_TEXT_DEFAULT);
 
 	return props;

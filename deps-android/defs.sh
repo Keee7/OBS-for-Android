@@ -43,6 +43,9 @@ build_uthash() {
 # ---------------------------------------------------------------- cmake 系
 _run_cmake() {
   local s=$1; shift
+  # AOM ships required build/cmake/*.cmake as source. Never use or clear
+  # the upstream build/ directory as our generated CMake binary directory.
+  local b="$s/.obs-android-build"
   _common_env
   # 交叉 pkg-config：只准在 $PREFIX 里找，避免误用宿主 /usr/lib 的库
   export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
@@ -52,8 +55,8 @@ _run_cmake() {
   if [ "${USE_CCACHE:-0}" = "1" ] && command -v ccache >/dev/null 2>&1; then
     cc_launcher=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
   fi
-  rm -rf "$s/build"
-  cmake -S "$s" -B "$s/build" \
+  rm -rf "$b" || return 1
+  cmake -S "$s" -B "$b" \
     -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI="$ABI" \
@@ -71,8 +74,8 @@ _run_cmake() {
     -DBUILD_TESTING=OFF \
     "${cc_launcher[@]}" \
     "$@" || return 1
-  cmake --build "$s/build" -j"$JOBS" || return 1
-  cmake --install "$s/build" || return 1
+  cmake --build "$b" -j"$JOBS" || return 1
+  cmake --install "$b" || return 1
 }
 
 build_jansson() {
@@ -168,6 +171,25 @@ build_x264() {
   )
 }
 
+# Build CPU encoders before FFmpeg, as PIC static libraries.
+build_x265() {
+  local source patch_file
+  source=$(src_dir x265)
+  patch_file="$HERE/../scripts/android-native-deps/x265-3.6-android-asm-target.patch"
+  if ! patch -d "$source" -p1 -R --force --dry-run --silent < "$patch_file" >/dev/null 2>&1; then
+    patch -d "$source" -p1 --force < "$patch_file" || return 1
+  fi
+  _run_cmake "$(src_dir x265)/source" -DENABLE_SHARED=OFF -DENABLE_CLI=OFF \
+    -DENABLE_ASSEMBLY=ON -DENABLE_TESTS=OFF -DHIGH_BIT_DEPTH=OFF || return 1
+  # x265 3.6 writes invalid -l-l:libunwind.a entries with NDK r30.
+  sed -i 's/^Libs.private:.*/Libs.private: -lc++_static -lc++abi -lunwind -lm -ldl/' "$PREFIX/lib/pkgconfig/x265.pc"
+}
+
+build_aom() {
+  _run_cmake "$(src_dir aom)" -DENABLE_DOCS=OFF -DENABLE_TESTS=OFF \
+    -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_DECODER=0
+}
+
 # ---------------------------------------------------------------- ffmpeg
 build_ffmpeg() {
   local s; s=$(src_dir ffmpeg)
@@ -201,7 +223,8 @@ build_ffmpeg() {
       --sysroot="$SYSROOT" \
       --enable-static --disable-shared \
       --disable-doc --disable-programs --disable-debug --disable-stripping \
-      --disable-autodetect \
+      --disable-autodetect --enable-gpl --enable-libx265 --enable-libaom --disable-decoder=libaom_av1 \
+      --pkg-config-flags=--static \
       --enable-mediacodec --enable-jni \
       --enable-avcodec --enable-avformat --enable-avutil \
       --enable-swscale --enable-swresample --enable-avfilter --enable-avdevice \

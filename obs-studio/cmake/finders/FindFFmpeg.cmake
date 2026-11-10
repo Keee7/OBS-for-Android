@@ -360,3 +360,57 @@ set_package_properties(
     URL "https://www.ffmpeg.org"
     DESCRIPTION "A complete, cross-platform solution to record, convert and stream audio and video."
 )
+
+# Android's FFmpeg archives embed references to these static software codecs.
+if(ANDROID AND TARGET FFmpeg::avcodec)
+  find_library(FFmpeg_X265_LIBRARY NAMES x265)
+  find_library(FFmpeg_AOM_LIBRARY NAMES aom)
+  if(NOT FFmpeg_X265_LIBRARY OR NOT FFmpeg_AOM_LIBRARY)
+    execute_process(COMMAND "${CMAKE_NM}" -g --defined-only "${FFmpeg_avcodec_LIBRARY}"
+      RESULT_VARIABLE _codec_nm_result OUTPUT_VARIABLE _codec_symbols ERROR_QUIET)
+    if(NOT _codec_nm_result EQUAL 0)
+      message(FATAL_ERROR "Unable to inspect Android libavcodec for software encoder dependencies")
+    endif()
+    if(NOT FFmpeg_X265_LIBRARY AND _codec_symbols MATCHES "ff_libx265_encoder")
+      message(FATAL_ERROR "Android libavcodec requires the missing x265 static library")
+    endif()
+    if(NOT FFmpeg_AOM_LIBRARY AND _codec_symbols MATCHES "ff_libaom_av1_encoder")
+      message(FATAL_ERROR "Android libavcodec requires the missing aom static library")
+    endif()
+    unset(_codec_symbols)
+  endif()
+  foreach(_codec_lib IN ITEMS FFmpeg_X265_LIBRARY FFmpeg_AOM_LIBRARY)
+    if(${_codec_lib})
+      set_property(TARGET FFmpeg::avcodec APPEND PROPERTY INTERFACE_LINK_LIBRARIES "${${_codec_lib}}")
+    endif()
+  endforeach()
+  if(FFmpeg_X265_LIBRARY)
+    # libavcodec can be linked by a C target, so the compiler driver does not
+    # automatically add the C++ runtime needed by the static x265 archive.
+    if(ANDROID_STL STREQUAL "c++_static" OR CMAKE_ANDROID_STL_TYPE STREQUAL "c++_static")
+      set_property(TARGET FFmpeg::avcodec APPEND PROPERTY INTERFACE_LINK_LIBRARIES c++_static c++abi unwind)
+    else()
+      set_property(TARGET FFmpeg::avcodec APPEND PROPERTY INTERFACE_LINK_LIBRARIES c++_shared)
+    endif()
+  endif()
+endif()
+
+# The GPL FFmpeg build enables the pp filter, which uses libpostproc. Static
+# targets must carry this dependency themselves; the desktop builds use shared
+# FFmpeg libraries and resolve it inside libavfilter instead.
+if(ANDROID AND TARGET FFmpeg::avfilter)
+  find_library(FFmpeg_POSTPROC_LIBRARY NAMES postproc)
+  if(FFmpeg_POSTPROC_LIBRARY)
+    set_property(TARGET FFmpeg::avfilter APPEND PROPERTY INTERFACE_LINK_LIBRARIES "${FFmpeg_POSTPROC_LIBRARY}")
+  else()
+    execute_process(COMMAND "${CMAKE_NM}" -g --undefined-only "${FFmpeg_avfilter_LIBRARY}"
+      RESULT_VARIABLE _postproc_nm_result OUTPUT_VARIABLE _postproc_symbols ERROR_QUIET)
+    if(NOT _postproc_nm_result EQUAL 0)
+      message(FATAL_ERROR "Unable to inspect Android libavfilter for its postproc dependency")
+    endif()
+    if(_postproc_symbols MATCHES "pp_postprocess")
+      message(FATAL_ERROR "Android libavfilter requires the missing postproc static library")
+    endif()
+    unset(_postproc_symbols)
+  endif()
+endif()

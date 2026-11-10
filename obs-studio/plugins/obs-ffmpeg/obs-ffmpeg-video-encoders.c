@@ -1,4 +1,5 @@
 #include "obs-ffmpeg-video-encoders.h"
+#include "ffmpeg-submit-frame.h"
 
 #define do_log(level, format, ...) \
 	blog(level, "[%s encoder: '%s'] " format, enc->enc_name, obs_encoder_get_name(enc->encoder), ##__VA_ARGS__)
@@ -135,7 +136,6 @@ void ffmpeg_video_encoder_free(struct ffmpeg_video_encoder *enc)
 	}
 
 	avcodec_free_context(&enc->context);
-	av_frame_unref(enc->vframe);
 	av_frame_free(&enc->vframe);
 	da_free(enc->buffer);
 }
@@ -214,19 +214,19 @@ bool ffmpeg_video_encode(struct ffmpeg_video_encoder *enc, struct encoder_frame 
 	if (!enc->start_ts)
 		enc->start_ts = cur_ts;
 
+	ret = av_frame_make_writable(enc->vframe);
+	if (ret < 0) {
+		warn("Cannot make encoder frame writable: %s", av_err2str(ret));
+		return false;
+	}
 	copy_data(enc->vframe, frame, enc->height, enc->context->pix_fmt);
 
 	enc->vframe->pts = frame->pts;
-	ret = avcodec_send_frame(enc->context, enc->vframe);
-	if (ret == 0)
-		ret = avcodec_receive_packet(enc->context, &av_pkt);
-
-	got_packet = (ret == 0);
-
-	if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN))
-		ret = 0;
+	bool received = false;
+	ret = ffmpeg_submit_frame(enc->context, enc->vframe, &av_pkt, &received);
+	got_packet = received;
 	if (ret < 0) {
-		warn("%s: Error encoding: %s", __func__, av_err2str(ret));
+		warn("%s: Error encoding frame: %s", __func__, av_err2str(ret));
 		return false;
 	}
 
@@ -246,8 +246,8 @@ bool ffmpeg_video_encode(struct ffmpeg_video_encoder *enc, struct encoder_frame 
 		packet->keyframe = !!(av_pkt.flags & AV_PKT_FLAG_KEY);
 		*received_packet = true;
 
-		const int64_t recv_ts_nsec = (int64_t)util_mul_div64((uint64_t)av_pkt.pts, (uint64_t)SEC_TO_NSEC,
-								     (uint64_t)enc->context->time_base.den) +
+		const int64_t recv_ts_nsec = (int64_t)ffmpeg_pts_to_ns((uint64_t)av_pkt.pts,
+								       (uint64_t)enc->context->time_base.den) +
 					     enc->start_ts;
 
 #if 0

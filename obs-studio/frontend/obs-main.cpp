@@ -977,6 +977,10 @@ int main(int argc, char *argv[])
 		} else if (arg_is(argv[i], "--verbose", nullptr)) {
 			log_verbose = true;
 
+#ifdef __ANDROID__
+		} else if (arg_is(argv[i], "--android-ime-diagnostics", nullptr)) {
+			qputenv("OBS_ANDROID_IME_DIAGNOSTICS", "1");
+#endif
 		} else if (arg_is(argv[i], "--safe-mode", nullptr)) {
 			safe_mode = true;
 
@@ -1054,6 +1058,9 @@ int main(int argc, char *argv[])
 				"--safe-mode: Run in Safe Mode (disables third-party plugins, scripting, and WebSockets).\n"
 				"--only-bundled-plugins: Only load included (first-party) plugins\n"
 				"--verbose: Make log more verbose.\n"
+#ifdef __ANDROID__
+				"--android-ime-diagnostics: Enable opt-in text-input event diagnostics (no text contents).\n"
+#endif
 				"--always-on-top: Start in 'always on top' mode.\n\n"
 				"--unfiltered_log: Make log unfiltered.\n\n"
 				"--disable-updater: Disable built-in updater (Windows/Mac only)\n\n"

@@ -130,6 +130,13 @@ def main():
                     errors.append('UVC input cadence diagnostics missing from APK')
                 if short == 'liblibobs.so' and b'event=cadence_select' not in payload:
                     errors.append('OBS UVC frame-selection diagnostics missing from APK')
+                if short == 'liblibobs.so' and b'Cannot open Android image document' not in payload:
+                    errors.append('Android image document I/O missing from APK')
+                if short == 'obs-ffmpeg.so' and b'ffmpeg_x265' not in payload:
+                    errors.append('OBS software HEVC encoder missing from APK')
+                if short in ('liblibobs.so', 'obs-ffmpeg.so') and any(marker not in payload for marker in
+                        (b'libx265 H.265 / HEVC', b'libaom AV1')):
+                    errors.append(short + ' lacks compiled FFmpeg x265/AOM encoders')
                 digest = hashlib.sha256(payload).hexdigest()
                 print(f'{path} SHA-256 {digest}')
                 if not check_elf_header(payload):

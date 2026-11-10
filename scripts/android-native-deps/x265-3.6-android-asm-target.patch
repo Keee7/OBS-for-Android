@@ -1,0 +1,13 @@
+--- a/source/CMakeLists.txt
++++ b/source/CMakeLists.txt
+@@ -584,6 +584,10 @@
+                 DEPENDS ${ASM_SRC})
+         endforeach()
+ 	elseif(ARM64 OR CROSS_COMPILE_ARM64)
++        # Custom assembly commands bypass CMake's compiler-target flags.
++        if(ANDROID)
++            list(APPEND ARM_ARGS "--target=${CMAKE_CXX_COMPILER_TARGET}")
++        endif()
+     # compile ARM64 arch asm files here
+         enable_language(ASM)
+         foreach(ASM ${ARM_ASMS})

@@ -48,6 +48,7 @@ extern struct obs_encoder_info hevc_nvenc_encoder_info;
 #endif
 extern struct obs_encoder_info svt_av1_encoder_info;
 extern struct obs_encoder_info aom_av1_encoder_info;
+extern struct obs_encoder_info x265_encoder_info;
 
 #ifdef LIBAVUTIL_VAAPI_AVAILABLE
 extern struct obs_encoder_info h264_vaapi_encoder_info;
@@ -357,6 +358,7 @@ bool obs_module_load(void)
 	register_encoder_if_available(&openh264_encoder_info, "libopenh264");
 	register_encoder_if_available(&svt_av1_encoder_info, "libsvtav1");
 	register_encoder_if_available(&aom_av1_encoder_info, "libaom-av1");
+	register_encoder_if_available(&x265_encoder_info, "libx265");
 	obs_register_encoder(&opus_encoder_info);
 	obs_register_encoder(&pcm_encoder_info);
 	obs_register_encoder(&pcm24_encoder_info);

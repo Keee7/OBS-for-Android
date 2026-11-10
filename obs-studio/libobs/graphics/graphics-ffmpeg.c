@@ -11,6 +11,13 @@
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 
+#ifdef __ANDROID__
+#include <obs-android.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
+
 #ifdef _WIN32
 #include <wincodec.h>
 #pragma comment(lib, "windowscodecs.lib")
@@ -20,10 +27,39 @@ struct ffmpeg_image {
 	const char *file;
 	AVFormatContext *fmt_ctx;
 	AVCodecContext *decoder_ctx;
+	int video_stream;
+#ifdef __ANDROID__
+	AVIOContext *document_io;
+	int document_fd;
+#endif
 
 	int cx, cy;
 	enum AVPixelFormat format;
 };
+
+#ifdef __ANDROID__
+static int image_document_read(void *opaque, uint8_t *buffer, int size)
+{
+	struct ffmpeg_image *info = opaque;
+	ssize_t count;
+	do {
+		count = read(info->document_fd, buffer, size);
+	} while (count < 0 && errno == EINTR);
+	return count > 0 ? (int)count : count == 0 ? AVERROR_EOF : AVERROR(errno);
+}
+
+static int64_t image_document_seek(void *opaque, int64_t offset, int whence)
+{
+	struct ffmpeg_image *info = opaque;
+	whence &= ~AVSEEK_FORCE;
+	if (whence == AVSEEK_SIZE) {
+		struct stat st;
+		return fstat(info->document_fd, &st) == 0 && S_ISREG(st.st_mode) ? st.st_size : AVERROR(ENOSYS);
+	}
+	off_t result = lseek(info->document_fd, offset, whence);
+	return result < 0 ? AVERROR(errno) : result;
+}
+#endif
 
 static bool ffmpeg_image_open_decoder_context(struct ffmpeg_image *info)
 {
@@ -35,6 +71,7 @@ static bool ffmpeg_image_open_decoder_context(struct ffmpeg_image *info)
 	}
 
 	AVStream *const stream = fmt_ctx->streams[ret];
+	info->video_stream = ret;
 	AVCodecParameters *const codecpar = stream->codecpar;
 	const AVCodec *const decoder = avcodec_find_decoder(codecpar->codec_id); // fix discarded-qualifiers
 
@@ -44,9 +81,12 @@ static bool ffmpeg_image_open_decoder_context(struct ffmpeg_image *info)
 	}
 
 	AVCodecContext *const decoder_ctx = avcodec_alloc_context3(decoder);
-	avcodec_parameters_to_context(decoder_ctx, codecpar);
-
 	info->decoder_ctx = decoder_ctx;
+	if (!decoder_ctx)
+		return false;
+	ret = avcodec_parameters_to_context(decoder_ctx, codecpar);
+	if (ret < 0)
+		return false;
 	info->cx = codecpar->width;
 	info->cy = codecpar->height;
 	info->format = codecpar->format;
@@ -67,22 +107,60 @@ static void ffmpeg_image_free(struct ffmpeg_image *info)
 {
 	avcodec_free_context(&info->decoder_ctx);
 	avformat_close_input(&info->fmt_ctx);
+#ifdef __ANDROID__
+	/* CUSTOM_IO is owned by us, including when avformat_open_input fails. */
+	if (info->document_io) {
+		av_freep(&info->document_io->buffer);
+		avio_context_free(&info->document_io);
+	}
+	if (info->document_fd >= 0) {
+		close(info->document_fd);
+		info->document_fd = -1;
+	}
+#endif
 }
 
 static bool ffmpeg_image_init(struct ffmpeg_image *info, const char *file)
 {
 	int ret;
+	const char *input_path = file;
 
 	if (!file || !*file)
 		return false;
 
 	memset(info, 0, sizeof(struct ffmpeg_image));
 	info->file = file;
+#ifdef __ANDROID__
+	info->document_fd = -1;
+	if (strncmp(file, "content://", 10) == 0 || strncmp(file, "file://", 7) == 0) {
+		info->document_fd = obs_android_storage_open(file, "r");
+		if (info->document_fd < 0) {
+			blog(LOG_WARNING, "Cannot open Android image document '%s'", file);
+			return false;
+		}
+		uint8_t *buffer = av_malloc(32768);
+		if (buffer)
+			info->document_io = avio_alloc_context(buffer, 32768, 0, info, image_document_read, NULL,
+						      image_document_seek);
+		if (!info->document_io) {
+			av_free(buffer);
+			goto fail;
+		}
+		info->fmt_ctx = avformat_alloc_context();
+		if (!info->fmt_ctx)
+			goto fail;
+		info->fmt_ctx->pb = info->document_io;
+		info->fmt_ctx->flags |= AVFMT_FLAG_CUSTOM_IO;
+		/* Probe the provided stream. An opaque document ID is not an image
+		 * sequence filename and must never be reopened by a URL demuxer. */
+		input_path = NULL;
+	}
+#endif
 
-	ret = avformat_open_input(&info->fmt_ctx, file, NULL, NULL);
+	ret = avformat_open_input(&info->fmt_ctx, input_path, NULL, NULL);
 	if (ret < 0) {
 		blog(LOG_WARNING, "Failed to open file '%s': %s", info->file, av_err2str(ret));
-		return false;
+		goto fail;
 	}
 
 	ret = avformat_find_stream_info(info->fmt_ctx, NULL);
@@ -506,7 +584,7 @@ static void *ffmpeg_image_decode(struct ffmpeg_image *info, enum gs_image_alpha_
 	AVPacket packet = {0};
 	void *data = NULL;
 	AVFrame *frame = av_frame_alloc();
-	int got_frame = 0;
+	bool flushed = false;
 	int ret;
 
 	if (!frame) {
@@ -514,29 +592,33 @@ static void *ffmpeg_image_decode(struct ffmpeg_image *info, enum gs_image_alpha_
 		return NULL;
 	}
 
-	ret = av_read_frame(info->fmt_ctx, &packet);
-	if (ret < 0) {
-		blog(LOG_WARNING, "Failed to read image frame from '%s': %s", info->file, av_err2str(ret));
-		goto fail;
-	}
-
-	while (!got_frame) {
-		ret = avcodec_send_packet(info->decoder_ctx, &packet);
+	for (;;) {
+		ret = avcodec_receive_frame(info->decoder_ctx, frame);
 		if (ret == 0)
-			ret = avcodec_receive_frame(info->decoder_ctx, frame);
-
-		got_frame = (ret == 0);
-
-		if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN))
-			ret = 0;
-
-		if (ret < 0) {
-			blog(LOG_WARNING, "Failed to decode frame for '%s': %s", info->file, av_err2str(ret));
-			goto fail;
+			break;
+		if (ret != AVERROR(EAGAIN) || flushed)
+			goto decode_fail;
+		ret = av_read_frame(info->fmt_ctx, &packet);
+		if (ret == AVERROR_EOF) {
+			flushed = true;
+			ret = avcodec_send_packet(info->decoder_ctx, NULL);
+		} else if (ret >= 0) {
+			if (packet.stream_index != info->video_stream) {
+				av_packet_unref(&packet);
+				continue;
+			}
+			ret = avcodec_send_packet(info->decoder_ctx, &packet);
+			av_packet_unref(&packet);
 		}
+		if (ret < 0)
+			goto decode_fail;
 	}
 
 	data = ffmpeg_image_reformat_frame(info, frame, alpha_mode);
+	goto fail;
+
+decode_fail:
+	blog(LOG_WARNING, "Failed to decode image frame for '%s': %s", info->file, av_err2str(ret));
 
 fail:
 	av_packet_unref(&packet);

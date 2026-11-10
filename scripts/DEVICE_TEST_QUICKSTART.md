@@ -1,12 +1,14 @@
 # Android 测试包与实机记录
 
-测试包：`releases/OBS-Android-arm64-hwcodec-browser-20261109-0722.apk`
+测试包：`releases/OBS-Android-arm64-obs-hwcodec-browser-20261110-020745.apk`
 
-- 应用版本：`0.1.22-cadence-diagnostics`，versionCode `23`。
-- 历史版本 23 Antutu 测试 APK 包名：`com.antutu.ABenchMark`；arm64-v8a；最低 Android 10，目标 API 35。当前 Windows 默认构建包名是 `com.obsproject.studio`，加 `-AntutuPackage` 才生成上述 Antutu ID。Java/JNI 类始终使用 `com.obsproject.studio` 命名空间。
-- 文件大小：97,693,726 字节。
-- SHA-256：`7be3b92d64594cca3f96016d8d618851c10fd385260376a8f003d24d33a67edf`。
+- 应用版本：`0.1.23-softcodec-image-test`，versionCode `24`。
+- APK 包名：`com.obsproject.studio`；arm64-v8a；最低 Android 10，目标 API 35。Windows 加 `-AntutuPackage` 可生成 `com.antutu.ABenchMark`；Java/JNI 类始终使用 `com.obsproject.studio` 命名空间。
+- 文件大小：120,778,782 字节。
+- SHA-256：`e80397d88c3f0150bc5d67e26bdb48e09e837b7c4d0213c0e81281413880833e`。
 - 使用仓库外 release 签名配置；安装前请先确认目标设备上没有同包名应用。
+
+本轮增加 H.265/AV1 软件编码、图像文档 URI 读取，以及默认关闭的输入法诊断；UVC 只读审查，未改生产代码。Windows 全量原生/Qt/Java 构建、release 签名、16 KiB 对齐与严格 APK 校验通过。未安装到设备；输入法问题仍未确认修复。详见 [本轮验证](SOFTWARE_IMAGE_IME_TEST.md)。以下保留历史版本记录。
 
 ## 本轮：采集回调的源/reader 生命周期（P1-6/P1-7）与保活重试
 

@@ -32,6 +32,11 @@ struct image_source {
 
 static time_t get_modified_timestamp(const char *filename)
 {
+#ifdef __ANDROID__
+	/* A document URI cannot be polled with stat; reload on an explicit source update. */
+	if (filename && (strncmp(filename, "content://", 10) == 0 || strncmp(filename, "file://", 7) == 0))
+		return -1;
+#endif
 	struct stat stats;
 	if (os_stat(filename, &stats) != 0)
 		return -1;
@@ -343,6 +348,11 @@ static obs_missing_files_t *image_source_missingfiles(void *data)
 	obs_missing_files_t *files = obs_missing_files_create();
 
 	if (strcmp(s->file, "") != 0) {
+#ifdef __ANDROID__
+		/* The system picker grants access to documents, not filesystem paths. */
+		if (strncmp(s->file, "content://", 10) == 0 || strncmp(s->file, "file://", 7) == 0)
+			return files;
+#endif
 		if (!os_file_exists(s->file)) {
 			obs_missing_file_t *file = obs_missing_file_create(s->file, missing_file_callback,
 									   OBS_MISSING_FILE_SOURCE, s->source, NULL);
