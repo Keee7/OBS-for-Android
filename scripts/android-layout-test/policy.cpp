@@ -10,8 +10,9 @@ int main()
 	assert(compact(800, 700)); // The same tablet in a smaller window.
 	assert(compact(1280, 500));
 	assert(!compact(1000, 600));
-	assert(compact(1024, 620, true)); // Avoid oscillation around a breakpoint.
-	assert(!compact(1048, 648, true));
+	assert(compact(980, 580, true)); // Avoid oscillation around a breakpoint.
+	assert(!compact(1000, 600, true));
+	assert(!compact(1024, 620, true)); // Return to regular tablet size after floating.
 	assert(compact(0, 0, true));
 	assert(!compact(0, 0, false));
 	assert(touchRowHeight(false) == 48 && touchRowHeight(true) == 32);

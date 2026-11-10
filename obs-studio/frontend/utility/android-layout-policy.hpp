@@ -8,7 +8,7 @@ constexpr bool compact(int width, int height, bool wasCompact = false)
 	if (width <= 0 || height <= 0)
 		return wasCompact;
 	// Hysteresis prevents alternating layouts near a breakpoint.
-	return width < (wasCompact ? 1048 : 1000) || height < (wasCompact ? 648 : 600);
+	return width < (wasCompact ? 1000 : 952) || height < (wasCompact ? 600 : 552);
 }
 
 constexpr int touchRowHeight(bool isCompact)
