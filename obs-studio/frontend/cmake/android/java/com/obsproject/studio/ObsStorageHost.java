@@ -8,6 +8,9 @@ import android.net.Uri;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.os.StatFs;
+import android.os.Build;
+import android.os.storage.StorageManager;
+import android.os.storage.StorageVolume;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.util.Log;
@@ -85,9 +88,26 @@ public final class ObsStorageHost {
         try {
             if (relative(path) != null) return new StatFs(Environment.getExternalStorageDirectory().getAbsolutePath()).getAvailableBytes();
             if (path.startsWith("content://")) {
-                String id = DocumentsContract.getTreeDocumentId(Uri.parse(path));
-                if ("com.android.externalstorage.documents".equals(Uri.parse(path).getAuthority()) && id.startsWith("primary:"))
+                Uri tree = Uri.parse(path);
+                if (!"com.android.externalstorage.documents".equals(tree.getAuthority())) return -1;
+                String id = DocumentsContract.getTreeDocumentId(tree);
+                int separator = id.indexOf(':');
+                if (separator < 0) return -1;
+                String volumeId = id.substring(0, separator);
+                if ("primary".equalsIgnoreCase(volumeId))
                     return new StatFs(Environment.getExternalStorageDirectory().getAbsolutePath()).getAvailableBytes();
+                // Match only an OS-reported mounted volume, never a path supplied by a provider.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    StorageManager manager = (StorageManager) context.getSystemService(Context.STORAGE_SERVICE);
+                    if (manager == null) return -1;
+                    for (StorageVolume volume : manager.getStorageVolumes()) {
+                        String uuid = volume.getUuid();
+                        File root = volume.getDirectory();
+                        if (uuid != null && uuid.equalsIgnoreCase(volumeId) && root != null &&
+                                Environment.MEDIA_MOUNTED.equals(volume.getState()))
+                            return new StatFs(root.getAbsolutePath()).getAvailableBytes();
+                    }
+                }
             } else {
                 File f = new File(path);
                 while (f != null && !f.exists()) f = f.getParentFile();

@@ -20,14 +20,15 @@ $failed = @()
 $scripts = @(
     'test-android-reader-ctx.ps1',
     'test-android-uvc.ps1',
-    'test-android-screen.ps1'
+    'test-android-screen.ps1',
+    'test-android-mediacodec.ps1',
+    'test-android-recovery.ps1'
 )
 
 foreach ($name in $scripts) {
     $path = Join-Path $PSScriptRoot $name
     if (-not (Test-Path $path)) {
-        Write-Host "SKIP $name (missing)"
-        continue
+        throw "Required regression script missing: $name"
     }
     Write-Host ""
     Write-Host "===== $name ====="

@@ -20,8 +20,16 @@ def first(sid=1, codec='hevc'):
     return f'[android-mediacodec] session={sid} event=first-packet codec={codec} headers=valid keyframe=1 bytes=1000'
 
 
-def progress(sid=1, n=1, event='progress', failed=0, codec='hevc', component='c2.vendor.hevc.encoder'):
-    return f'[android-mediacodec] session={sid} event={event} codec={codec} component={component} submitted={n*100} output={n*90} delivered={n*89} bytes={n*10000} keyframes={n} queue=1 queue_bytes=10 peak_queue_bytes=100 elapsed_ms={n*5000} failed={failed}'
+def progress(sid=1, n=1, event='progress', failed=0, codec='hevc',
+             component='c2.vendor.hevc.encoder', dropped=0):
+    return (f'[android-mediacodec] session={sid} event={event} codec={codec} component={component} '
+            f'submitted={n*100} output={n*90} delivered={n*89} bytes={n*10000} keyframes={n} queue=1 '
+            f'queue_bytes=10 peak_queue_bytes=100 dropped_load={dropped} elapsed_ms={n*5000} failed={failed}')
+
+
+def shed(sid=1, dropped=10, event='shedding', codec='hevc'):
+    return (f'[android-mediacodec] session={sid} event={event} codec={codec} '
+            f'pending=3 degraded=3 dropped_load={dropped}')
 
 
 def good(sid=1):
@@ -32,6 +40,41 @@ class SyntheticMediaCodecLogTests(unittest.TestCase):
     def test_valid_and_rate(self):
         sid, codec, component, fps = verify.evaluate(good())
         self.assertEqual((sid, codec, component, fps), (1, 'hevc', 'c2.vendor.hevc.encoder', 18.0))
+
+    def test_shedding_edges_are_accepted_and_checked(self):
+        log = '\n'.join((started(), first(), progress(dropped=0), shed(dropped=40),
+                         progress(n=2, dropped=40), shed(dropped=40, event='recovered'),
+                         progress(n=3, dropped=40)))
+        self.assertEqual(verify.evaluate(log)[0], 1)
+
+    def test_shedding_edges_must_be_consistent(self):
+        cases = {
+            # a shedding edge that claims no new dropped frame
+            'no new drops': shed(dropped=0),
+            # dropping_load going backwards between progress lines
+            'counters went backwards': None,
+            # a recovered edge that moves the counter
+            'recovered moved counter': shed(dropped=99, event='recovered'),
+            # duplicate recovered edges
+            'duplicate recovered': shed(dropped=10, event='recovered'),
+        }
+        base = '\n'.join((started(), first(), progress(dropped=0)))
+        for name, row in cases.items():
+            if row is None:
+                log = base + '\n' + progress(n=2, dropped=10) + '\n' + progress(n=3, dropped=5)
+            elif name == 'duplicate recovered':
+                log = base + '\n' + row + '\n' + row
+            elif name == 'recovered moved counter':
+                log = base + '\n' + shed(dropped=10) + '\n' + row
+            else:
+                log = base + '\n' + row
+            with self.subTest(case=name), self.assertRaises(ValueError):
+                verify.evaluate(log)
+
+    def test_progress_requires_dropped_load(self):
+        log = good().replace('dropped_load=0', '')
+        with self.assertRaisesRegex(ValueError, 'dropped_load'):
+            verify.evaluate(log)
 
     def test_progress_can_precede_first_packet(self):
         log = '\n'.join((started(), progress(), first(), progress(n=2)))

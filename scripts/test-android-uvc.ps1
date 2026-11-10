@@ -10,7 +10,7 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 $env:PATH = (Split-Path $Compiler -Parent) + ';' + $env:PATH
 $env:TEMP = $out
 $env:TMP = $out
-foreach ($case in @('uvc-bulk-pump','uvc-raw-payload','uvc-stream-buffer','uvc-recovery')) {
+foreach ($case in @('uvc-bulk-pump','uvc-raw-payload','uvc-cadence-stats','uvc-stream-buffer','uvc-recovery')) {
     $arguments = @('-std=c11','-D_POSIX_C_SOURCE=200809L','-Wall','-Wextra','-Werror',"-I$src")
     if ($case -eq 'uvc-bulk-pump') {
         $arguments += @('-pthread',"-I$src/tests/mock","$src/uvc-bulk-pump.c")

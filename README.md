@@ -6,7 +6,7 @@ An Android port of OBS Studio with scenes, sources, recording and streaming. Thi
 
 Based on [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android), which ports [OBS Studio 32.2.1](https://github.com/obsproject/obs-studio) to Android. This is a community project, not an official OBS Project Android release. Original authors, license notices and commit history are preserved.
 
-**Current test version:** `0.1.18-alpha-vsync-fix` / versionCode `19`. Package `com.obsproject.studio`; **arm64-v8a, Android 10+ (API 29), target API 35**. The Qt UI primarily targets landscape tablets. Development APKs use the public debug key and remain debuggable.
+**Current test version:** `0.1.22-cadence-diagnostics` / versionCode `23`. The default application ID is `com.obsproject.studio`; Windows builds may opt into `com.antutu.ABenchMark` with `-AntutuPackage`. **arm64-v8a, Android 10+ (API 29), target API 35**. Java and JNI classes always use the `com.obsproject.studio` namespace. The Qt UI primarily targets landscape tablets. Local builds default to a private, external release signing configuration. Public debug signing requires an explicit option. See [recovery fixes and validation](scripts/RECOVERY_CADENCE_TEST.md).
 
 ## Features and validation
 

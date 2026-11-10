@@ -338,9 +338,10 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 	 * 连录三次后 Java 侧 describe 仍是 stop=0，通知永远挂着 —— libobs 要到 `stop_thread`
 	 * 函数尾才 `os_atomic_set_bool(&output->active, false)`，前端那句 `emit RecordingStopped()`
 	 * 排在它前面）。改成：状态信号只把复核排回 GUI 线程事件循环（＝排在当前这层信号栈之后）
-	 * 并打开 1 秒看门狗，看门狗读到 idle 才停服务、顺手关自己 —— build 53 实测下一个 tick
+	 * 并打开 1 秒看门狗，看门狗读到 idle 才停服务 —— build 53 实测下一个 tick
 	 * 就读到 false 并 `stopService #1` + `onDestroy`。代价 = 输出结束后最多 1 秒才松手，
-	 * 换来不依赖信号配对（`StreamingStopFail` 那条路仍被看门狗兜住）。
+	 * 换来不依赖信号配对（`StreamingStopFail` 那条路仍被看门狗兜住）。看门狗持续运行，
+	 * 以便输出尚未启动时也能发现已激活的相机或麦克风源。
 	 * 排队这一步还有个附带好处：`QTimer` 只能被它的主人线程动，复核统一在 GUI 线程做就不用操心这个。 */
 	QTimer *keepAliveWatchdog = new QTimer(this);
 	keepAliveWatchdog->setInterval(1000);
@@ -361,14 +362,10 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 			lastState = now;
 			blog(LOG_INFO, "OBSBasic[Android]: 3-5 保活复核（%s）→ %s", why, detail.toUtf8().constData());
 		}
-		if (streaming || recording) {
-			if (!keepAliveWatchdog->isActive()) {
-				keepAliveWatchdog->start();
-			}
-		} else {
-			keepAliveWatchdog->stop();
-		}
+		if (!keepAliveWatchdog->isActive())
+			keepAliveWatchdog->start();
 	};
+	keepAliveWatchdog->start();
 	/* 排队而不是就地执行：要的是"当前这层信号栈跑完之后"再读真相，那一刻 active 才落定。 */
 	auto syncKeepAlive = [this, applyKeepAlive](const char *why) {
 		QMetaObject::invokeMethod(this, [applyKeepAlive, why] { applyKeepAlive(why); }, Qt::QueuedConnection);

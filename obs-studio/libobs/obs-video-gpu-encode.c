@@ -175,7 +175,7 @@ static void *gpu_encode_thread(void *data)
 			 * (frame encode request complete) and current PTS. PTS is used to
 			 * associate the frame timing data with the encode packet. */
 			if (tf.timestamp) {
-				struct encoder_packet_time *ept = da_push_back_new(encoder->encoder_packet_times);
+				struct encoder_packet_time *ept = encoder_packet_time_push(encoder);
 				// Get the frame encode request complete timestamp
 				if (success) {
 					ept->ferc = os_gettime_ns();

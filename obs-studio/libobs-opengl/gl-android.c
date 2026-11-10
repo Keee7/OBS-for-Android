@@ -22,6 +22,8 @@
 #include <android/native_window.h>
 
 #include "gl-subsystem.h"
+#include "android-egl-retry.h"
+#include <util/platform.h>
 
 #include <glad/glad.h>
 
@@ -43,6 +45,7 @@ static GLADapiproc get_proc_address(const char *name)
 struct gl_windowinfo {
 	EGLSurface surface;
 	ANativeWindow *window;
+	struct android_egl_retry retry;
 };
 
 struct gl_platform {
@@ -385,9 +388,31 @@ void device_load_swapchain(gs_device_t *device, gs_swapchain_t *swap)
 	device_enter_context(device);
 }
 
+static bool retry_window_surface(void *opaque)
+{
+	struct gs_swap_chain *swap = opaque;
+	struct gl_platform *plat = swap->device->plat;
+	if (!gl_platform_init_swapchain(swap))
+		return false;
+	if (!eglMakeCurrent(plat->display, swap->wi->surface, swap->wi->surface, plat->context)) {
+		blog(LOG_WARNING, "重建窗口面后 eglMakeCurrent 失败: %s", egl_error_str());
+		eglMakeCurrent(plat->display, plat->pbuffer, plat->pbuffer, plat->context);
+		eglDestroySurface(plat->display, swap->wi->surface);
+		swap->wi->surface = EGL_NO_SURFACE;
+		return false;
+	}
+	blog(LOG_INFO, "Android EGL 窗口面已恢复");
+	return true;
+}
+
 bool device_is_present_ready(gs_device_t *device)
 {
-	return device->cur_swap && device->cur_swap->wi->surface != EGL_NO_SURFACE;
+	struct gs_swap_chain *swap = device->cur_swap;
+	if (!swap)
+		return false;
+	if (swap->wi->surface == EGL_NO_SURFACE)
+		android_egl_retry_run(&swap->wi->retry, os_gettime_ns(), retry_window_surface, swap);
+	return swap->wi->surface != EGL_NO_SURFACE;
 }
 
 void device_present(gs_device_t *device)
@@ -399,8 +424,10 @@ void device_present(gs_device_t *device)
 		return;
 	}
 
-	if (eglSwapBuffers(plat->display, device->cur_swap->wi->surface))
+	if (eglSwapBuffers(plat->display, device->cur_swap->wi->surface)) {
+		android_egl_retry_succeeded(&device->cur_swap->wi->retry);
 		return;
+	}
 
 	/* 交换失败 = 这块面已经不能用了（Android 上最典型的是 SurfaceView 的 buffer queue
 	 * 被 abandon ⇒ EGL_BAD_SURFACE）。**关键是要把面就地作废**：
@@ -415,10 +442,11 @@ void device_present(gs_device_t *device)
 	 *   * device_is_present_ready() 变 false ⇒ render_display_begin 直接不渲染，
 	 *     循环不再空转（CPU 立刻回落）；
 	 *   * gl_platform_cleanup_swapchain 看到 EGL_NO_SURFACE 会跳过，不会二次销毁。
-	 * 面的恢复不靠这里 —— 由 B-8 的 surface 生命周期回调重建 obs_display/swapchain，
-	 * 那时会是一个全新的面。 */
-	blog(LOG_ERROR, "eglSwapBuffers failed: %s —— 作废该窗口面，等 B-8 重建",
+	 * 就绪检查按间隔尝试使用仍持有引用的窗口重建；真正销毁窗口时，原有生命周期
+	 * 回调会销毁整个 swapchain，终止重试。 */
+	blog(LOG_ERROR, "eglSwapBuffers failed: %s —— 作废该窗口面并限频重试",
 	     egl_error_str());
+	android_egl_retry_invalidate(&device->cur_swap->wi->retry, os_gettime_ns());
 	eglMakeCurrent(plat->display, plat->pbuffer, plat->pbuffer, plat->context);
 	eglDestroySurface(plat->display, device->cur_swap->wi->surface);
 	device->cur_swap->wi->surface = EGL_NO_SURFACE;
