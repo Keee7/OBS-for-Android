@@ -1,6 +1,6 @@
 # Building OBS for Android / 构建说明
 
-The current test APK is `0.1.22-cadence-diagnostics` (23), package `com.antutu.ABenchMark`, arm64-v8a, minSdk 29 / targetSdk 35. This is a separate Android package from the previous `com.obsproject.studio` build, so it installs alongside it with independent private data; no OBS settings or service credentials are migrated. Java/JNI classes retain the `com.obsproject.studio` namespace. Full native/Qt/Java/APK builds and strict artifact checks passed on Windows for this version. WSL/Linux is the original port's build route; the additional WSL script preparation changes below have host checks, not a new full Linux build.
+The default Android application ID is `com.obsproject.studio`. Windows builds can opt into `com.antutu.ABenchMark` with `-AntutuPackage`; Java/JNI classes always retain the `com.obsproject.studio` namespace. The current source version is `0.1.22-cadence-diagnostics` (23), arm64-v8a, minSdk 29 / targetSdk 35. WSL/Linux remains the original port's build route and uses the default application ID.
 
 当前 versionCode 23 测试包已完成 Windows 全量 configure、native/Qt/Java/APK 构建、release 签名与 APK 严格核验。下面分别说明 Windows 工具布局和原项目的 WSL 构建路径；工具链和依赖源码不随仓库提供，需要自行安装/下载。
 
@@ -75,6 +75,8 @@ An older, unpatched `libavcodec.a` will not contain the named decoder selection 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-frontend-apk-windows.ps1 -Action all -ToolsRoot D:/build-tools
 ```
 
+To build an independent Antutu package on Windows, add `-AntutuPackage` to the command. The Windows script stages Android package sources under the build tree and reconfigures CMake on every invocation, including `-Action package`, so switching back to the default mode cannot reuse a cached Antutu application ID. It names outputs `...-antutu-...apk` or `...-obs-...apk` and runs the strict APK verifier with the selected expected package. Tracked manifest and Java sources remain on the default package.
+
 For incremental builds, run **both** steps:
 
 ```powershell
@@ -89,6 +91,8 @@ Packaging first builds current sources, stages the latest plugin libraries, depl
 ```powershell
 python scripts/verify-android-apk.py releases/<test.apk> --tools-root D:/build-tools --native-dir D:/build-tools/build-obs-arm64
 ```
+
+The verifier defaults to the package in the tracked source manifest. Pass `--expected-package com.antutu.ABenchMark` when checking an Antutu APK.
 
 This Windows verifier checks the source manifest version, required Java classes/callback, Alpha options, native architecture/symbols and library equality with the build tree. It does not perform a device/runtime test. The packaging script separately verifies the signature and 16 KB ZIP alignment.
 

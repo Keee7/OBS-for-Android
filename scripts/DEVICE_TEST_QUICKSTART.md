@@ -3,7 +3,7 @@
 测试包：`releases/OBS-Android-arm64-hwcodec-browser-20261109-0722.apk`
 
 - 应用版本：`0.1.22-cadence-diagnostics`，versionCode `23`。
-- 包名：`com.antutu.ABenchMark`；arm64-v8a；最低 Android 10，目标 API 35。Java/JNI 类仍使用 `com.obsproject.studio` 命名空间。
+- 历史版本 23 Antutu 测试 APK 包名：`com.antutu.ABenchMark`；arm64-v8a；最低 Android 10，目标 API 35。当前 Windows 默认构建包名是 `com.obsproject.studio`，加 `-AntutuPackage` 才生成上述 Antutu ID。Java/JNI 类始终使用 `com.obsproject.studio` 命名空间。
 - 文件大小：97,693,726 字节。
 - SHA-256：`7be3b92d64594cca3f96016d8d618851c10fd385260376a8f003d24d33a67edf`。
 - 使用仓库外 release 签名配置；安装前请先确认目标设备上没有同包名应用。

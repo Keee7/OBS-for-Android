@@ -26,7 +26,7 @@
  */
 package com.obsproject.studio;
 
-import com.antutu.ABenchMark.R;
+import com.obsproject.studio.R;
 
 import android.Manifest;
 import android.content.pm.PackageManager;

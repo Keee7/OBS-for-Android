@@ -12,7 +12,7 @@
 
 ## 已执行的验证
 
-最新源码 `0.1.22-cadence-diagnostics` / 23：按用户要求将应用 ID 改为 `com.antutu.ABenchMark`，Java/JNI 类命名空间保留。CPU/GPU 编码入口统一使用有界时间记录；新增 UVC 输入采样、到帧间隔、原始 PTS 和 OBS 选帧诊断，以实机证据定位重复帧。签名统一使用仓库外的用户 release 配置。
+最新源码 `0.1.22-cadence-diagnostics` / 23：默认应用 ID 为 `com.obsproject.studio`；Windows 构建可通过 `-AntutuPackage` 显式构建 `com.antutu.ABenchMark`，Java/JNI 类命名空间始终为 `com.obsproject.studio`。CPU/GPU 编码入口统一使用有界时间记录；新增 UVC 输入采样、到帧间隔、原始 PTS 和 OBS 选帧诊断，以实机证据定位重复帧。签名统一使用仓库外的用户 release 配置。
 
 前版 `0.1.21-cadence-test` / 22：UVC 默认恢复时序缓冲，保留 raw 模式并独立提供最低延迟开关。生产 OBS 异步选帧函数的 60fps/4ms 抖动回归从 5000/10000 不同帧改善为 9998/10000，但实机运动样本仍有明显重复帧，不能据此宣称帧率问题修复。详细范围见 [本轮记录](scripts/RECOVERY_CADENCE_TEST.md)。
 

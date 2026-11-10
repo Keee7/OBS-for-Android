@@ -6,7 +6,7 @@
 
 本项目基于 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android)，原移植基于 [OBS Studio 32.2.1](https://github.com/obsproject/obs-studio)。这是社区移植，并非 OBS Project 官方 Android 发行版。保留原作者、许可证声明和提交历史。
 
-**当前测试版本：** `0.1.22-cadence-diagnostics`，versionCode `23`。包名 `com.antutu.ABenchMark`，**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。新包可与旧版 `com.obsproject.studio` 并存，使用独立 Android 私有数据目录；不会迁移旧 OBS 设置或推流凭据。Java/JNI 类命名空间仍为 `com.obsproject.studio`。Qt 界面主要面向横屏平板。本地构建默认使用仓库外的 release 签名配置；公开 debug 签名需显式选择。详见 [本次修复与测试](scripts/RECOVERY_CADENCE_TEST.md)。
+**当前测试版本：** `0.1.22-cadence-diagnostics`，versionCode `23`。默认应用 ID 为 `com.obsproject.studio`；Windows 构建可用 `-AntutuPackage` 显式切换为 `com.antutu.ABenchMark`。**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。Java/JNI 类始终使用 `com.obsproject.studio` 命名空间。Qt 界面主要面向横屏平板。本地构建默认使用仓库外的 release 签名配置；公开 debug 签名需显式选择。详见 [本次修复与测试](scripts/RECOVERY_CADENCE_TEST.md)。
 
 ## 功能与验证状态
 

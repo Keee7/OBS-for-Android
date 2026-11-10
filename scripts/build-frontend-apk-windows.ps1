@@ -3,7 +3,8 @@ param(
     [string]$ToolsRoot = (Join-Path (Split-Path $PSScriptRoot -Parent | Split-Path -Parent) 'build-tools'),
     [int]$Jobs = 8,
     [string]$SigningConfigFile = $env:OBS_ANDROID_SIGNING_CONFIG,
-    [switch]$DebugSigning
+    [switch]$DebugSigning,
+    [switch]$AntutuPackage
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -29,6 +30,29 @@ $env:GRADLE_USER_HOME = Join-Path $tools 'gradle-cache'
 $env:GRADLE_OPTS = ($env:GRADLE_OPTS + ' -Dorg.gradle.daemon=false').Trim()
 $env:PATH = "$tools/gradle/gradle-8.14.3/bin;$env:JAVA_HOME/bin;$hostQt/bin;$tools/ninja;$env:PATH"
 New-Item -ItemType Directory -Force -Path $build,$logs,$env:ANDROID_USER_HOME | Out-Null
+$packageId = 'com.obsproject.studio'
+if ($AntutuPackage) { $packageId = 'com.antutu.ABenchMark' }
+$packageSource = Join-Path $build 'android-package-source'
+$sourcePackage = Join-Path $repo 'obs-studio/frontend/cmake/android'
+$buildFullPath = [IO.Path]::GetFullPath($build).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+$expectedPackageSource = [IO.Path]::GetFullPath((Join-Path $buildFullPath 'android-package-source'))
+$packageSource = [IO.Path]::GetFullPath($packageSource)
+if ($packageSource -ne $expectedPackageSource -or
+    !$packageSource.StartsWith($buildFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to replace package staging outside the expected build directory: $packageSource"
+}
+if (Test-Path -LiteralPath $packageSource) { Remove-Item -LiteralPath $packageSource -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $packageSource | Out-Null
+Get-ChildItem -LiteralPath $sourcePackage -Force | Where-Object Name -ne 'libs' |
+    ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $packageSource -Recurse -Force }
+$manifestPath = Join-Path $packageSource 'AndroidManifest.xml'
+$manifestText = [IO.File]::ReadAllText($manifestPath)
+$manifestText = ([regex]'(?<=\bpackage=")[^"]+(?=")').Replace($manifestText, $packageId, 1)
+[IO.File]::WriteAllText($manifestPath, $manifestText, [Text.UTF8Encoding]::new($false))
+$servicePath = Join-Path $packageSource 'java/com/obsproject/studio/ObsForegroundService.java'
+$serviceText = [IO.File]::ReadAllText($servicePath)
+$serviceText = ([regex]'import com\.(?:obsproject\.studio|antutu\.ABenchMark)\.R;').Replace($serviceText, "import $packageId.R;", 1)
+[IO.File]::WriteAllText($servicePath, $serviceText, [Text.UTF8Encoding]::new($false))
 $revision = ((Get-Content -LiteralPath "$ndk/source.properties" | Where-Object { $_ -match '^Pkg.Revision\s*=' }) -split '=',2)[1].Trim()
 $sdkNdk = Join-Path $sdk "ndk/$revision"
 if (!(Test-Path -LiteralPath $sdkNdk)) {
@@ -54,13 +78,14 @@ function Invoke-BuildTool([string]$Program, [string[]]$Arguments, [string]$LogNa
     }
     Get-Content -LiteralPath $log -Tail 8 | Write-Host
 }
-if ($Action -in @('configure','all')) {
+if ($Action -in @('configure','build','package','all')) {
     $argsConfigure = @('-S', "$repo/obs-studio", '-B', $build, '-G', 'Ninja',
         "-DCMAKE_MAKE_PROGRAM=$ninja", "-DCMAKE_TOOLCHAIN_FILE=$ndk/build/cmake/android.toolchain.cmake",
         '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=android-29', '-DANDROID_STL=c++_shared',
         '-DCMAKE_BUILD_TYPE=RelWithDebInfo', "-DCMAKE_PREFIX_PATH=$prefix;$qt", "-DQT_HOST_PATH=$hostQt",
         '-DCMAKE_POLICY_VERSION_MINIMUM=3.5', '-DENABLE_PLUGINS=ON', '-DENABLE_FRONTEND=ON',
         '-DENABLE_SCRIPTING=OFF', '-DENABLE_HEVC=ON', "-DANDROID_SDK_ROOT=$sdk", "-DCMAKE_INSTALL_PREFIX=$build/install")
+    $argsConfigure += "-DOBS_ANDROID_PACKAGE_NAME=$packageId", "-DOBS_ANDROID_PACKAGE_SOURCE_DIR=$packageSource"
     Invoke-BuildTool $cmake $argsConfigure 'configure.log'
 }
 if ($Action -in @('build','package','all')) {
@@ -72,7 +97,7 @@ if ($Action -in @('package','all')) {
     foreach ($required in @('android-mediacodec.so','android-browser.so')) {
         if ($required -notin $modules.Name) { throw "Built plugin missing: $required" }
     }
-    $packageSources = Join-Path $repo 'obs-studio/frontend/cmake/android/libs/arm64-v8a'
+    $packageSources = Join-Path $packageSource 'libs/arm64-v8a'
     New-Item -ItemType Directory -Force -Path $packageSources | Out-Null
     foreach ($module in $modules) { Copy-Item -LiteralPath $module.FullName -Destination $packageSources -Force }
     $androidBuild = Join-Path $build 'frontend/android-build'
@@ -86,7 +111,8 @@ if ($Action -in @('package','all')) {
     $releases = Join-Path $repo 'releases'
     New-Item -ItemType Directory -Force -Path $releases | Out-Null
     $aligned = Join-Path $build 'obs-test-aligned.apk'
-    $signed = Join-Path $releases ('OBS-Android-arm64-hwcodec-browser-' + (Get-Date -Format 'yyyyMMdd-HHmm') + '.apk')
+    $modeName = if ($AntutuPackage) { 'antutu' } else { 'obs' }
+    $signed = Join-Path $releases ('OBS-Android-arm64-' + $modeName + '-hwcodec-browser-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.apk')
     Invoke-BuildTool "$sdk/build-tools/36.0.0/zipalign.exe" @('-f', '-P', '16', '4', $apk.FullName, $aligned) 'zipalign.log'
     if ($DebugSigning) {
         Invoke-BuildTool "$sdk/build-tools/36.0.0/apksigner.bat" @('sign','--ks',"$repo/android-shell/debug.keystore",
@@ -99,6 +125,8 @@ if ($Action -in @('package','all')) {
     }
     Invoke-BuildTool "$sdk/build-tools/36.0.0/apksigner.bat" @('verify','--verbose',$signed) 'verify-signature.log'
     Invoke-BuildTool "$sdk/build-tools/36.0.0/zipalign.exe" @('-c','-P','16','-v','4',$signed) 'verify-alignment.log'
+    Invoke-BuildTool 'python' @("$PSScriptRoot/verify-android-apk.py", $signed, '--tools-root', $tools,
+        '--native-dir', $build, '--expected-package', $packageId) 'strict-apk-check.log'
     Get-FileHash -Algorithm SHA256 -LiteralPath $signed
     Write-Host "Test APK: $signed"
 }

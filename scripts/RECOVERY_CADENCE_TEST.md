@@ -1,6 +1,6 @@
 # 0.1.22-cadence-diagnostics / 23
 
-本版应用 ID 为 `com.antutu.ABenchMark`，与旧 `com.obsproject.studio` 独立安装、私有数据分离；Java/JNI 类命名空间保持原值。下述设备运动样本来自此前版本 21/22，不能作为新包名版本的实机验收。新包首次安装被系统拒绝，随后用户明确选择暂不安装测试，未再重试。
+以下记录中的版本 23 APK 使用 `com.antutu.ABenchMark`；这是该历史构建的实际应用 ID。当前源码默认恢复为 `com.obsproject.studio`，Windows 可加 `-AntutuPackage` 生成 Antutu 包；Java/JNI 类命名空间始终保持 `com.obsproject.studio`。版本 23 的设备运动样本来自此前版本 21/22，不能作为新包名版本的实机验收。新包首次安装被系统拒绝，随后用户明确选择暂不安装测试，未再重试。
 
 ## 到帧抖动与重复帧
 

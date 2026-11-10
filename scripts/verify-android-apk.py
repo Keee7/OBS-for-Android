@@ -72,6 +72,7 @@ def main():
     parser.add_argument('apk', type=Path)
     parser.add_argument('--tools-root', type=Path, default=Path(__file__).resolve().parents[2] / 'build-tools')
     parser.add_argument('--native-dir', type=Path, help='optional build tree: compare packaged libraries to built files')
+    parser.add_argument('--expected-package', help='expected application ID; defaults to the source manifest package')
     args = parser.parse_args()
     sdk = args.tools_root / 'android-sdk' / 'build-tools' / '36.0.0'
     aapt = sdk / 'aapt.exe'
@@ -84,7 +85,7 @@ def main():
         manifest = ET.parse(Path(__file__).resolve().parents[1] /
                             'obs-studio/frontend/cmake/android/AndroidManifest.xml').getroot()
         android = '{http://schemas.android.com/apk/res/android}'
-        expected_package = (manifest.get('package'), manifest.get(android + 'versionCode'),
+        expected_package = (args.expected_package or manifest.get('package'), manifest.get(android + 'versionCode'),
                             manifest.get(android + 'versionName'))
         if not package or package.groups() != expected_package:
             errors.append(f'package name/version differs from source manifest: {expected_package}')
@@ -139,7 +140,8 @@ def main():
                     external = short.startswith(('libQt', 'libplugins_')) or short == 'libc++_shared.so'
                     if not external:
                         candidates = [p for p in args.native_dir.rglob(short) if p.is_file()
-                                      and not any(part in ('android-build', 'rundir') for part in p.relative_to(args.native_dir).parts)]
+                                      and not any(part in ('android-build', 'android-package-source', 'rundir')
+                                                  for part in p.relative_to(args.native_dir).parts)]
                         if not candidates:
                             errors.append(path + ' has no authoritative compiler output')
                         else:

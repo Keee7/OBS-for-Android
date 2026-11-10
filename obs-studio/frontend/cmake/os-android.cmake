@@ -177,6 +177,15 @@ endif()
 # 插件 .so 不进 EXTRA_LIBS（名字不以 lib 开头，androiddeployqt 会要求改名），而是由
 # .qoder/build-frontend-apk.sh 把 rundir/lib/obs-plugins/*.so 暂存到本目录的 libs/<abi>/，
 # 走 androiddeployqt 的 android-package-source-directory → gradle jniLibs 那条路进 APK。
+# Java/JNI descriptors stay in com.obsproject.studio. The package/application ID
+# may be overridden by a platform build without changing the tracked Android sources.
+if(NOT DEFINED OBS_ANDROID_PACKAGE_NAME OR OBS_ANDROID_PACKAGE_NAME STREQUAL "")
+  set(OBS_ANDROID_PACKAGE_NAME "com.obsproject.studio")
+endif()
+if(NOT DEFINED OBS_ANDROID_PACKAGE_SOURCE_DIR OR OBS_ANDROID_PACKAGE_SOURCE_DIR STREQUAL "")
+  set(OBS_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/android")
+endif()
+
 set_target_properties(
   obs-studio
   PROPERTIES
@@ -184,8 +193,8 @@ set_target_properties(
     # 清单与 FileProvider 的 paths 都在 cmake/android/ 下自带；一旦设了这个变量，
     # androiddeployqt 就不再拿自己的模板覆盖清单（同 android-shell 的做法）。
     # package 是独立安装用的 application ID；应用代码和 JNI descriptor 继续使用旧 Java 包名。
-    QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/android"
-    QT_ANDROID_PACKAGE_NAME "com.antutu.ABenchMark"
+    QT_ANDROID_PACKAGE_SOURCE_DIR "${OBS_ANDROID_PACKAGE_SOURCE_DIR}"
+    QT_ANDROID_PACKAGE_NAME "${OBS_ANDROID_PACKAGE_NAME}"
     # 真正生效的是 cmake/android/AndroidManifest.xml 里那对 versionCode/versionName
     # （设了 QT_ANDROID_PACKAGE_SOURCE_DIR 之后 androiddeployqt 用自带清单，不再拿模板覆盖）。
     # 这两行只是 androiddeployqt 的默认值，出包前必须与清单保持一致，否则 aapt2 报的版本
