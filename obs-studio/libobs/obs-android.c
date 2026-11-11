@@ -604,6 +604,10 @@ void obs_android_browser_touch(void *handle, int x, int y, int action)
 }
 
 static const struct obs_android_screen_gpu_host *screen_gpu_host;
+static void *android_java_vm;
+void obs_android_set_java_vm(void *vm) { android_java_vm = vm; }
+void *obs_android_get_java_vm(void) { return android_java_vm; }
+
 static bool (*decoder_query)(const char *, char *, size_t);
 void obs_android_set_decoder_query(bool (*query)(const char *, char *, size_t)) { decoder_query = query; }
 bool obs_android_find_hardware_decoder(const char *mime, char *out, size_t size)

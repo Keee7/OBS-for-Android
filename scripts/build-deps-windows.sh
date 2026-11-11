@@ -15,7 +15,7 @@ LLVM_BIN=${LLVM_BIN:-$SYSROOT/../bin}
 case "$LLVM_BIN" in *' '*) echo 'LLVM_BIN must not contain spaces; use a short path or a junction to the NDK LLVM bin directory' >&2; exit 1;; esac
 JOBS=${JOBS:-4}
 API=${API:-29}
-for dep in bash make tar sed cp cygpath patch; do command -v "$dep" >/dev/null || { echo "Missing tool: $dep" >&2; exit 1; }; done
+for dep in bash make tar sed cp cygpath patch sha256sum; do command -v "$dep" >/dev/null || { echo "Missing tool: $dep" >&2; exit 1; }; done
 for exe in clang.exe llvm-ar.exe llvm-ranlib.exe llvm-strip.exe llvm-nm.exe llvm-strings.exe llvm-readelf.exe; do
   test -f "$LLVM_BIN/$exe" || { echo "Missing LLVM tool: $LLVM_BIN/$exe" >&2; exit 1; }
 done
@@ -57,20 +57,16 @@ prepare() {
   fi
 }
 prepare "$SOURCES_ROOT/x264" "$WORK_ROOT/src/x264"
-ffmpeg_work="$WORK_ROOT/src/ffmpeg-8.0.3"
-prepare "$SOURCES_ROOT/ffmpeg-8.0.3" "$ffmpeg_work"
-# Idempotently apply our MediaCodec fixes to a pristine or existing source tree.
 patch_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-native-deps"
-for patch_file in "$patch_dir/ffmpeg-8.0.3-mediacodec-android.patch"; do
-  if patch -d "$ffmpeg_work" -p1 -R --force --dry-run --silent < "$patch_file"; then
-    echo "Already applied: $patch_file"
-  elif patch -d "$ffmpeg_work" -p1 --force --dry-run --silent < "$patch_file"; then
-    patch -d "$ffmpeg_work" -p1 --force < "$patch_file"
-  else
-    echo "FFmpeg patch does not match this source tree: $patch_file" >&2
-    exit 1
-  fi
-done
+patch_file="$patch_dir/ffmpeg-8.0.3-mediacodec-android.patch"
+patch_digest=$(sha256sum < "$patch_file")
+ffmpeg_work="$WORK_ROOT/src/ffmpeg-8.0.3-${patch_digest%% *}"
+prepare "$SOURCES_ROOT/ffmpeg-8.0.3" "$ffmpeg_work"
+if patch -d "$ffmpeg_work" -p1 -R --force --dry-run --silent < "$patch_file" >/dev/null 2>&1; then
+  echo "Already applied: $patch_file"
+else
+  patch -d "$ffmpeg_work" -p1 --force < "$patch_file"
+fi
 prefix="$WORK_ROOT/prefix"
 targets=" ${*:-x264 x265 aom ffmpeg} "
 # CMake's Android toolchain uses the original NDK, not the copied sysroot.

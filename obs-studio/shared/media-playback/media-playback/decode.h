@@ -61,7 +61,6 @@ struct mp_decode {
 	bool hw;
 #ifdef __ANDROID__
 	bool android_hw_first_frame_pending;
-	char android_hw_component[256];
 #endif
 	uint16_t max_luminance;
 

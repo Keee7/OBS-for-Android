@@ -1,6 +1,7 @@
 #include "AndroidCodecCapabilities.hpp"
 
 #include <obs.h>
+#include <obs-android.h>
 #include <QJniEnvironment>
 #include <QJniObject>
 #include <QByteArray>
@@ -95,6 +96,11 @@ static void queryControls(void *, calldata_t *cd)
 
 void OBSAndroidRegisterCodecQuery()
 {
+	QJniEnvironment env;
+	JavaVM *vm = nullptr;
+	if (env.isValid() && env->GetJavaVM(&vm) == JNI_OK)
+		obs_android_set_java_vm(vm);
+
 	proc_handler_add(obs_get_proc_handler(),
 		"void android_mediacodec_query_controls(string name, string mime, int mode, out bool supported, out int complexity_min, out int complexity_max, out int quality_min, out int quality_max)",
 		queryControls, nullptr);

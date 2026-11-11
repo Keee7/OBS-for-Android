@@ -20,9 +20,6 @@
 #include "media.h"
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/pixdesc.h>
-#ifdef __ANDROID__
-#include <obs-android.h>
-#endif
 
 enum AVHWDeviceType hw_priority[] = {
 	AV_HWDEVICE_TYPE_CUDA,  AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_DXVA2,        AV_HWDEVICE_TYPE_VAAPI,
@@ -201,8 +198,6 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 				ret = mp_open_codec(d, false, true);
 				if (ret >= 0) {
 					d->android_hw_first_frame_pending = true;
-					strncpy(d->android_hw_component, "unknown", sizeof(d->android_hw_component) - 1);
-					d->android_hw_component[sizeof(d->android_hw_component) - 1] = '\0';
 					blog(LOG_INFO, "MP: MediaCodec decoder opened: %s (component and hardware status unknown)", name);
 					goto codec_opened;
 				}
@@ -350,10 +345,10 @@ static int decode_packet(struct mp_decode *d, int *got_frame)
 #ifdef __ANDROID__
 	if (*got_frame && d->android_hw_first_frame_pending) {
 		const char *pixel_format = av_get_pix_fmt_name(d->in_frame->format);
-		blog(LOG_INFO, "MP: MediaCodec decoder first frame: decoder=%s component=%s hardware=unknown "
+		blog(LOG_INFO, "MP: MediaCodec decoder first frame: decoder=%s component=unknown hardware=unknown "
 			       "width=%d height=%d coded=%dx%d linesize=%d,%d,%d "
 			       "crop=%zu,%zu,%zu,%zu pixfmt=%s",
-		     d->codec->name, d->android_hw_component, d->in_frame->width, d->in_frame->height,
+		     d->codec->name, d->in_frame->width, d->in_frame->height,
 		     d->decoder->coded_width, d->decoder->coded_height, d->in_frame->linesize[0],
 		     d->in_frame->linesize[1], d->in_frame->linesize[2], d->in_frame->crop_top,
 		     d->in_frame->crop_bottom, d->in_frame->crop_left, d->in_frame->crop_right,
