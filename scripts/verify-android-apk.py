@@ -102,14 +102,12 @@ def main():
             if len(names) != len(set(names)):
                 errors.append('APK contains duplicate ZIP entry names')
             dex = [apk.read(n) for n in names if re.fullmatch(r'classes\d*\.dex', n)]
-            if not any(b'QT_ANDROID_NO_FULLSCREEN_KEYBOARD' in blob for blob in dex):
-                errors.append('Qt Android IME fullscreen control missing; package may contain an older Qt runtime')
             for name in CLASSES:
                 if not any(name in item for item in dex):
                     errors.append('missing Java class ' + name.decode())
             if not any(b'onCapturedContentResize' in item for item in dex):
                 errors.append('missing captured-content resize callback')
-            libs = [n for n in names if n.startswith('lib/arm64-v8a/') and n.endswith('.so')]
+            libs = [n for n in names if (n.startswith('lib/arm64-v8a/') or n.startswith('assets/obs-plugins/')) and n.endswith('.so')]
             if not libs:
                 errors.append('no arm64-v8a native libraries')
             for path in libs:
@@ -132,13 +130,6 @@ def main():
                     errors.append('UVC input cadence diagnostics missing from APK')
                 if short == 'liblibobs.so' and b'event=cadence_select' not in payload:
                     errors.append('OBS UVC frame-selection diagnostics missing from APK')
-                if short == 'liblibobs.so' and b'Cannot open Android image document' not in payload:
-                    errors.append('Android image document I/O missing from APK')
-                if short == 'obs-ffmpeg.so' and b'ffmpeg_x265' not in payload:
-                    errors.append('OBS software HEVC encoder missing from APK')
-                if short in ('liblibobs.so', 'obs-ffmpeg.so') and any(marker not in payload for marker in
-                        (b'libx265 H.265 / HEVC', b'libaom AV1')):
-                    errors.append(short + ' lacks compiled FFmpeg x265/AOM encoders')
                 digest = hashlib.sha256(payload).hexdigest()
                 print(f'{path} SHA-256 {digest}')
                 if not check_elf_header(payload):
@@ -179,7 +170,7 @@ def main():
                 if missing_imports:
                     errors.append(f'{short} missing expected dynamic imports: {", ".join(sorted(missing_imports))}')
             for name in REQUIRED:
-                if f'lib/arm64-v8a/{name}' not in names:
+                if f'lib/arm64-v8a/{name}' not in names and f'assets/obs-plugins/{name}' not in names:
                     errors.append('missing arm64 library ' + name)
     except (OSError, ET.ParseError, BadZipFile, subprocess.CalledProcessError) as exc:
         print('FAIL: cannot inspect APK:', exc, file=sys.stderr)

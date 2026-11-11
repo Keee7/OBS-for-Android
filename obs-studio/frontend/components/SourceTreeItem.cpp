@@ -72,6 +72,7 @@ SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_) : tre
 		iconLabel->setStyleSheet("background: none");
 		idian::Utils::addClass(iconLabel, "source-icon");
 		idian::Utils::toggleClass(iconLabel, "text-muted", !sourceVisible);
+		style()->polish(iconLabel);
 		idian::Utils::applyColorToIcon(iconLabel);
 	}
 
@@ -138,11 +139,15 @@ SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_) : tre
 		obs_source_t *source = obs_sceneitem_get_source(sceneitem);
 
 		auto undo_redo = [](const std::string &uuid, int64_t id, bool val) {
-			OBSSourceAutoRelease s = obs_get_source_by_uuid(uuid.c_str());
-			obs_scene_t *sc = obs_group_or_scene_from_source(s);
-			obs_sceneitem_t *si = obs_scene_find_sceneitem_by_id(sc, id);
-			if (si) {
-				obs_sceneitem_set_visible(si, val);
+			OBSSourceAutoRelease sceneSource = obs_get_source_by_uuid(uuid.c_str());
+			obs_scene_t *scene = obs_group_or_scene_from_source(sceneSource);
+			obs_sceneitem_t *sceneItem = obs_scene_find_sceneitem_by_id(scene, id);
+			if (sceneItem) {
+				obs_sceneitem_set_visible(sceneItem, val);
+				const char *itemName = obs_source_get_name(obs_sceneitem_get_source(sceneItem));
+				const char *name = obs_source_get_name(sceneSource);
+				blog(LOG_INFO, "User set sceneitem '%s' (%li) on scene '%s' to %s (undo_redo)",
+				     itemName, (long)id, name, val ? "enabled" : "disabled");
 			}
 		};
 
@@ -155,6 +160,10 @@ SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_) : tre
 
 		QSignalBlocker sourcesSignalBlocker(this);
 		obs_sceneitem_set_visible(sceneitem, val);
+
+		const char *itemName = obs_source_get_name(obs_sceneitem_get_source(sceneitem));
+		blog(LOG_INFO, "User set sceneitem '%s' (%li) on scene '%s' to %s", itemName, (long)id, name,
+		     val ? "enabled" : "disabled");
 	};
 
 	auto setItemLocked = [this](bool checked) {
@@ -199,8 +208,8 @@ void SourceTreeItem::ReconnectSignals()
 
 	auto removeItem = [](void *data, calldata_t *cd) {
 		SourceTreeItem *this_ = static_cast<SourceTreeItem *>(data);
-		obs_sceneitem_t *curItem = (obs_sceneitem_t *)calldata_ptr(cd, "item");
-		obs_scene_t *curScene = (obs_scene_t *)calldata_ptr(cd, "scene");
+		OBSSceneItem curItem = (obs_sceneitem_t *)calldata_ptr(cd, "item");
+		OBSScene curScene = (obs_scene_t *)calldata_ptr(cd, "scene");
 
 		if (curItem == this_->sceneitem) {
 			QMetaObject::invokeMethod(this_->tree, &SourceTree::Remove, curItem, curScene);
@@ -475,6 +484,7 @@ void SourceTreeItem::VisibilityChanged(bool visible)
 {
 	if (iconLabel) {
 		idian::Utils::toggleClass(iconLabel, "text-muted", !visible);
+		style()->polish(iconLabel);
 		idian::Utils::applyColorToIcon(iconLabel);
 	}
 	idian::Utils::toggleClass(label, "text-muted", !visible);
@@ -543,7 +553,8 @@ void SourceTreeItem::Update(bool force)
 
 	} else if (type == Type::Group) {
 		expand = new QCheckBox();
-		idian::Utils::addClass(expand, "checkbox-icon indicator-expand");
+		idian::Utils::addClass(expand, "checkbox-icon");
+		idian::Utils::addClass(expand, "indicator-expand");
 		expand->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Maximum);
 #ifdef __APPLE__
 		expand->setAttribute(Qt::WA_LayoutUsesWidgetRect);

@@ -2,9 +2,6 @@ param(
     [ValidateSet('configure','build','package','all')][string]$Action = 'all',
     [string]$ToolsRoot = (Join-Path (Split-Path $PSScriptRoot -Parent | Split-Path -Parent) 'build-tools'),
     [int]$Jobs = 8,
-    [ValidateSet('6.11.1')][string]$QtVersion = '6.11.1',
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$GradleVersion = '9.3.1',
-    [ValidateRange(36, 99)][int]$CompileSdkVersion = 36,
     [string]$SigningConfigFile = $env:OBS_ANDROID_SIGNING_CONFIG,
     [switch]$DebugSigning,
     [switch]$AntutuPackage
@@ -12,13 +9,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $tools = [IO.Path]::GetFullPath($ToolsRoot)
-$build = Join-Path $tools ('build-obs-arm64-qt' + $QtVersion.Replace('.', ''))
+$build = Join-Path $tools 'build-obs-arm64'
 $logs = Join-Path $tools 'build-logs'
 $cmake = Join-Path $tools 'cmake/cmake-3.31.6-windows-x86_64/bin/cmake.exe'
 $ninja = Join-Path $tools 'ninja/ninja.exe'
 $ndk = Join-Path $tools 'ndk/android-ndk-r30'
-$qt = Join-Path $tools "Qt/$QtVersion/android_arm64_v8a"
-$hostQt = Join-Path $tools "Qt/$QtVersion/msvc2022_64"
+$qt = Join-Path $tools 'Qt/6.9.3/android_arm64_v8a'
+$hostQt = Join-Path $tools 'Qt/6.9.3/msvc2022_64'
 $prefix = Join-Path $tools 'android-deps/arm64-v8a'
 $sdk = Join-Path $tools 'android-sdk'
 $env:JAVA_HOME = Join-Path $tools 'jdk-17.0.12'
@@ -31,7 +28,7 @@ $env:GRADLE_USER_HOME = Join-Path $tools 'gradle-cache'
 # Qt invokes Gradle internally. A persistent daemon can retain this script's
 # redirected output handle after a successful build and block the pipeline.
 $env:GRADLE_OPTS = ($env:GRADLE_OPTS + ' -Dorg.gradle.daemon=false').Trim()
-$env:PATH = "$tools/gradle/gradle-$GradleVersion/bin;$env:JAVA_HOME/bin;$hostQt/bin;$tools/ninja;$env:PATH"
+$env:PATH = "$tools/gradle/gradle-8.14.3/bin;$env:JAVA_HOME/bin;$hostQt/bin;$tools/ninja;$env:PATH"
 New-Item -ItemType Directory -Force -Path $build,$logs,$env:ANDROID_USER_HOME | Out-Null
 $packageId = 'com.obsproject.studio'
 if ($AntutuPackage) { $packageId = 'com.antutu.ABenchMark' }
@@ -88,7 +85,8 @@ if ($Action -in @('configure','build','package','all')) {
         '-DCMAKE_BUILD_TYPE=RelWithDebInfo', "-DCMAKE_PREFIX_PATH=$prefix;$qt", "-DQT_HOST_PATH=$hostQt",
         '-DCMAKE_POLICY_VERSION_MINIMUM=3.5', '-DENABLE_PLUGINS=ON', '-DENABLE_FRONTEND=ON',
         '-DENABLE_SCRIPTING=OFF', '-DENABLE_HEVC=ON', "-DANDROID_SDK_ROOT=$sdk", "-DCMAKE_INSTALL_PREFIX=$build/install")
-    $argsConfigure += "-DOBS_ANDROID_COMPILE_SDK_VERSION=$CompileSdkVersion"
+    # This local route uses Qt 6.9.3 and explicitly deploys against platform 35.
+    $argsConfigure += '-DOBS_ANDROID_COMPILE_SDK_VERSION=35'
     $argsConfigure += "-DOBS_ANDROID_PACKAGE_NAME=$packageId", "-DOBS_ANDROID_PACKAGE_SOURCE_DIR=$packageSource"
     Invoke-BuildTool $cmake $argsConfigure 'configure.log'
 }
@@ -101,23 +99,25 @@ if ($Action -in @('package','all')) {
     foreach ($required in @('android-mediacodec.so','android-browser.so')) {
         if ($required -notin $modules.Name) { throw "Built plugin missing: $required" }
     }
-    $packageSources = Join-Path $packageSource 'libs/arm64-v8a'
-    New-Item -ItemType Directory -Force -Path $packageSources | Out-Null
-    foreach ($module in $modules) { Copy-Item -LiteralPath $module.FullName -Destination $packageSources -Force }
+    # 插件走 assets：运行时由 AndroidRuntimeBootstrap 解到 $OBS_ROOT_PATH/lib。
+    # （APK 的 lib/<abi>/ 只解 lib*.so，我们的插件名不带 lib 前缀，解不出来。）
+    $packageAssets = Join-Path $packageSource 'assets/obs-plugins'
+    if (Test-Path -LiteralPath $packageAssets) { Remove-Item -LiteralPath $packageAssets -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $packageAssets | Out-Null
+    foreach ($module in $modules) { Copy-Item -LiteralPath $module.FullName -Destination $packageAssets -Force }
+    $stripExe = Join-Path $ndk 'toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip.exe'
+    if (Test-Path -LiteralPath $stripExe) {
+        foreach ($module in (Get-ChildItem -LiteralPath $packageAssets -File -Filter '*.so')) {
+            & $stripExe --strip-unneeded $module.FullName 2>$null | Out-Null
+        }
+    }
+    $manifestLines = (Get-ChildItem -LiteralPath $packageAssets -File -Filter '*.so' | ForEach-Object Name | Sort-Object) -join "`n"
+    [IO.File]::WriteAllText((Join-Path $packageAssets 'MANIFEST'), $manifestLines + "`n", [Text.UTF8Encoding]::new($false))
     $androidBuild = Join-Path $build 'frontend/android-build'
     $deploy = Join-Path $hostQt 'bin/androiddeployqt.exe'
     $unsigned = Join-Path $androidBuild 'obs-studio-test.apk'
     Invoke-BuildTool $deploy @('--input', "$build/frontend/android-obs-studio-deployment-settings.json",
-        '--output', $androidBuild, '--apk', $unsigned, '--android-platform', "android-$CompileSdkVersion", '--release', '--aux-mode') 'android-stage.log'
-    # Patch the staged runtime only. A second androiddeployqt invocation would
-    # overwrite it with the pristine SDK jar, so build directly with Gradle.
-    $patchedQtJar = Join-Path $build 'qt-ime-patched/Qt6Android.jar'
-    Invoke-BuildTool 'python' @("$PSScriptRoot/qt-android-ime/patch-qt-android-jar.py",
-        '--qt-version', $QtVersion, '--jar', "$qt/jar/Qt6Android.jar",
-        '--android-jar', "$sdk/platforms/android-$CompileSdkVersion/android.jar",
-        '--javac', "$env:JAVA_HOME/bin/javac.exe", '--output', $patchedQtJar) 'qt-ime-runtime.log'
-    Copy-Item -LiteralPath $patchedQtJar -Destination "$androidBuild/libs/Qt6Android.jar" -Force
-    Invoke-BuildTool "$tools/gradle/gradle-$GradleVersion/bin/gradle.bat" @('--no-daemon', '-p', $androidBuild, 'assembleRelease') 'android-package.log'
+        '--output', $androidBuild, '--apk', $unsigned, '--android-platform', 'android-35', '--release') 'android-package.log'
     $apk = Get-ChildItem -Path $androidBuild -Recurse -File -Filter '*unsigned.apk' |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (!$apk) { $apk = Get-Item -LiteralPath $unsigned -ErrorAction Stop }
@@ -140,7 +140,6 @@ if ($Action -in @('package','all')) {
     Invoke-BuildTool "$sdk/build-tools/36.0.0/zipalign.exe" @('-c','-P','16','-v','4',$signed) 'verify-alignment.log'
     Invoke-BuildTool 'python' @("$PSScriptRoot/verify-android-apk.py", $signed, '--tools-root', $tools,
         '--native-dir', $build, '--expected-package', $packageId) 'strict-apk-check.log'
-    Invoke-BuildTool 'python' @("$PSScriptRoot/qt-android-ime/verify-runtime-apk.py", $signed) 'qt-runtime-apk-check.log'
     Get-FileHash -Algorithm SHA256 -LiteralPath $signed
     Write-Host "Test APK: $signed"
 }

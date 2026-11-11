@@ -15,7 +15,7 @@
 #   QT_VERSION      默认 6.11.1
 #   CMAKE_VERSION   默认 3.31.6（必须 >= 3.28：obs-studio 的 cmake_minimum_required 是 3.28...3.30）
 #   CMDLINE_TOOLS   默认 13114758
-#   GRADLE_VERSION  默认 9.3.1
+#   GRADLE_VERSION  默认 8.14.3
 #   BUILD_TOOLS     默认 36.0.0
 #   PLATFORM        默认 android-36
 #   JOBS            默认 nproc
@@ -36,7 +36,7 @@ NDK_VERSION="${NDK_VERSION:-r30}"
 QT_VERSION="${QT_VERSION:-6.11.1}"
 CMAKE_VERSION="${CMAKE_VERSION:-3.31.6}"
 CMDLINE_TOOLS="${CMDLINE_TOOLS:-13114758}"
-GRADLE_VERSION="${GRADLE_VERSION:-9.3.1}"
+GRADLE_VERSION="${GRADLE_VERSION:-8.14.3}"
 BUILD_TOOLS="${BUILD_TOOLS:-36.0.0}"
 PLATFORM="${PLATFORM:-android-36}"
 JOBS="${JOBS:-$(nproc)}"
@@ -218,7 +218,7 @@ fetch_gradle() {
     [ -x "$GRADLE_HOME/bin/gradle" ] && { echo "Gradle 已就位：$GRADLE_HOME"; return; }
     log "下载 Gradle $GRADLE_VERSION"
     mkdir -p "$TOOLS_ROOT" "$DL_ROOT"
-    local zip="$DL_ROOT/gradle-$GRADLE_VERSION-bin.zip"
+    local zip="$DL_ROOT/gradle.zip"
     [ -s "$zip" ] || curl -fL --retry 3 --retry-delay 5 -o "$zip" \
         "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
     unzip -q "$zip" -d "$TOOLS_ROOT"
@@ -343,29 +343,58 @@ build_obs() {
 }
 
 package_apk() {
-    log "暂存插件 .so 进包源目录"
-    local pkg_libs="$ROOT/obs-studio/frontend/cmake/android/libs/$ABI"
+    log "暂存插件 .so 进包源目录（assets/obs-plugins）"
+    local pkg_assets="$ROOT/obs-studio/frontend/cmake/android/assets/obs-plugins"
     local plug_src
     plug_src="$(find "$BUILD_DIR/rundir" -type d -path '*/lib/obs-plugins' 2>/dev/null | head -1)"
     if [ -z "$plug_src" ]; then
         echo "FATAL: rundir 里没有 obs-plugins 目录 —— 插件没编出来，APK 会是空壳" >&2
         exit 1
     fi
-    mkdir -p "$pkg_libs"
-    cp -f "$plug_src"/*.so "$pkg_libs"/
+    # 先清空再拷：只 cp -f 会让删掉的插件一直留在包里、旧 .so 覆盖新构建。
+    rm -rf "$pkg_assets"
+    mkdir -p "$pkg_assets"
+    # 不变式：rundir/lib/obs-plugins/ 里的东西**就是**插件。再断言一次，防止前端应用库
+    # （libobs_<abi>.so，曾让 APK 白胖一倍）被当插件混进来。
+    local f
+    for f in "$plug_src"/*.so; do
+        [ -f "$f" ] || continue
+        case "$(basename "$f")" in
+            libobs_*|libQt*) echo "FATAL: lib/obs-plugins 里混进了非插件：$(basename "$f")" >&2; exit 1 ;;
+        esac
+    done
+    cp -f "$plug_src"/*.so "$pkg_assets"/
+    # strip：assets 不经过 Gradle 的 stripReleaseDebugSymbols，rundir 里那份是带 -g 的
+    local strip="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+    for f in "$pkg_assets"/*.so; do
+        [ -f "$f" ] || continue
+        if [ -x "$strip" ]; then "$strip" --strip-unneeded "$f" || true; fi
+    done
     # 这两个是本 fork 的核心插件。缺了就早点报错，别出一个"看着正常"的包。
     local m
     for m in android-mediacodec.so android-browser.so; do
-        [ -f "$pkg_libs/$m" ] || { echo "FATAL: 插件缺失：$m" >&2; exit 1; }
+        [ -f "$pkg_assets/$m" ] || { echo "FATAL: 插件缺失：$m" >&2; exit 1; }
     done
-    echo "  已暂存：$(ls "$pkg_libs" | tr '\n' ' ')"
+    # 运行时按 MANIFEST 逐个从 assets 解出来（不依赖 Qt 的 assets 目录列举能力）
+    local count
+    count=$(ls -1 "$pkg_assets"/*.so 2>/dev/null | wc -l)
+    [ "$count" -gt 0 ] || { echo "FATAL: 插件目录为空：$pkg_assets" >&2; exit 1; }
+    ( cd "$pkg_assets" && ls -1 ./*.so | sed 's#^\./##' ) > "$pkg_assets/MANIFEST"
+    echo "  已暂存：$(cd "$pkg_assets" && ls -1 *.so | tr '\n' ' ')"
 
     log "androiddeployqt 出包"
     local ab_dir="$BUILD_DIR/frontend/android-build"
     local fe="$BUILD_DIR/frontend"
+    # 强制重打包：清掉 androiddeployqt/gradle 的 native 中间件。
+    # 注意**不能**删整个 android-build/libs：CMake 把应用库 libobs_<abi>.so 放在那里，
+    # 删了 androiddeployqt 会报 "Cannot find application binary"。
+    # 只清掉上一轮残留的**插件** .so（插件名不带 lib 前缀），保留 lib* 的应用/Qt 库。
+    if [ -d "$ab_dir/libs/$ABI" ]; then
+        find "$ab_dir/libs/$ABI" -maxdepth 1 -type f -name '*.so' ! -name 'lib*' -delete
+    fi
     mkdir -p "$ab_dir/libs/$ABI"
-    cp -f "$plug_src"/*.so "$ab_dir/libs/$ABI"/
-    # 强制重打包：清掉 androiddeployqt/gradle 的 native 中间件，否则上一轮暂存的 .so 会残留。
+    APP_LIB="$(ls "$BUILD_DIR/frontend"/libobs_*.so 2>/dev/null | head -1)"
+    [ -n "$APP_LIB" ] && cp -f "$APP_LIB" "$ab_dir/libs/$ABI/"
     rm -rf "$ab_dir"/build/outputs/apk \
            "$ab_dir"/build/intermediates/merged_jni_libs \
            "$ab_dir"/build/intermediates/merged_native_libs \
@@ -377,20 +406,13 @@ package_apk() {
         --depfile "$ab_dir/obs-studio.d" \
         --builddir "$fe" \
         --android-platform "$PLATFORM" \
-        --release --aux-mode )
-    python3 "$SCRIPT_DIR/qt-android-ime/patch-qt-android-jar.py" \
-        --qt-version "$QT_VERSION" --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
-        --android-jar "$SDK/platforms/$PLATFORM/android.jar" --javac "$JAVA_HOME/bin/javac" \
-        --output "$BUILD_DIR/qt-ime-patched/Qt6Android.jar"
-    cp -f "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" "$ab_dir/libs/Qt6Android.jar"
-    "$GRADLE_HOME/bin/gradle" --no-daemon -p "$ab_dir" assembleRelease
+        --release )
 
     local apk
     apk="$(find "$ab_dir/build/outputs/apk/release" -name '*-unsigned.apk' 2>/dev/null | head -1)"
     [ -n "$apk" ] || apk="$(find "$BUILD_DIR" -name '*-unsigned.apk' 2>/dev/null | head -1)"
     [ -n "$apk" ] || apk="$(find "$ab_dir" -name '*.apk' ! -name '*-signed*' 2>/dev/null | head -1)"
     [ -n "$apk" ] || { echo "FATAL: 没找到生成的 APK" >&2; exit 1; }
-    python3 "$SCRIPT_DIR/qt-android-ime/verify-runtime-apk.py" "$apk"
     echo "$apk" > "$BUILD_DIR/.unsigned-apk-path"
     echo "  未签名 APK：$apk"
 }

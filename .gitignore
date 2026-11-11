@@ -16,6 +16,7 @@ deps-android/prebuilt/
 
 # 二进制暂存/安装树（构建产物，构建脚本会再生）
 obs-studio/frontend/cmake/android/libs/
+obs-studio/frontend/cmake/android/assets/
 android-shell/obs/
 
 # 通用

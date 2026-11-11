@@ -27,3 +27,17 @@
 #pragma once
 
 void PrepareAndroidRuntimePaths();
+
+/* 把 APK 的 assets/obs-plugins/ 解到 $OBS_ROOT_PATH/lib（幂等）。
+ *
+ * 必须在 QApplication 之后调用 —— Qt 的 `assets:` 引擎是平台插件初始化时注册的，
+ * 而 PrepareAndroidRuntimePaths() 跑在 main() 最前面（QApplication 之前），那时
+ * `assets:` 还不可用。插件装载发生在 OBSApp（QApplication 子类）构造之后，
+ * 所以在 OBSApp::loadAppModules() 最前面调。
+ *
+ * 必须在 obs_load_core_modules() **之前**完成：core loader 按 obs_core_modules[]
+ * 逐个 find_core_module($ROOT/lib/<name>)，文件不在就装不上。
+ *
+ * 与数据解包不同：$ROOT/lib 是**用户也能写**的目录（放自己的插件、删掉即卸载），
+ * 所以这里只删"上一版登记过、这一版没有"的文件，用户自己的文件永远不碰。 */
+void EnsureAndroidPluginBinaries();

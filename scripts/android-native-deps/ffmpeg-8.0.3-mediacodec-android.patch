@@ -1,0 +1,147 @@
+diff -ruN a/libavcodec/mediacodec_sw_buffer.c b/libavcodec/mediacodec_sw_buffer.c
+--- a/libavcodec/mediacodec_sw_buffer.c	2026-11-10 18:07:14.732262000 +0800
++++ b/libavcodec/mediacodec_sw_buffer.c	2026-11-10 18:08:34.923916600 +0800
+@@ -94,7 +94,7 @@
+             src += s->crop_top * s->stride;
+             src += s->crop_left;
+         } else {
+-            height = avctx->height / 2;
++            height = (avctx->height + 1) / 2;
+             stride = (s->stride + 1) / 2;
+ 
+             src += s->slice_height * s->stride;
+@@ -103,11 +103,11 @@
+                 src += ((s->slice_height + 1) / 2) * stride;
+             }
+ 
+-            src += s->crop_top * stride;
++            src += (s->crop_top / 2) * stride;
+             src += (s->crop_left / 2);
+         }
+ 
+-        if (frame->linesize[i] == stride) {
++        if (frame->linesize[i] == stride && s->crop_left == 0) {
+             memcpy(frame->data[i], src, height * stride);
+         } else {
+             int j, width;
+@@ -148,14 +148,14 @@
+             src += s->crop_top * s->stride;
+             src += s->crop_left;
+         } else if (i == 1) {
+-            height = avctx->height / 2;
++            height = (avctx->height + 1) / 2;
+ 
+             src += s->slice_height * s->stride;
+-            src += s->crop_top * s->stride;
+-            src += s->crop_left;
++            src += (s->crop_top / 2) * s->stride;
++            src += (s->crop_left / 2) * 2;
+         }
+ 
+-        if (frame->linesize[i] == s->stride) {
++        if (frame->linesize[i] == s->stride && s->crop_left == 0) {
+             memcpy(frame->data[i], src, height * s->stride);
+         } else {
+             int j, width;
+@@ -194,16 +194,15 @@
+         src = data + info->offset;
+         if (i == 0) {
+             height = avctx->height;
++            src += s->crop_top * s->stride + s->crop_left;
+         } else if (i == 1) {
+-            height = avctx->height / 2;
+-
+-            src += (s->slice_height - s->crop_top / 2) * s->stride;
++            height = (avctx->height + 1) / 2;
+ 
+-            src += s->crop_top * s->stride;
+-            src += s->crop_left;
++            src += (s->slice_height + s->crop_top / 2) * s->stride;
++            src += (s->crop_left / 2) * 2;
+         }
+ 
+-        if (frame->linesize[i] == s->stride) {
++        if (frame->linesize[i] == s->stride && s->crop_left == 0) {
+             memcpy(frame->data[i], src, height * s->stride);
+         } else {
+             int j, width;
+diff -ruN a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
+--- a/libavcodec/mediacodecdec.c	2026-11-10 18:07:06.994550200 +0800
++++ b/libavcodec/mediacodecdec.c	2026-11-10 18:08:18.965767200 +0800
+@@ -57,6 +57,7 @@
+     int amlogic_mpeg2_api23_workaround;
+ 
+     int use_ndk_codec;
++    char *codec_name;
+     // Ref. MediaFormat KEY_OPERATING_RATE
+     int operating_rate;
+ } MediaCodecH264DecContext;
+@@ -450,6 +451,14 @@
+ 
+     s->ctx->delay_flush = s->delay_flush;
+     s->ctx->use_ndk_codec = s->use_ndk_codec;
++    if (s->codec_name && *s->codec_name) {
++        s->ctx->codec_name = av_strdup(s->codec_name);
++        if (!s->ctx->codec_name) {
++            av_freep(&s->ctx);
++            ret = AVERROR(ENOMEM);
++            goto done;
++        }
++    }
+ 
+     if ((ret = ff_mediacodec_dec_init(avctx, s->ctx, codec_mime, format)) < 0) {
+         s->ctx = NULL;
+@@ -594,6 +603,8 @@
+ #define OFFSET(x) offsetof(MediaCodecH264DecContext, x)
+ #define VD AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM
+ static const AVOption ff_mediacodec_vdec_options[] = {
++    { "codec_name", "Select a specific Android MediaCodec component",
++                    OFFSET(codec_name), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, VD },
+     { "delay_flush", "Delay flush until hw output buffers are returned to the decoder",
+                      OFFSET(delay_flush), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { "ndk_codec", "Use MediaCodec from NDK",
+diff -ruN a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
+--- a/libavcodec/mediacodecdec_common.c	2026-11-10 18:07:37.477286700 +0800
++++ b/libavcodec/mediacodecdec_common.c	2026-11-10 18:08:34.921713300 +0800
+@@ -569,6 +569,14 @@
+     }
+     av_log(avctx, AV_LOG_DEBUG, "Parsing MediaFormat %s\n", format);
+ 
++    /* Optional keys describe this format only.  A previous output format
++     * can contain crop or layout keys that are absent after a change. */
++    s->stride = 0;
++    s->slice_height = 0;
++    s->crop_top = s->crop_bottom = 0;
++    s->crop_left = s->crop_right = 0;
++    s->display_width = s->display_height = 0;
++
+     /* Mandatory fields */
+     AMEDIAFORMAT_GET_INT32(s->width,  "width", 1);
+     AMEDIAFORMAT_GET_INT32(s->height, "height", 1);
+@@ -645,11 +653,11 @@
+     if (color_transfer)
+         avctx->color_trc = ff_AMediaFormatColorTransfer_to_AVColorTransfer(color_transfer);
+ 
+-    av_log(avctx, AV_LOG_INFO,
+-        "Output crop parameters top=%d bottom=%d left=%d right=%d, "
+-        "resulting dimensions width=%d height=%d\n",
+-        s->crop_top, s->crop_bottom, s->crop_left, s->crop_right,
+-        width, height);
++    av_log(avctx, AV_LOG_WARNING,
++        "Output buffer width=%d height=%d stride=%d slice-height=%d color-format=0x%x "
++        "crop top=%d bottom=%d left=%d right=%d, visible width=%d height=%d\n",
++        s->width, s->height, s->stride, s->slice_height, s->color_format,
++        s->crop_top, s->crop_bottom, s->crop_left, s->crop_right, width, height);
+ 
+     av_freep(&format);
+     return ff_set_dimensions(avctx, width, height);
+@@ -775,7 +783,8 @@
+         av_log(avctx, AV_LOG_WARNING, "Unsupported or unknown profile\n");
+     }
+ 
+-    s->codec_name = ff_AMediaCodecList_getCodecNameByType(mime, profile, 0, avctx);
++    if (!s->codec_name)
++        s->codec_name = ff_AMediaCodecList_getCodecNameByType(mime, profile, 0, avctx);
+     if (!s->codec_name) {
+         // getCodecNameByType() can fail due to missing JVM, while NDK
+         // mediacodec can be used without JVM.

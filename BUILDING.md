@@ -53,7 +53,7 @@ The build script does not install these tools or download a dependency prefix. T
 ### Preparing dependencies
 
 - [build-android-cmake-deps.py](scripts/build-android-cmake-deps.py) builds Jansson, libjpeg-turbo, FreeType, mbedTLS and curl. It expects the source directory layout listed in that script and copies SIMDe/uthash headers when present.
-- [build-deps-windows.sh](scripts/build-deps-windows.sh) builds x264, x265 3.6, libaom 3.10.0 and FFmpeg under MSYS2. It requires `WORK_ROOT` (absolute, no spaces), `SYSROOT` (complete NDK sysroot), `SOURCES_ROOT` (containing `x264/`, `x265_3.6/`, `libaom-3.10.0/` and `ffmpeg-7.1.3/`) and `OUTPUT_PREFIX`. `LLVM_BIN` must point to the NDK LLVM bin directory; if its path contains spaces, point it at a space-free junction to that directory. CMake, Ninja and pkg-config must be on PATH. FFmpeg links x265 under GPL; retain and distribute the corresponding sources and licenses.
+- [build-deps-windows.sh](scripts/build-deps-windows.sh) builds x264, x265 3.6, libaom 3.10.0 and FFmpeg under MSYS2. It requires `WORK_ROOT` (absolute, no spaces), `SYSROOT` (complete NDK sysroot), `SOURCES_ROOT` (containing `x264/`, `x265_3.6/`, `libaom-3.10.0/` and `ffmpeg-8.0.3/`) and `OUTPUT_PREFIX`. `LLVM_BIN` must point to the NDK LLVM bin directory; if its path contains spaces, point it at a space-free junction to that directory. CMake, Ninja and pkg-config must be on PATH. FFmpeg links x265 under GPL; retain and distribute the corresponding sources and licenses.
 - USB/audio-filter dependencies also need to be present in the prefix; the Python helper is not an installer for the entire dependency set. The WSL route below covers the original dependency groups.
 
 Example for the Python helper (adapt paths to your installation):
@@ -62,12 +62,11 @@ Example for the Python helper (adapt paths to your installation):
 python scripts/build-android-cmake-deps.py --tools D:/build-tools --ndk D:/build-tools/ndk/android-ndk-r30
 ```
 
-Both FFmpeg build routes apply these repository patches before compilation:
+Both FFmpeg build routes apply this repository patch before compilation:
 
-- `scripts/android-native-deps/ffmpeg-7.1.3-mediacodec-codec-name.patch`
-- `scripts/android-native-deps/ffmpeg-7.1.3-mediacodec-crop.patch`
+- `scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch`
 
-An older, unpatched `libavcodec.a` will not contain the named decoder selection and output-format/cropping fixes. Rebuild FFmpeg and the final APK after changing these patches.
+An older, unpatched `libavcodec.a` will not contain the named decoder selection and output-format/cropping fixes. Rebuild FFmpeg and the final APK after changing the patch.
 
 The Linux CMake dependency helper generates files under `.obs-android-build/`, preserving the upstream `build/` directory. In particular, AOM ships required source scripts in `build/cmake/`; deleting that directory makes AOM configuration fail and then prevents FFmpeg from finding libaom.
 

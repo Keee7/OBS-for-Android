@@ -25,6 +25,7 @@
 #include <utility/OBSProxyStyle.hpp>
 #ifdef __ANDROID__
 #include <utility/android-window-fit.hpp>
+#include <utility/AndroidRuntimeBootstrap.hpp> /* EnsureAndroidPluginBinaries()：装载前解插件 .so */
 #endif
 #if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
 #include <utility/models/branches.hpp>
@@ -33,9 +34,6 @@
 
 #if !defined(_WIN32) && !defined(__APPLE__)
 #include <obs-nix-platform.h>
-#if QT_VERSION < QT_VERSION_CHECK(6, 5, 0)
-#include <qpa/qplatformnativeinterface.h>
-#endif
 #endif
 #include <qt-wrappers.hpp>
 
@@ -73,9 +71,9 @@
 #endif
 
 #include <chrono>
+#include <sstream>
 
 #ifdef _WIN32
-#include <sstream>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
@@ -106,12 +104,43 @@ extern "C" __declspec(dllexport) DWORD NvOptimusEnablement = 1;
 extern "C" __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #endif
 
+constexpr double kDefaultSnapDistance = 5.0;
+
 namespace {
 
 typedef struct UncleanLaunchAction {
 	bool useSafeMode = false;
 	bool sendCrashReport = false;
 } UncleanLaunchAction;
+
+enum class PluginFailureAction { Continue, OpenPluginManager };
+
+PluginFailureAction handlePluginFailure()
+{
+	QMessageBox pluginWarning;
+
+	pluginWarning.setIcon(QMessageBox::Warning);
+
+	pluginWarning.setWindowTitle(QTStr("PluginFailure.Dialog.Title"));
+	pluginWarning.setText(QTStr("PluginFailure.Labels.Text"));
+
+	QPushButton *continueButton =
+		pluginWarning.addButton(QTStr("PluginFailure.Dialog.Continue"), QMessageBox::RejectRole);
+	QPushButton *handleButton =
+		pluginWarning.addButton(QTStr("PluginFailure.Dialog.Open"), QMessageBox::AcceptRole);
+
+	pluginWarning.setDefaultButton(continueButton);
+
+	pluginWarning.exec();
+
+	bool openPluginManager = pluginWarning.clickedButton() == handleButton;
+
+	if (openPluginManager) {
+		return PluginFailureAction::OpenPluginManager;
+	} else {
+		return PluginFailureAction::Continue;
+	}
+}
 
 UncleanLaunchAction handleUncleanShutdown(bool enableCrashUpload)
 {
@@ -131,9 +160,7 @@ UncleanLaunchAction handleUncleanShutdown(bool enableCrashUpload)
 	QMessageBox crashWarning;
 
 	crashWarning.setIcon(QMessageBox::Warning);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
 	crashWarning.setOption(QMessageBox::Option::DontUseNativeDialog);
-#endif
 	crashWarning.setWindowTitle(QTStr("CrashHandling.Dialog.Title"));
 	crashWarning.setText(QTStr("CrashHandling.Labels.Text"));
 
@@ -396,7 +423,7 @@ void OBSApp::InitUserConfigDefaults()
 	config_set_default_bool(userConfig, "BasicWindow", "ScreenSnapping", true);
 	config_set_default_bool(userConfig, "BasicWindow", "SourceSnapping", true);
 	config_set_default_bool(userConfig, "BasicWindow", "CenterSnapping", false);
-	config_set_default_double(userConfig, "BasicWindow", "SnapDistance", 10.0);
+	config_set_default_double(userConfig, "BasicWindow", "SnapDistance", kDefaultSnapDistance);
 	config_set_default_bool(userConfig, "BasicWindow", "SpacingHelpersEnabled", true);
 	config_set_default_bool(userConfig, "BasicWindow", "RecordWhenStreaming", false);
 	config_set_default_bool(userConfig, "BasicWindow", "KeepRecordingWhenStreamStops", false);
@@ -663,7 +690,8 @@ bool OBSApp::InitUserConfig(std::filesystem::path &userConfigLocation, uint32_t 
 
 void OBSApp::MigrateLegacySettings(const uint32_t lastVersion)
 {
-	bool hasChanges = false;
+	bool hasUserConfigChanges = false;
+	bool hasGlobalConfigChanges = false;
 
 	const uint32_t v19 = MAKE_SEMANTIC_VERSION(19, 0, 0);
 	const uint32_t v21 = MAKE_SEMANTIC_VERSION(21, 0, 0);
@@ -679,7 +707,7 @@ void OBSApp::MigrateLegacySettings(const uint32_t lastVersion)
 			bool useOldDefaults = lastVersion && lastVersion < version;
 			config_set_bool(userConfig, "General", configKey.c_str(), useOldDefaults);
 
-			hasChanges = true;
+			hasUserConfigChanges = true;
 		}
 	}
 
@@ -688,7 +716,7 @@ void OBSApp::MigrateLegacySettings(const uint32_t lastVersion)
 
 		bool layoutUpdated = UpdatePre22MultiviewLayout(layout);
 
-		hasChanges = hasChanges | layoutUpdated;
+		hasUserConfigChanges = hasUserConfigChanges | layoutUpdated;
 	}
 
 	if (lastVersion && lastVersion < v24) {
@@ -698,11 +726,33 @@ void OBSApp::MigrateLegacySettings(const uint32_t lastVersion)
 			config_set_string(userConfig, "General", "HotkeyFocusType", "DisableHotkeysInFocus");
 		}
 
-		hasChanges = true;
+		hasUserConfigChanges = true;
 	}
 
-	if (hasChanges) {
+	if (lastVersion && lastVersion < MAKE_SEMANTIC_VERSION(33, 0, 0)) {
+		bool migratedUserSettings = config_has_user_value(appConfig, "General", "Pre33.0Migrated");
+
+		if (!migratedUserSettings) {
+			double currentSnapDistance = config_get_double(userConfig, "BasicWindow", "SnapDistance");
+
+			if (currentSnapDistance == 10.0) {
+				double newDefaultSnapDistance = kDefaultSnapDistance;
+				config_set_double(userConfig, "BasicWindow", "SnapDistance", newDefaultSnapDistance);
+			}
+
+			config_set_bool(appConfig, "General", "Pre33.0Migrated", true);
+
+			hasUserConfigChanges = true;
+			hasGlobalConfigChanges = true;
+		}
+	}
+
+	if (hasUserConfigChanges) {
 		userConfig.SaveSafe("tmp");
+	}
+
+	if (hasGlobalConfigChanges) {
+		appConfig.SaveSafe("tmp");
 	}
 }
 
@@ -1762,11 +1812,9 @@ bool OBSApp::OBSInit()
 
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(__ANDROID__)
 	if (QApplication::platformName() == "xcb") {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
 		auto native = qGuiApp->nativeInterface<QNativeInterface::QX11Application>();
 
 		obs_set_nix_platform_display(native->display());
-#endif
 
 		obs_set_nix_platform(OBS_NIX_PLATFORM_X11_EGL);
 
@@ -1775,11 +1823,9 @@ bool OBSApp::OBSInit()
 
 #ifdef ENABLE_WAYLAND
 	if (QApplication::platformName().contains("wayland")) {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
 		auto native = qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>();
 
 		obs_set_nix_platform_display(native->display());
-#endif
 
 		obs_set_nix_platform(OBS_NIX_PLATFORM_WAYLAND);
 		setAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
@@ -1788,10 +1834,6 @@ bool OBSApp::OBSInit()
 	}
 #endif
 
-#if QT_VERSION < QT_VERSION_CHECK(6, 5, 0)
-	QPlatformNativeInterface *native = QGuiApplication::platformNativeInterface();
-	obs_set_nix_platform_display(native->nativeResourceForIntegration("display"));
-#endif
 #endif
 
 #ifdef __APPLE__
@@ -2735,50 +2777,35 @@ void OBSApp::addLogLine(int logLevel, const QString &message)
 	emit logLineAdded(logLevel, message);
 }
 
-void OBSApp::loadAppModules(struct obs_module_failure_info &mfi)
+void OBSApp::loadAppModules()
 {
-	pluginManager_->preLoad();
-	blog(LOG_INFO, "---------------------------------");
-	obs_load_all_modules2(&mfi);
 #ifdef __ANDROID__
-	/* extractNativeLibs=false → APK 里的插件 .so 不落盘，obs_load_all_modules2 的目录扫描
-	 * 什么都扫不到（实测 /proc/<pid>/maps 里应用自己的库全是 ".../base.apk" 的 mmap，
-	 * nativeLibraryDir 是 total 0 的空目录，find 全盘也搜不到 image-source.so）。
-	 * 改按裸文件名 dlopen：调用方所在的 linker namespace 已含 base.apk!/lib/<abi>/，
-	 * 故 obs_open_module("x.so", …) 能命中 APK 内的插件 —— B-6 的 color_source 能画出红色
-	 * 就是从这条路上来的，目前也是唯一被验证过的插件装载路径。
-	 * 名单在构建期由 plugins/ 白名单生成（cmake/os-android.cmake + cmake/templates/
-	 * android-plugin-modules.h.in），加插件只改白名单一处。
-	 *
-	 * data_path 必须是真实目录：obs-module.c 的 obs_open_module 直接 bstrdup(data_path)
-	 * 存进 module->data_path，不做 %module% 替换；obs_find_module_file 只把
-	 * "<data_path>/<file>" 拼起来 stat。原先传 "/" ⇒ obs-transitions 装载成功也取不到
-	 * 任何 .effect，转场类型照样为 0。数据由 :/obsplugindata 在启动时解到
-	 * $OBS_ROOT_PATH/share/obs/obs-plugins/<模块>（见 AndroidRuntimeBootstrap.cpp）。
-	 *
-	 * 逐个先打一条再打结果：blog() 到不了 logcat，装载中途崩也要能看出卡在哪个插件。 */
-	{
-		const QByteArray dataRoot = qgetenv("OBS_ROOT_PATH") + "/share/obs/obs-plugins/";
-		for (const char *const name : OBS_ANDROID_PLUGIN_MODULES) {
-			const QByteArray bin = QByteArray(name) + ".so";
-			const QByteArray data = dataRoot + name;
-			P1LOG("装载 %s (data=%s)", bin.constData(), data.constData());
-			obs_module_t *mod = nullptr;
-			const int rc = obs_open_module(&mod, bin.constData(), data.constData());
-			if (rc != MODULE_SUCCESS) {
-				P1LOG("  %s open 失败 rc=%d", bin.constData(), rc);
-				continue;
-			}
-			if (!obs_init_module(mod))
-				P1LOG("  %s open 成功但 obs_init_module 失败（obs_module_load 返回 false）", bin.constData());
+	/* 插件 .so 必须**先**解到 $OBS_ROOT_PATH/lib —— 紧接着的 loadAllPlugins() 会先调
+	 * obs_load_core_modules()，它按 obs_core_modules[] 逐个到那个目录找 .so。
+	 * 不能放在 PrepareAndroidRuntimePaths()（main() 最前面）：Qt 的 assets: 引擎
+	 * 要等 QApplication 初始化后才注册。 */
+	EnsureAndroidPluginBinaries();
+#endif
+
+	using PluginMode = OBS::PluginManager::Mode;
+	PluginMode mode = (disable_3p_plugins || safe_mode) ? PluginMode::CoreOnly : PluginMode::Full;
+	pluginManager_->setPluginMode(mode);
+
+	pluginManager_->loadAllPlugins(portable_mode);
+}
+
+void OBSApp::handlePluginLoadState()
+{
+	using PluginState = OBS::PluginManager::State;
+	PluginState loadState = pluginManager_->loadState();
+
+	if (loadState != PluginState::Success) {
+		PluginFailureAction action = handlePluginFailure();
+
+		if (action == PluginFailureAction::OpenPluginManager) {
+			pluginManagerOpenDialog();
 		}
 	}
-#endif
-	blog(LOG_INFO, "---------------------------------");
-	obs_log_loaded_modules();
-	blog(LOG_INFO, "---------------------------------");
-	obs_post_load_modules();
-	pluginManager_->postLoad();
 }
 
 void OBSApp::pluginManagerOpenDialog()
