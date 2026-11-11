@@ -1410,7 +1410,20 @@ void OBSBasic::OBSInit()
 
 #ifndef _WIN32
 	if (!hideWindowOnStart) {
+#ifdef __ANDROID__
+		// Android's Activity owns the available area, including freeform and
+		// split-screen bounds. Do not leave the content at a saved desktop
+		// normal-window size when the Activity is larger.
+		showMaximized();
+		QTimer::singleShot(0, this, [this] {
+			const QRect available = screen()->availableGeometry();
+			blog(LOG_INFO, "Android main window: size=%dx%d available=%dx%d+%d+%d state=%d max=%dx%d dpr=%.2f",
+			     width(), height(), available.width(), available.height(), available.x(), available.y(),
+			     int(windowState()), maximumWidth(), maximumHeight(), devicePixelRatioF());
+		});
+#else
 		show();
+#endif
 	}
 #endif
 

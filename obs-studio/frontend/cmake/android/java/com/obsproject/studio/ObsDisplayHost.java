@@ -726,43 +726,13 @@ public final class ObsDisplayHost {
         return surfaceFormat;
     }
 
-    /** "left,top,width,height" 全是要在屏幕上采样时用的绝对像素（screencap 坐标同一套）。 */
-    public static String rectOnScreen() {
-        final SurfaceView v;
-        final Activity act;
-        final int sx, sy, sw, sh;
-        // 先在这把锁里把要用的引用和兜底值取出来，**出锁之后再回 UI 线程**取真值 ——
-        // UI 线程上 attach/align 的 Runnable 也要这把锁，锁里等它就死锁。
-        synchronized (ObsDisplayHost.class) {
-            v = view;
-            act = activity;
-            if (v == null)
-                return "";
-            sx = onScreenX;
-            sy = onScreenY;
-            sw = onScreenW;
-            sh = onScreenH;
-        }
-        final int[] out = new int[] {sx, sy, sw, sh};
-        if (!postToUi(act, new Runnable() {
-                @Override
-                public void run() {
-                    int[] loc = new int[2];
-                    v.getLocationOnScreen(loc);
-                    out[0] = loc[0];
-                    out[1] = loc[1];
-                    out[2] = v.getWidth();
-                    out[3] = v.getHeight();
-                }
-            }, UI_POST_MS))
+    /** Last screen-pixel rectangle recorded by the UI layout/placement path. */
+    public static synchronized String rectOnScreen() {
+        // On IME close, Android's UI thread can be waiting for a Qt input
+        // callback. Never make Qt wait for the Android thread just to log a rect.
+        if (view == null || onScreenW <= 0 || onScreenH <= 0)
             return "";
-        synchronized (ObsDisplayHost.class) {
-            onScreenX = out[0];
-            onScreenY = out[1];
-            onScreenW = out[2];
-            onScreenH = out[3];
-        }
-        return out[0] + "," + out[1] + "," + out[2] + "," + out[3];
+        return onScreenX + "," + onScreenY + "," + onScreenW + "," + onScreenH;
     }
 
     /**
@@ -859,7 +829,6 @@ public final class ObsDisplayHost {
                    + reqH + ") onScreen=(" + onScreenX + "," + onScreenY + "," + onScreenW + "x" + onScreenH
                    + ") last=" + lastAction;
         }
-        // rect 要回 UI 线程取，绝不能在上面那把锁里等 —— attach 的 Runnable 也要这把锁
         return base + " rect=[" + rectOnScreen() + "]";
     }
 }

@@ -16,11 +16,13 @@
 #define ERROR_LIMIT 20U
 #define BAD_SECONDS_LIMIT 5U
 
+_Static_assert(XFER_COUNT <= 32, "retry bitmap requires at most 32 slots");
+
 struct slot {
 	struct libusb_transfer *x;
 	struct uvc_bulk_pump *pump;
-	unsigned buffer_id;
-	bool active, needs_retry;
+	unsigned buffer_id, index;
+	bool active;
 };
 struct ready_block {
 	unsigned buffer;
@@ -37,6 +39,7 @@ struct uvc_bulk_pump {
 	bool thread_started, init_done, stopping, monotonic_cond;
 	int fatal;
 	unsigned active, waiters;
+	uint32_t retry_pending, retry_stalled;
 	struct slot slots[XFER_COUNT];
 	uint8_t *buffers[BUFFER_MAX];
 	unsigned free_ids[BUFFER_MAX], free_count;
@@ -132,8 +135,12 @@ static void LIBUSB_CALL on_transfer(struct libusb_transfer *x)
 		p->win_errors++;
 		if (x->status == LIBUSB_TRANSFER_NO_DEVICE)
 			set_fatal_locked(p, LIBUSB_ERROR_NO_DEVICE);
-		else
-			slot->needs_retry = true;
+		else {
+			uint32_t bit = UINT32_C(1) << slot->index;
+			p->retry_pending |= bit;
+			if (x->status == LIBUSB_TRANSFER_STALL)
+				p->retry_stalled |= bit;
+		}
 	}
 	if (submit)
 		submit_slot_locked(slot, started);
@@ -157,47 +164,53 @@ static void *pump_thread(void *arg)
 	pthread_cond_broadcast(&p->cond);
 	pthread_mutex_unlock(&p->mutex);
 	for (;;) {
-		pthread_mutex_lock(&p->mutex);
-		bool stop = p->stopping || p->fatal;
-		pthread_mutex_unlock(&p->mutex);
-		if (stop)
-			break;
-		struct timeval tv = {0, 10000};
-		r = libusb_handle_events_timeout(p->ctx, &tv);
-		if (r && r != LIBUSB_ERROR_INTERRUPTED) {
-			pthread_mutex_lock(&p->mutex);
-			set_fatal_locked(p, r);
-			pthread_mutex_unlock(&p->mutex);
-			continue;
-		}
-		for (unsigned i = 0; i < XFER_COUNT; i++) {
-			struct slot *slot = &p->slots[i];
-			pthread_mutex_lock(&p->mutex);
-			bool retry = slot->needs_retry && !p->stopping && !p->fatal;
-			bool stall = retry && slot->x->status == LIBUSB_TRANSFER_STALL;
-			if (retry)
-				slot->needs_retry = false;
-			pthread_mutex_unlock(&p->mutex);
-			if (!retry)
-				continue;
-			r = stall ? libusb_clear_halt(p->handle, p->endpoint) : 0;
-			pthread_mutex_lock(&p->mutex);
-			if (r)
-				set_fatal_locked(p, r);
-			else if (!p->stopping && !p->fatal)
-				submit_slot_locked(slot, now_ns());
-			pthread_mutex_unlock(&p->mutex);
-		}
 		uint64_t now = now_ns();
+		pthread_mutex_lock(&p->mutex);
+		if (r && r != LIBUSB_ERROR_INTERRUPTED)
+			set_fatal_locked(p, r);
 		if (now - p->win_start >= 1000000000ULL) {
-			pthread_mutex_lock(&p->mutex);
 			p->bad_seconds = p->win_errors > ERROR_LIMIT ? p->bad_seconds + 1 : 0;
 			p->win_errors = 0;
 			p->win_start = now;
 			if (p->bad_seconds >= BAD_SECONDS_LIMIT)
 				set_fatal_locked(p, LIBUSB_ERROR_IO);
-			pthread_mutex_unlock(&p->mutex);
 		}
+		bool stop = p->stopping || p->fatal;
+		/* Callbacks may also run on a synchronous control-transfer thread.
+		 * Take ownership of this batch while holding the callback mutex; new
+		 * errors arriving during recovery remain pending for the next pass. */
+		uint32_t pending = p->retry_pending;
+		bool had_retries = pending != 0;
+		uint32_t stalled = p->retry_stalled;
+		p->retry_pending = p->retry_stalled = 0;
+		pthread_mutex_unlock(&p->mutex);
+		if (stop)
+			break;
+		for (unsigned i = 0; pending && i < XFER_COUNT; i++) {
+			uint32_t bit = UINT32_C(1) << i;
+			if (!(pending & bit))
+				continue;
+			pending &= ~bit;
+			struct slot *slot = &p->slots[i];
+			/* clear_halt can dispatch callbacks, so never hold p->mutex here. */
+			r = (stalled & bit) ? libusb_clear_halt(p->handle, p->endpoint) : 0;
+			pthread_mutex_lock(&p->mutex);
+			if (r)
+				set_fatal_locked(p, r);
+			else if (!p->stopping && !p->fatal)
+				submit_slot_locked(slot, now_ns());
+			stop = p->stopping || p->fatal;
+			pthread_mutex_unlock(&p->mutex);
+			if (stop)
+				break;
+		}
+		if (stop)
+			break;
+		/* Pick up errors dispatched during recovery before waiting for events. */
+		if (had_retries)
+			continue;
+		struct timeval tv = {0, 10000};
+		r = libusb_handle_events_timeout(p->ctx, &tv);
 	}
 	/* Only the event thread cancels and drains; callbacks own active accounting.
   * Never free a submitted transfer until its completion/cancellation callback runs. */
@@ -284,6 +297,7 @@ static struct uvc_bulk_pump *pump_start_sized(libusb_context *ctx, libusb_device
 	for (unsigned i = 0; i < XFER_COUNT; i++) {
 		struct slot *slot = &p->slots[i];
 		slot->pump = p;
+		slot->index = i;
 		slot->buffer_id = i;
 		slot->x = libusb_alloc_transfer(0);
 		if (!slot->x)

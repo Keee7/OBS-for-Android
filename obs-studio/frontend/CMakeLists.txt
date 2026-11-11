@@ -50,7 +50,9 @@ if(OS_ANDROID)
   # qt_add_executable 这个宏来自 Qt6::Core 的 module，而完整版（Widgets/Network/Svg/Xml）
   # 要到第 56 行才 include 进来 —— 第 34 行就有 target_link_libraries，目标必须先建好，
   # 所以这里只能先单独 find 一次 Core。find_package 重复调用是安全的（组件是累加的）。
-  find_package(Qt6 REQUIRED COMPONENTS Core)
+  # Require the Android IME implementation used by CI. Older local Qt kits
+  # restart fullscreen input on deletion and use different handle coordinates.
+  find_package(Qt6 6.11.1 REQUIRED COMPONENTS Core)
   qt_add_executable(obs-studio)
 else()
   add_executable(obs-studio)

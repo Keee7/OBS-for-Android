@@ -6,9 +6,9 @@
 
 本项目基于 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android)，原移植基于 [OBS Studio 32.2.1](https://github.com/obsproject/obs-studio)。这是社区移植，并非 OBS Project 官方 Android 发行版。保留原作者、许可证声明和提交历史。
 
-**当前源码版本：** `0.1.23-softcodec-image-test`，versionCode `24`。默认应用 ID 为 `com.obsproject.studio`；Windows 构建可用 `-AntutuPackage` 显式切换为 `com.antutu.ABenchMark`。**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。Java/JNI 类始终使用 `com.obsproject.studio` 命名空间。Qt 界面主要面向横屏平板。本地构建默认使用仓库外的 release 签名配置；公开 debug 签名需显式选择。详见 [本次修改与验证](scripts/SOFTWARE_IMAGE_IME_TEST.md)。
+**当前源码版本：** `0.1.24-ime-uvc-test`，versionCode `25`。默认应用 ID 为 `com.obsproject.studio`；Windows 构建可用 `-AntutuPackage` 显式切换为 `com.antutu.ABenchMark`。**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。Java/JNI 类始终使用 `com.obsproject.studio` 命名空间。Qt 界面主要面向横屏平板。本地构建默认使用仓库外的 release 签名配置；公开 debug 签名需显式选择。详见 [本次修改与实机验证](scripts/IME_UVC_TEST.md)。
 
-性能目标是持续稳定吞吐、低 CPU/GPU 占用和合理内存占用，允许适当缓冲，不以最低延迟为首要目标。新增 [UVC 收包与 CPU 审查](scripts/UVC_CPU_REVIEW.md)，本轮只提出候选方案，未修改采集实现，也未宣称已有实测收益。
+性能目标是持续稳定吞吐、低 CPU/GPU 占用和合理内存占用，允许适当缓冲，不以最低延迟为首要目标。UVC 恢复逻辑已改为每轮一次交接待处理位图，替代 32 次逐槽检查；主机回归覆盖恢复期间其他线程触发回调的情况，尚未量化 CPU 降幅。详见 [UVC 收包与 CPU 审查](scripts/UVC_CPU_REVIEW.md)。
 
 ## 功能与验证状态
 
@@ -29,7 +29,7 @@
 | 共享目录录像 | MediaStore / SAF 写入 `Download/obs` 等可 seek 本地目录，修复路径容量查询失败被误报为“磁盘空间不足”。先使用混合 MP4/MOV；目录/提供者组合仍需实机测试。 |
 | 小窗预览 | 统一 Qt/Android 窗口坐标，已检查进入小窗、移动、缩放和返回全屏的预览对齐。 |
 | RTMP 推流 | 修复重连状态重置、CBR/VBR 动态码率及发送失败包释放。本地实机测试覆盖正常推流、主动断线与带宽限制。 |
-| 1080p60 YUV 采集卡路径 | 独立 USB 收包、有界缓冲交接、标准 raw payload 重组和减少拷贝。原有低延迟开关作为独立选项，整体目标仍是高吞吐、低占用。主机测试及构建检查通过，采集卡实际吞吐尚待验证。[专项说明](scripts/UVC_1080P60_TEST.md)。 |
+| 1080p60 YUV 采集卡路径 | 独立 USB 收包、有界缓冲交接、标准 raw payload 重组和减少拷贝。原有低延迟开关独立保留。实机 NV12 SuperSpeed 1080p60 在恢复后的稳定采样约为 60 fps、186.8 MB/s；尚未量化 CPU 降幅或运动画面的重复帧比例。[实机记录](scripts/IME_UVC_TEST.md)。 |
 | UVC 断流恢复 | 独占 USB 借用、旧描述符隔离、按有效帧超时恢复和限频 USB 软件重置，支持分类传输诊断；软件重置不保证等同物理断电。 |
 | 相机与 USB 采集 | 保留原项目 Camera2、系统内录、Nikon PTP 和 UVC。原项目公开的设备结果属于上游验证，本分支未重复全部测试。 |
 
@@ -87,7 +87,7 @@ HEVC 使用 `--codec hevc`。需要同时看到：
 - 共享文档录像需要可 seek 的本地提供者；该路径暂不支持分割录像、回放缓存、自定义 FFmpeg 输出和自动 remux。真实空间不足仍会停止录像。
 - 浏览器源暂无独立音轨、本地 HTML 选择器和完整键盘/滚轮/多点触控；透明背景是可选开关，能否穿过设备虚拟显示合成需实机验证，明文 HTTP 受 Android 网络策略限制。
 - 未实现 NDI/Spout2 输入，VTube Studio 原生透明采集仍待实机验证。
-- Android 删除文字时输入法重新拉起、光标错位仍在定位。版本 24 增加默认关闭的事件/坐标诊断，尚未确认修复，见 [诊断说明](scripts/SOFTWARE_IMAGE_IME_TEST.md)。
+- 版本 25 已在 Android 16 平板的系统输入法验证连续退格、光标手柄及键盘收起后重开。过窄的小窗仍受控件最小宽度限制；详见 [验证范围](scripts/IME_UVC_TEST.md)。
 - 脚本和 Twitch/YouTube/Restream 内置服务集成仍禁用，需手动配置受支持的服务器与推流密钥。
 
 ## 仓库与文档

@@ -15,7 +15,7 @@
 #   QT_VERSION      默认 6.11.1
 #   CMAKE_VERSION   默认 3.31.6（必须 >= 3.28：obs-studio 的 cmake_minimum_required 是 3.28...3.30）
 #   CMDLINE_TOOLS   默认 13114758
-#   GRADLE_VERSION  默认 8.14.3
+#   GRADLE_VERSION  默认 9.3.1
 #   BUILD_TOOLS     默认 36.0.0
 #   PLATFORM        默认 android-36
 #   JOBS            默认 nproc
@@ -36,7 +36,7 @@ NDK_VERSION="${NDK_VERSION:-r30}"
 QT_VERSION="${QT_VERSION:-6.11.1}"
 CMAKE_VERSION="${CMAKE_VERSION:-3.31.6}"
 CMDLINE_TOOLS="${CMDLINE_TOOLS:-13114758}"
-GRADLE_VERSION="${GRADLE_VERSION:-8.14.3}"
+GRADLE_VERSION="${GRADLE_VERSION:-9.3.1}"
 BUILD_TOOLS="${BUILD_TOOLS:-36.0.0}"
 PLATFORM="${PLATFORM:-android-36}"
 JOBS="${JOBS:-$(nproc)}"
@@ -218,7 +218,7 @@ fetch_gradle() {
     [ -x "$GRADLE_HOME/bin/gradle" ] && { echo "Gradle 已就位：$GRADLE_HOME"; return; }
     log "下载 Gradle $GRADLE_VERSION"
     mkdir -p "$TOOLS_ROOT" "$DL_ROOT"
-    local zip="$DL_ROOT/gradle.zip"
+    local zip="$DL_ROOT/gradle-$GRADLE_VERSION-bin.zip"
     [ -s "$zip" ] || curl -fL --retry 3 --retry-delay 5 -o "$zip" \
         "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
     unzip -q "$zip" -d "$TOOLS_ROOT"
@@ -377,13 +377,20 @@ package_apk() {
         --depfile "$ab_dir/obs-studio.d" \
         --builddir "$fe" \
         --android-platform "$PLATFORM" \
-        --release )
+        --release --aux-mode )
+    python3 "$SCRIPT_DIR/qt-android-ime/patch-qt-android-jar.py" \
+        --qt-version "$QT_VERSION" --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
+        --android-jar "$SDK/platforms/$PLATFORM/android.jar" --javac "$JAVA_HOME/bin/javac" \
+        --output "$BUILD_DIR/qt-ime-patched/Qt6Android.jar"
+    cp -f "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" "$ab_dir/libs/Qt6Android.jar"
+    "$GRADLE_HOME/bin/gradle" --no-daemon -p "$ab_dir" assembleRelease
 
     local apk
     apk="$(find "$ab_dir/build/outputs/apk/release" -name '*-unsigned.apk' 2>/dev/null | head -1)"
     [ -n "$apk" ] || apk="$(find "$BUILD_DIR" -name '*-unsigned.apk' 2>/dev/null | head -1)"
     [ -n "$apk" ] || apk="$(find "$ab_dir" -name '*.apk' ! -name '*-signed*' 2>/dev/null | head -1)"
     [ -n "$apk" ] || { echo "FATAL: 没找到生成的 APK" >&2; exit 1; }
+    python3 "$SCRIPT_DIR/qt-android-ime/verify-runtime-apk.py" "$apk"
     echo "$apk" > "$BUILD_DIR/.unsigned-apk-path"
     echo "  未签名 APK：$apk"
 }

@@ -885,6 +885,9 @@ static void set_process_mitigation_policies()
 int main(int argc, char *argv[])
 {
 #ifdef __ANDROID__
+	// Qt 6.11 passes this to EditorInfo.IME_FLAG_NO_FULLSCREEN, keeping text
+	// editing in the OBS dialog instead of switching to IME extract mode.
+	qputenv("QT_ANDROID_NO_FULLSCREEN_KEYBOARD", "1");
 	/* APK 里的数据是打给 Qt 资源的（:/obsdata、:/obsfrontenddata，见 cmake/os-android.cmake），
 	 * 得先落到应用私有目录、再用 OBS_ROOT_PATH 公布出来，libobs 的 find_libobs_data_file()
 	 * 与平台的 GetDataFilePath() 才认得路。必须放在 main() 最前面：第一次要数据的

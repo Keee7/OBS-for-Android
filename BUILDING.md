@@ -1,8 +1,8 @@
 # Building OBS for Android / 构建说明
 
-The default Android application ID is `com.obsproject.studio`. Windows builds can opt into `com.antutu.ABenchMark` with `-AntutuPackage`; Java/JNI classes always retain the `com.obsproject.studio` namespace. The current source version is `0.1.23-softcodec-image-test` (24), arm64-v8a, minSdk 29 / targetSdk 35. WSL/Linux remains the original port's build route and uses the default application ID.
+The default Android application ID is `com.obsproject.studio`. Windows builds can opt into `com.antutu.ABenchMark` with `-AntutuPackage`; Java/JNI classes always retain the `com.obsproject.studio` namespace. The current source version is `0.1.24-ime-uvc-test` (25), arm64-v8a, minSdk 29 / targetSdk 35. WSL/Linux remains the original port's build route and uses the default application ID.
 
-各版本的实际构建和测试范围见 [测试记录](scripts/SOFTWARE_IMAGE_IME_TEST.md)。下面分别说明 Windows 工具布局和原项目的 WSL 构建路径；工具链和依赖源码不随仓库提供，需要自行安装/下载。
+各版本的实际构建和测试范围见 [测试记录](scripts/IME_UVC_TEST.md)。下面分别说明 Windows 工具布局和原项目的 WSL 构建路径；工具链和依赖源码不随仓库提供，需要自行安装/下载。
 
 ## Clone
 
@@ -18,12 +18,12 @@ cd OBS-for-Android
 | Component | Version used / requirement |
 | --- | --- |
 | Android ABI / native API | arm64-v8a / android-29 |
-| Android SDK | Windows Qt 6.9.3: platform android-35; WSL/CI default: android-36; build-tools 36.0.0; platform-tools for ADB |
+| Android SDK | platform android-36 (Windows/WSL/CI); build-tools 36.0.0; platform-tools for ADB |
 | NDK | r30; Windows test environment: 30.0.16248370 |
-| Qt | Windows: 6.9.3; CI: 6.11.1; Android arm64 plus matching host Qt with `androiddeployqt` |
+| Qt | 6.11.1; Android arm64 plus matching host Qt with `androiddeployqt`; version-bound Android runtime patches |
 | Java | JDK 17; Windows script expects directory `jdk-17.0.12` |
 | CMake / Ninja | CMake 3.31.6; Ninja |
-| Gradle | Windows 8.14.3; original WSL layout 8.14.5 |
+| Gradle | 9.3.1, matching the Qt 6.11.1 Android wrapper |
 | Windows native dependencies | MSYS2 Bash, make, patch, tar, pkg-config and LLVM tools |
 | Host verification | Python 3; FFmpeg/ffprobe for recording verification |
 
@@ -37,12 +37,12 @@ Dependency versions and upstream URLs are in [deps-android/versions.sh](deps-and
 
 ```text
 build-tools/
-  android-sdk/                  platforms/android-35, build-tools/36.0.0, platform-tools
+  android-sdk/                  platforms/android-36, build-tools/36.0.0, platform-tools
   ndk/android-ndk-r30/           Complete Windows NDK, including source.properties
-  Qt/6.9.3/android_arm64_v8a/
-  Qt/6.9.3/msvc2022_64/          Host Qt, including bin/androiddeployqt.exe
+  Qt/6.11.1/android_arm64_v8a/
+  Qt/6.11.1/msvc2022_64/          Host Qt, including bin/androiddeployqt.exe
   jdk-17.0.12/
-  gradle/gradle-8.14.3/
+  gradle/gradle-9.3.1/
   cmake/cmake-3.31.6-windows-x86_64/
   ninja/ninja.exe
   android-deps/arm64-v8a/        Cross-compiled include/, lib/, CMake/pkg-config metadata
@@ -108,13 +108,13 @@ export NDK_ROOT="$ANDROID_SDK_ROOT/ndk/<installed-r30-version>"
 export QT_DIR="$HOME/Qt/6.11.1"
 export QT_HOST_PATH="$QT_DIR/gcc_64"
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-export GRADLE_BIN="$HOME/toolchain/gradle-8.14.5/bin"
+export GRADLE_BIN="$HOME/toolchain/gradle-9.3.1/bin"
 "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0"
 ```
 
 The WSL frontend script also reads `~/.obs-android-env.sh` when present. Repository location is derived from the script path; `OBS_SOURCE_ROOT` may override it.
 
-The script checks that the selected platform is installed before compiling and passes the same compile SDK to CMake and `androiddeployqt`. Existing Qt 6.9.3 installations can explicitly retain SDK 35 with `OBS_ANDROID_COMPILE_SDK_VERSION=35 bash scripts/build-frontend-apk-wsl.sh`. Qt 6.11.1 builds need SDK 36 or newer. The Windows script continues to select SDK 35 for its bundled Qt 6.9.3 route.
+The script passes the same compile SDK to CMake and `androiddeployqt`. Use Qt 6.11.1 and compile SDK 36 or newer. The Windows, WSL and CI packaging scripts apply the [IME and layout patches](scripts/qt-android-ime/README.md) to the staged Qt Android jar, then build with Gradle and check that the patched classes reached the APK. Use these scripts for distributable APKs; the intermediate CMake APK does not go through that staging step. The installed Qt kit stays unchanged. Windows uses `build-obs-arm64-qt6111` to keep the new Qt ABI separate from older artifacts.
 
 Download and build the dependency groups, then build the APK:
 
