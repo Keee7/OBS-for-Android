@@ -47,6 +47,7 @@
 #include <QSystemTrayIcon>
 
 #include <deque>
+#include <string_view>
 
 extern volatile bool recording_paused;
 
@@ -81,6 +82,24 @@ enum class ItemPasteType { Invalid, Reference, Duplicate, Both };
 #define SIMPLE_ENCODER_SOFTWARE_AV1 "software_av1"
 #define SIMPLE_ENCODER_ANDROID_MEDIACODEC "android_mediacodec"
 #define SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC "android_mediacodec_hevc"
+#define SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1 "android_mediacodec_av1"
+#define SIMPLE_ENCODER_ANDROID_MEDIACODEC_VP9 "android_mediacodec_vp9"
+
+inline bool IsSimpleMediaCodecEncoder(std::string_view encoder)
+{
+	return encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC || encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC ||
+	       encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1 || encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_VP9;
+}
+
+inline const char *SimpleSoftwarePresetKey(std::string_view encoder, bool recording)
+{
+	if (encoder == SIMPLE_ENCODER_SOFTWARE_HEVC)
+		return recording ? "RecX265Preset" : "X265Preset";
+	if (encoder == SIMPLE_ENCODER_SOFTWARE_AV1)
+		return recording ? "RecAOMAV1Preset" : "AOMAV1Preset";
+	return nullptr;
+}
+
 #define SIMPLE_ENCODER_X264 "x264"
 #define SIMPLE_ENCODER_X264_LOWCPU "x264_lowcpu"
 #define SIMPLE_ENCODER_QSV "qsv"

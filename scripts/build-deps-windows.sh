@@ -98,7 +98,7 @@ if [[ "$targets" == *' x265 '* ]]; then
 fi
 if [[ "$targets" == *' aom '* ]]; then
   cmake_android "$SOURCES_ROOT/libaom-3.10.0" "$WORK_ROOT/aom-build" \
-    -DENABLE_DOCS=OFF -DENABLE_TESTS=OFF -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_DECODER=0
+    -DENABLE_DOCS=OFF -DENABLE_TESTS=OFF -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_DECODER=1
 fi
 if [[ "$targets" == *' x264 '* ]]; then
   (cd "$WORK_ROOT/src/x264"
@@ -114,7 +114,7 @@ if [[ "$targets" == *' ffmpeg '* ]]; then
    ./configure --prefix="$prefix" --enable-cross-compile --target-os=android --arch=aarch64 \
      --cc="$CC" --ar="$AR" --ranlib="$RANLIB" --strip="$STRIP" --enable-static --disable-shared \
      --disable-doc --disable-programs --disable-debug --disable-stripping --disable-autodetect \
-     --enable-gpl --enable-libx265 --enable-libaom --disable-decoder=libaom_av1 --pkg-config-flags=--static \
+     --enable-gpl --enable-libx265 --enable-libaom --enable-decoder=libaom_av1 --pkg-config-flags=--static \
      --enable-mediacodec --enable-jni --enable-avcodec --enable-avformat --enable-avutil \
      --enable-swscale --enable-swresample --enable-avfilter --enable-avdevice --enable-zlib \
      --enable-asm --enable-inline-asm --enable-neon --disable-vulkan --disable-v4l2-m2m \

@@ -359,7 +359,7 @@ bool obs_module_load(void)
 	if (vm && av_jni_set_java_vm(vm, NULL) == 0)
 		blog(LOG_INFO, "FFmpeg MediaCodec Java VM registered");
 	else
-		blog(LOG_WARNING, "FFmpeg MediaCodec Java VM unavailable; using NDK MIME selection");
+		blog(LOG_WARNING, "FFmpeg MediaCodec Java VM unavailable; MediaCodec video decoding disabled");
 #endif
 	obs_register_source(&ffmpeg_source);
 	obs_register_output(&ffmpeg_output);

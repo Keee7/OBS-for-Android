@@ -30,9 +30,12 @@ stub = r'''
 #include <string.h>
 #include "avc-utils.h"
 #include "hevc-utils.h"
+#include "av1-utils.h"
 #define pthread_mutex_lock(x) ((void)(x))
 #define pthread_mutex_unlock(x) ((void)(x))
-struct encoder { int mutex; bool hevc, failed; uint8_t *extra, *pending_config; size_t extra_size, pending_size; };
+struct codec_spec { const char *codec; };
+static const struct codec_spec avc = {"h264"}, hevc = {"hevc"};
+struct encoder { int mutex; bool failed; const struct codec_spec *format; uint8_t *extra, *pending_config; size_t extra_size, pending_size; };
 static void fail(struct encoder *e, const char *msg) { (void)msg; e->failed = true; }
 static void *brealloc(void *p, size_t n) { void *q = realloc(p, n); assert(q); return q; }
 static void bfree(void *p) { free(p); }
@@ -44,14 +47,14 @@ static void append(uint8_t *p, size_t *n, const uint8_t *nal, size_t size, bool 
     p[(*n)++] = 0; p[(*n)++] = 0; if (four) p[(*n)++] = 0; p[(*n)++] = 1;
     memcpy(p + *n, nal, size); *n += size;
 }
-static void clear(struct encoder *e) { free(e->extra); free(e->pending_config); memset(e, 0, sizeof(*e)); }
+static void clear(struct encoder *e) { free(e->extra); free(e->pending_config); memset(e, 0, sizeof(*e)); e->format = &avc; }
 static void check_types(const struct encoder *e, unsigned expected)
 {
     size_t cursor = 0, start, end; unsigned count = 0;
     while (hevc_next_nal(e->extra, e->extra_size, &cursor, &start, &end)) {
         assert(end > start);
-        unsigned type = e->hevc ? (e->extra[start] >> 1) & 63 : e->extra[start] & 31;
-        assert(e->hevc ? (type >= 32 && type <= 34) : (type == 7 || type == 8));
+        unsigned type = is_hevc(e) ? (e->extra[start] >> 1) & 63 : e->extra[start] & 31;
+        assert(is_hevc(e) ? (type >= 32 && type <= 34) : (type == 7 || type == 8));
         ++count;
     }
     assert(count == expected);
@@ -63,7 +66,7 @@ int main(void)
     const uint8_t avc_pps[] = {0x68,0x80};
     const uint8_t avc_sei[] = {0x06,0x80};
     const uint8_t avc_vcl[] = {0x65,0x81};
-    struct encoder e = {0};
+    struct encoder e = {.format = &avc};
     append(au,&n,avc_sei,sizeof avc_sei,false);
     append(au,&n,avc_sps,sizeof avc_sps,true);
     append(au,&n,avc_pps,sizeof avc_pps,false);
@@ -78,7 +81,7 @@ int main(void)
     const uint8_t pps[] = {0x44,1,0x80};
     const uint8_t sei[] = {0x4e,1,0x80};
     const uint8_t vcl[] = {0x26,1,0x80};
-    e.hevc = true; n = 0;
+    e.format = &hevc; n = 0;
     append(au,&n,sei,sizeof sei,true); append(au,&n,vps,sizeof vps,false);
     append(au,&n,sps,sizeof sps,true); append(au,&n,pps,sizeof pps,false);
     append(au,&n,vcl,sizeof vcl,true);
@@ -88,16 +91,27 @@ int main(void)
 
     n = 0; append(au,&n,avc_vcl,sizeof avc_vcl,false);
     inband_config(&e,au,n); assert(!e.failed && !e.extra && !e.pending_config); clear(&e);
-    e.hevc = true; n = 0; append(au,&n,sei,sizeof sei,false);
+    e.format = &hevc; n = 0; append(au,&n,sei,sizeof sei,false);
     inband_config(&e,au,n); assert(!e.failed && !e.extra && !e.pending_config); clear(&e);
     /* Oversized parameter set itself still fails the limit. */
     n = 0; append(au,&n,avc_sps,sizeof avc_sps,false);
     memset(au+n,0x55,1050000); n += 1050000;
     inband_config(&e,au,n); assert(e.failed && !e.extra); clear(&e);
+    const uint8_t av1c[] = {0x81, 0, 0, 0, 0x12, 0, 0x0a, 1, 0x20, 0x32, 1, 0xff};
+    save_av1_config(&e, av1c, sizeof av1c);
+    assert(!e.failed && e.extra_size == 3 && !memcmp(e.extra, av1c + 6, 3));
+    clear(&e);
+
+    const uint8_t truncated[] = {0x0a, 0x80};
+    save_av1_config(&e, truncated, sizeof truncated);
+    assert(!e.failed && !e.extra);
+    save_av1_config(&e, av1c + 4, sizeof av1c - 4);
+    assert(!e.failed && e.extra_size == 3 && !memcmp(e.extra, av1c + 6, 3));
+    clear(&e);
     free(au); return 0;
 }
 '''
-program = stub + '\n'.join(function(x) for x in ('uint8_t *annexb(', 'void save_config(', 'void inband_config(')) + checks
+program = stub + '\n'.join(function(x) for x in ('uint8_t *annexb(', 'bool is_hevc(', 'void save_config(', 'void save_av1_config(', 'void inband_config(')) + checks
 with tempfile.TemporaryDirectory(prefix='inband-test-', dir=HERE) as temp:
     temp = Path(temp)
     cfile, exe = temp / 'test.c', temp / 'test.exe'

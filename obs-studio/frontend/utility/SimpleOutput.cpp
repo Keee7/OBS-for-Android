@@ -87,6 +87,19 @@ void SimpleOutput::LoadStreamingPreset_Lossy(const char *encoderId)
 	}
 }
 
+static void ApplySimpleSoftwarePreset(config_t *config, obs_data_t *settings, std::string_view encoder, bool recording)
+{
+	const char *key = SimpleSoftwarePresetKey(encoder, recording);
+	if (!key)
+		return;
+
+	const char *value = config_get_string(config, "SimpleOutput", key);
+	if (encoder == SIMPLE_ENCODER_SOFTWARE_AV1)
+		obs_data_set_int(settings, "preset", value && strcmp(value, "7") == 0 ? 7 : 8);
+	else
+		obs_data_set_string(settings, "preset", value && *value ? value : "ultrafast");
+}
+
 /* mistakes have been made to lead us to this. */
 const char *get_simple_output_encoder(const char *encoder)
 {
@@ -97,7 +110,11 @@ const char *get_simple_output_encoder(const char *encoder)
 	} else if (strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC) == 0) {
 		return "android_mediacodec_h264";
 	} else if (strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC) == 0) {
-		return "android_mediacodec_hevc";
+		return SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC;
+	} else if (strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1) == 0) {
+		return SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1;
+	} else if (strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC_VP9) == 0) {
+		return SIMPLE_ENCODER_ANDROID_MEDIACODEC_VP9;
 	} else if (strcmp(encoder, SIMPLE_ENCODER_X264) == 0) {
 		return "obs_x264";
 	} else if (strcmp(encoder, SIMPLE_ENCODER_X264_LOWCPU) == 0) {
@@ -327,11 +344,10 @@ void SimpleOutput::Update()
 	preset = config_get_string(main->Config(), "SimpleOutput", presetType);
 
 	/* Only use preset2 for legacy/FFmpeg NVENC Encoder. */
-	if (strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC) == 0 ||
-	    strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC) == 0 ||
-	    strcmp(encoder, SIMPLE_ENCODER_SOFTWARE_HEVC) == 0 ||
-	    strcmp(encoder, SIMPLE_ENCODER_SOFTWARE_AV1) == 0) {
-		// MediaCodec exposes bitrate and keyframe interval, not x264 presets.
+	if (SimpleSoftwarePresetKey(encoder, false)) {
+		ApplySimpleSoftwarePreset(main->Config(), videoSettings, encoder, false);
+	} else if (IsSimpleMediaCodecEncoder(encoder)) {
+		obs_data_set_int(videoSettings, "rate_mode", 2); /* CBR */
 	} else if (strncmp(encoder_id, "ffmpeg_", 7) == 0 && strcmp(presetType, "NVENCPreset2") == 0) {
 		obs_data_set_string(videoSettings, "preset2", preset);
 	} else {
@@ -343,8 +359,7 @@ void SimpleOutput::Update()
 
 	if (advanced && strcmp(encoder, SIMPLE_ENCODER_SOFTWARE_HEVC) != 0 &&
 	    strcmp(encoder, SIMPLE_ENCODER_SOFTWARE_AV1) != 0 &&
-	    strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC) != 0 &&
-	    strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC) != 0) {
+	    !IsSimpleMediaCodecEncoder(encoder)) {
 		obs_data_set_string(videoSettings, "x264opts", custom);
 	}
 
@@ -562,11 +577,12 @@ void SimpleOutput::UpdateRecordingSettings()
 			obs_data_set_int(settings, "crf", crf);
 		else
 			obs_data_set_int(settings, "cqp", ultra_hq ? 30 : 40);
+		ApplySimpleSoftwarePreset(main->Config(), settings, videoEncoder, true);
 		obs_encoder_update(videoRecording, settings);
-	} else if (videoEncoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC || videoEncoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC) {
+	} else if (IsSimpleMediaCodecEncoder(videoEncoder)) {
 		OBSDataAutoRelease settings = obs_data_create();
 		obs_data_set_string(settings, "rate_control", "CBR");
-		// Simple quality presets have explicit CBR rates on Android MediaCodec.
+		obs_data_set_int(settings, "rate_mode", 2); /* CBR */
 		obs_data_set_int(settings, "bitrate", ultra_hq ? 12000 : 8000);
 		obs_encoder_update(videoRecording, settings);
 	} else if (astrcmp_n(videoEncoder.c_str(), "x264", 4) == 0) {

@@ -747,6 +747,10 @@ bool OBSBasic::InitBasicConfigDefaults()
 	config_set_default_uint(activeConfiguration, "SimpleOutput", "ABitrate", 160);
 	config_set_default_bool(activeConfiguration, "SimpleOutput", "UseAdvanced", false);
 	config_set_default_string(activeConfiguration, "SimpleOutput", "Preset", "veryfast");
+	config_set_default_string(activeConfiguration, "SimpleOutput", "X265Preset", "ultrafast");
+	config_set_default_string(activeConfiguration, "SimpleOutput", "RecX265Preset", "ultrafast");
+	config_set_default_string(activeConfiguration, "SimpleOutput", "AOMAV1Preset", "8");
+	config_set_default_string(activeConfiguration, "SimpleOutput", "RecAOMAV1Preset", "8");
 	config_set_default_string(activeConfiguration, "SimpleOutput", "NVENCPreset2", "p5");
 	config_set_default_string(activeConfiguration, "SimpleOutput", "RecQuality", "Stream");
 	config_set_default_bool(activeConfiguration, "SimpleOutput", "RecRB", false);

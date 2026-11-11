@@ -166,8 +166,14 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 		}
 	}
 
-	if (!d->codec)
-		d->codec = avcodec_find_decoder(id);
+	if (!d->codec) {
+#ifdef __ANDROID__
+		if (id == AV_CODEC_ID_AV1)
+			d->codec = avcodec_find_decoder_by_name("libaom-av1");
+		else
+#endif
+			d->codec = avcodec_find_decoder(id);
+	}
 
 	if (!d->codec) {
 		blog(LOG_WARNING, "MP: Failed to find %s codec", av_get_media_type_string(type));
@@ -177,7 +183,7 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 #ifdef __ANDROID__
 	/* MediaCodec's byte-buffer mode returns CPU-readable frames; it is a
 	 * separate decoder, not an AVHWDevice-backed version of the SW codec.
-	 * 勾选"硬件解码"时优先使用 FFmpeg 的 *_mediacodec 解码器（具体组件由系统选择），
+	 * 勾选"硬件解码"时优先使用 FFmpeg 的 *_mediacodec 解码器（FFmpeg 按 MIME/profile 选择硬件组件），
 	 * 打开失败回退到 FFmpeg 原生软解；不勾选时直接用软解。 */
 	if (hw && type == AVMEDIA_TYPE_VIDEO) {
 		const char *name = NULL;
@@ -198,7 +204,7 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 				ret = mp_open_codec(d, false, true);
 				if (ret >= 0) {
 					d->android_hw_first_frame_pending = true;
-					blog(LOG_INFO, "MP: MediaCodec decoder opened: %s (component and hardware status unknown)", name);
+					blog(LOG_INFO, "MP: hardware MediaCodec decoder opened: %s", name);
 					goto codec_opened;
 				}
 				blog(LOG_WARNING, "MP: hardware decoder %s failed to open (%s); falling back to software", name,
@@ -345,7 +351,7 @@ static int decode_packet(struct mp_decode *d, int *got_frame)
 #ifdef __ANDROID__
 	if (*got_frame && d->android_hw_first_frame_pending) {
 		const char *pixel_format = av_get_pix_fmt_name(d->in_frame->format);
-		blog(LOG_INFO, "MP: MediaCodec decoder first frame: decoder=%s component=unknown hardware=unknown "
+		blog(LOG_INFO, "MP: MediaCodec decoder first frame: decoder=%s hardware=true "
 			       "width=%d height=%d coded=%dx%d linesize=%d,%d,%d "
 			       "crop=%zu,%zu,%zu,%zu pixfmt=%s",
 		     d->codec->name, d->in_frame->width, d->in_frame->height,

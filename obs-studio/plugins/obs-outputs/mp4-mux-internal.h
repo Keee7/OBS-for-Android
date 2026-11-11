@@ -37,6 +37,7 @@ enum mp4_codec {
 	CODEC_H264,
 	CODEC_HEVC,
 	CODEC_AV1,
+	CODEC_VP9,
 	CODEC_PRORES,
 
 	/* Audio Codecs */

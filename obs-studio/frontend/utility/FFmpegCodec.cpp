@@ -65,6 +65,9 @@ bool FFCodecAndFormatCompatible(const char *codec, const char *format)
 }
 
 static const unordered_set<string> builtin_codecs = {
+#ifdef __ANDROID__
+	"vp9",
+#endif
 	"h264", "hevc", "av1", "prores", "aac", "opus", "alac", "flac", "pcm_s16le", "pcm_s24le", "pcm_f32le",
 };
 
@@ -126,6 +129,9 @@ static const unordered_map<string, unordered_set<string>> codec_compat = {
 		 "h264",
 		 "hevc",
 		 "av1",
+#ifdef __ANDROID__
+		 "vp9",
+#endif
 		 "aac",
 		 "opus",
 		 "alac",

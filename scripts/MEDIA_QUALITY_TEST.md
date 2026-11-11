@@ -25,13 +25,19 @@ CBR/VBR 档位映射到实际组件报告的 complexity 范围；CQ 映射到 qu
 
 Android 文件选择器返回 content:// 文档 URI，FFmpeg 原先直接按协议打开而失败。本版通过 Android ContentResolver 获取只读、可定位的文件描述符，再交给 FFmpeg 自定义 AVIO；也不再将文档 URI 当作普通路径报告“文件丢失”。请使用媒体源“浏览”重新选择视频并授权，先测试本地普通 MP4。云盘管道式、不可 seek 的提供者仍不支持。
 
-媒体源属性中的硬件解码默认开启。针对 H.264、HEVC、VP8、VP9、AV1，勾选时使用 FFmpeg 的 `*_mediacodec` 解码器（NDK MediaCodec）。插件加载时注册 Java VM，FFmpeg 枚举 Android 组件并跳过标记为纯软件的组件，再按 MIME/profile 选择。枚举失败或没有匹配时由 NDK 按 MIME 选择默认组件。不勾选时使用 FFmpeg 原生软解。
+媒体源属性中的硬件解码默认开启。针对 H.264、HEVC、VP8、VP9、AV1，勾选时使用 FFmpeg 的 `*_mediacodec` 解码器（NDK MediaCodec）。插件加载时注册 Java VM，FFmpeg 枚举 Android 组件，并按 MIME/profile 选择同时标记为硬件加速且非纯软件的解码器。枚举失败或无匹配组件时回退到 FFmpeg 原生软解。不勾选时使用软件解码。AV1 的软件路径明确使用 libaom。
 
 MediaCodec 解码器不可用或初始化失败时记录软件解码回退；VPx alpha 保留相应软件路径。运行中解码失败不会自动重新切换软件，可手动关闭硬件解码后重开文件。这与“GPU 屏幕采集不自动回退”的策略独立。
 
-启动日志中的 `FFmpeg MediaCodec Java VM registered` 表示 JNI 枚举可用。播放日志中应出现 `MP: MediaCodec decoder opened`，随后出现首帧日志及其尺寸和像素格式；只有打开日志不能证明已解出画面。FFmpeg 自动选择的实际组件及其硬件状态未知，`component=unknown hardware=unknown` 不能证明使用了硬件解码，需要通过设备侧诊断单独确认。MediaCodec 输出目前仍为 CPU 可读帧，经原媒体源通路显示，不宣称 GPU 端到端零拷贝。
+启动日志中的 `FFmpeg MediaCodec Java VM registered` 表示 JNI 枚举可用。播放时首帧日志会记录 `hardware=true`、尺寸和像素格式。启用 FFmpeg 日志时，可用 “Selected hardware-accelerated MediaCodec video decoder” 核对实际选中的组件。MediaCodec 输出仍为 CPU 可读帧。
 
 实机分别测试 H.264 MP4 和 HEVC MP4 的画面/声音、暂停/恢复、定位、循环、切场景、应用重启后的文件授权及手动软解。无法播放时提供 OBS 日志、文件编码/位深/分辨率和文件来源；确认硬解是否首帧失败，再区分权限、封装和设备解码能力。
+
+## 硬件编码器可用性
+
+编码器列表只显示系统标记为硬件加速、支持 Surface 输入和相应 8 位配置的 MediaCodec 编码器。简单模式只列出支持 CBR 的候选。开始输出时继续按分辨率、帧率、码率和所选码控模式筛选。已保存但不可用的编码器会在设置中标出，用户可重新选择。AV1 在推流服务接受该编码时可选，也可录制为 Hybrid MP4。VP9 Profile 0 可用于 Hybrid MP4 录制。设备实际输出需用 ffprobe 核对，并用日志确认 MediaCodec 组件。
+
+简单输出中，x265 和 AOM AV1 的编码预设可为推流和独立录像分别设置。录像质量档控制 CRF 或 CQP，编码预设控制压缩效率和 CPU 开销。
 
 ## 验证范围
 

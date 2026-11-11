@@ -100,3 +100,73 @@ diff -ruN a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.
  
      av_freep(&format);
      return ff_set_dimensions(avctx, width, height);
+--- a/libavcodec/mediacodec_wrapper.c
++++ b/libavcodec/mediacodec_wrapper.c
+@@ -50,6 +50,7 @@
+     jmethodID get_supported_types_id;
+     jmethodID is_encoder_id;
+     jmethodID is_software_only_id;
++    jmethodID is_hardware_accelerated_id;
+ 
+     jclass codec_capabilities_class;
+     jfieldID color_formats_id;
+@@ -75,6 +76,7 @@
+         { "android/media/MediaCodecInfo", "getSupportedTypes", "()[Ljava/lang/String;", FF_JNI_METHOD, OFFSET(get_supported_types_id), 1 },
+         { "android/media/MediaCodecInfo", "isEncoder", "()Z", FF_JNI_METHOD, OFFSET(is_encoder_id), 1 },
+         { "android/media/MediaCodecInfo", "isSoftwareOnly", "()Z", FF_JNI_METHOD, OFFSET(is_software_only_id), 0 },
++        { "android/media/MediaCodecInfo", "isHardwareAccelerated", "()Z", FF_JNI_METHOD, OFFSET(is_hardware_accelerated_id), 0 },
+ 
+     { "android/media/MediaCodecInfo$CodecCapabilities", NULL, NULL, FF_JNI_CLASS, OFFSET(codec_capabilities_class), 1 },
+         { "android/media/MediaCodecInfo$CodecCapabilities", "colorFormats", "[I", FF_JNI_FIELD, OFFSET(color_formats_id), 1 },
+@@ -529,6 +531,16 @@
+             goto done_with_info;
+         }
+ 
++        if (!encoder) {
++            if (!jfields.is_hardware_accelerated_id)
++                goto done_with_info;
++            int hardware = (*env)->CallBooleanMethod(env, info, jfields.is_hardware_accelerated_id);
++            if (ff_jni_exception_check(env, 1, log_ctx) < 0)
++                goto done;
++            if (!hardware)
++                goto done_with_info;
++        }
++
+         if (jfields.is_software_only_id) {
+             int is_software_only = (*env)->CallBooleanMethod(env, info, jfields.is_software_only_id);
+             if (ff_jni_exception_check(env, 1, log_ctx) < 0) {
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -777,26 +777,12 @@
+ 
+     s->codec_name = ff_AMediaCodecList_getCodecNameByType(mime, profile, 0, avctx);
+     if (!s->codec_name) {
+-        // getCodecNameByType() can fail due to missing JVM, while NDK
+-        // mediacodec can be used without JVM.
+-        if (!s->use_ndk_codec) {
+-            return AVERROR_EXTERNAL;
+-        }
+-        av_log(avctx, AV_LOG_INFO, "Failed to getCodecNameByType\n");
+-    } else {
+-        av_log(avctx, AV_LOG_DEBUG, "Found decoder %s\n", s->codec_name);
+-    }
+-
+-    if (s->codec_name)
+-        s->codec = ff_AMediaCodec_createCodecByName(s->codec_name, s->use_ndk_codec);
+-    else {
+-        s->codec = ff_AMediaCodec_createDecoderByType(mime, s->use_ndk_codec);
+-        if (s->codec) {
+-            s->codec_name = ff_AMediaCodec_getName(s->codec);
+-            if (!s->codec_name)
+-                s->codec_name = av_strdup(mime);
+-        }
+-    }
++        av_log(avctx, AV_LOG_INFO, "No hardware-accelerated MediaCodec video decoder found for %s\n", mime);
++        return AVERROR_EXTERNAL;
++    }
++
++    av_log(avctx, AV_LOG_INFO, "Selected hardware-accelerated MediaCodec video decoder %s\n", s->codec_name);
++    s->codec = ff_AMediaCodec_createCodecByName(s->codec_name, s->use_ndk_codec);
+     if (!s->codec) {
+         av_log(avctx, AV_LOG_ERROR, "Failed to create media decoder for type %s and name %s\n", mime, s->codec_name);
+         return AVERROR_EXTERNAL;

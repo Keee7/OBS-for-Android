@@ -108,6 +108,8 @@ ffmpeg_patch="$HERE/../scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-andro
 ffmpeg_patch_digest=$(sha256sum < "$ffmpeg_patch") || exit 1
 ffmpeg_source_id="ffmpeg-$(dep_version ffmpeg)-${ffmpeg_patch_digest%% *}"
 
+codec_defs_digest=$(sha256sum < "$HERE/defs.sh") || exit 1
+
 src_dir() {
   local name=$1
   if [ "$name" = ffmpeg ]; then name=$ffmpeg_source_id; fi
@@ -179,8 +181,13 @@ for dep in $TARGETS; do
     echo "[$dep] 无构建定义（函数 $fn 未定义），跳过"; FAILED="$FAILED $dep"; continue
   fi
   stamp="$STATE/$dep.done"
+  stamp_id=""
+  case "$dep" in
+    aom) stamp_id="aom-$(dep_version aom)-${codec_defs_digest%% *}" ;;
+    ffmpeg) stamp_id="$ffmpeg_source_id-${codec_defs_digest%% *}" ;;
+  esac
   if [ "$CLEAN" = 0 ] && [ -f "$stamp" ] &&
-     { [ "$dep" != ffmpeg ] || [ "$(cat "$stamp")" = "$ffmpeg_source_id" ]; }; then
+     { [ -z "$stamp_id" ] || [ "$(cat "$stamp")" = "$stamp_id" ]; }; then
     echo "[$dep] 已完成，跳过（--clean 可重做）"
     continue
   fi
@@ -199,8 +206,8 @@ for dep in $TARGETS; do
       continue
     fi
     dur=$(( $(date +%s) - start ))
-    if [ "$dep" = ffmpeg ]; then
-      printf '%s\n' "$ffmpeg_source_id" > "$stamp"
+    if [ -n "$stamp_id" ]; then
+      printf '%s\n' "$stamp_id" > "$stamp"
     else
       touch "$stamp"
     fi

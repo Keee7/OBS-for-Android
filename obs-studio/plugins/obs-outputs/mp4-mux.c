@@ -712,6 +712,28 @@ static size_t mp4_write_hvc1(struct mp4_mux *mux, obs_encoder_t *enc)
 	return write_box_size(s, start);
 }
 
+/* VP9 Profile 0 SDR emitted by Android MediaCodec. VP9 has no MP4
+ * initialization payload; a level of zero leaves it unspecified. */
+static size_t mp4_write_vp09(struct mp4_mux *mux, obs_encoder_t *enc)
+{
+	struct serializer *s = mux->serializer;
+	int64_t start = serializer_get_pos(s);
+
+	write_box(s, 0, "vp09");
+	mp4_write_visual_sample_entry(mux, enc);
+	write_fullbox(s, 20, "vpcC", 1, 0);
+	s_w8(s, 0); /* Profile 0 */
+	s_w8(s, 0); /* Level unspecified */
+	s_w8(s, (8 << 4) | (1 << 1)); /* 8-bit, 4:2:0 colocated, limited range */
+	s_w8(s, 1); /* BT.709 primaries */
+	s_w8(s, 1); /* BT.709 transfer */
+	s_w8(s, 1); /* BT.709 matrix */
+	s_wb16(s, 0); /* No codec initialization data */
+	mp4_write_pasp(mux);
+
+	return write_box_size(s, start);
+}
+
 /// AV1 ISOBMFF 2.2. AV1 Sample Entry
 static size_t mp4_write_av01(struct mp4_mux *mux, obs_encoder_t *enc)
 {
@@ -1297,6 +1319,8 @@ static size_t mp4_write_stsd(struct mp4_mux *mux, struct mp4_track *track)
 			mp4_write_hvc1(mux, track->encoder);
 		else if (track->codec == CODEC_AV1)
 			mp4_write_av01(mux, track->encoder);
+		else if (track->codec == CODEC_VP9)
+			mp4_write_vp09(mux, track->encoder);
 		else if (track->codec == CODEC_PRORES)
 			mp4_write_prores(mux, track->encoder);
 	} else if (track->type == TRACK_AUDIO) {
@@ -2751,6 +2775,8 @@ static inline enum mp4_codec get_codec(obs_encoder_t *enc)
 		return CODEC_HEVC;
 	if (strcmp(codec, "av1") == 0)
 		return CODEC_AV1;
+	if (strcmp(codec, "vp9") == 0)
+		return CODEC_VP9;
 	if (strcmp(codec, "prores") == 0)
 		return CODEC_PRORES;
 	if (strcmp(codec, "aac") == 0)
@@ -2929,8 +2955,10 @@ bool mp4_mux_submit_packet(struct mp4_mux *mux, struct encoder_packet *pkt)
 			obs_parse_hevc_packet(&parsed_packet, pkt);
 		else if (track->codec == CODEC_AV1)
 			obs_parse_av1_packet(&parsed_packet, pkt);
-		else if (track->codec == CODEC_PRORES)
+		else if (track->codec == CODEC_PRORES || track->codec == CODEC_VP9)
 			obs_encoder_packet_ref(&parsed_packet, pkt);
+		else
+			return false;
 
 		/* Set fragmentation PTS if packet is keyframe and PTS > 0 */
 		if (parsed_packet.keyframe && parsed_packet.pts > 0) {

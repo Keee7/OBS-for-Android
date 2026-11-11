@@ -187,7 +187,7 @@ build_x265() {
 
 build_aom() {
   _run_cmake "$(src_dir aom)" -DENABLE_DOCS=OFF -DENABLE_TESTS=OFF \
-    -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_DECODER=0
+    -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_DECODER=1
 }
 
 # ---------------------------------------------------------------- ffmpeg
@@ -224,7 +224,7 @@ build_ffmpeg() {
       --sysroot="$SYSROOT" \
       --enable-static --disable-shared \
       --disable-doc --disable-programs --disable-debug --disable-stripping \
-      --disable-autodetect --enable-gpl --enable-libx265 --enable-libaom --disable-decoder=libaom_av1 \
+      --disable-autodetect --enable-gpl --enable-libx265 --enable-libaom --enable-decoder=libaom_av1 \
       --pkg-config-flags=--static \
       --enable-mediacodec --enable-jni \
       --enable-avcodec --enable-avformat --enable-avutil \

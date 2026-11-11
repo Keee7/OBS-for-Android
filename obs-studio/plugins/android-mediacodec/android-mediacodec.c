@@ -1,5 +1,5 @@
 /*
- * Android MediaCodec Surface AVC encoder for OBS Studio.
+ * Android MediaCodec Surface video encoders for OBS Studio.
  * Copyright (C) 2026 OBS for Android contributors
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -19,6 +19,7 @@
 #include <time.h>
 #include "avc-utils.h"
 #include "hevc-utils.h"
+#include "av1-utils.h"
 #include "encoder-health.h"
 #include "shed-policy.h"
 
@@ -26,10 +27,21 @@ OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("android-mediacodec", "en-US")
 MODULE_EXPORT const char *obs_module_description(void)
 {
-	return "Android MediaCodec hardware H.264 and HEVC encoders";
+	return "Android MediaCodec hardware video encoders";
 }
-#define CODEC_ID "android_mediacodec_h264"
-#define CODEC_HEVC_ID "android_mediacodec_hevc"
+struct codec_spec {
+	const char *id, *codec, *mime, *name;
+	int profile;
+};
+
+static const struct codec_spec codecs[] = {
+	{"android_mediacodec_h264", "h264", "video/avc", "Android MediaCodec H.264", 0},
+#ifdef ENABLE_HEVC
+	{"android_mediacodec_hevc", "hevc", "video/hevc", "Android MediaCodec HEVC (H.265)", 1},
+#endif
+	{"android_mediacodec_av1", "av1", "video/av01", "Android MediaCodec AV1", 1},
+	{"android_mediacodec_vp9", "vp9", "video/x-vnd.on2.vp9", "Android MediaCodec VP9", 1},
+};
 #define MAX_QUEUED 120
 /* High-stability policy (load shedding) lives in shed-policy.h so the host
  * regression test compiles the real decision logic instead of a copy. */
@@ -78,7 +90,7 @@ struct encoder {
 	const char *failure_message;
 	uint8_t *pending_config;
 	size_t pending_size;
-	bool hevc;
+	const struct codec_spec *format;
 	int mode;
 	char *component;
 	uint64_t session_id, first_submit_ns, last_report_ns;
@@ -127,7 +139,7 @@ static void progress(struct encoder *e, bool final)
 	e->swap_us_sum = e->swap_max_us = 0;
 	e->swap_samples = 0;
 	mc_log(LOG_INFO, final ? PROGRESS_FORMAT("summary") : PROGRESS_FORMAT("progress"),
-	     (unsigned long long)e->session_id, e->hevc ? "hevc" : "h264",
+	     (unsigned long long)e->session_id, e->format->codec,
 	     e->component ? e->component : "none", (unsigned long long)e->flow.submitted,
 	     (unsigned long long)e->flow.output, (unsigned long long)e->delivered_frames,
 	     (unsigned long long)e->output_bytes, (unsigned long long)e->keyframes, e->queued, e->queue_bytes,
@@ -138,7 +150,7 @@ static void progress(struct encoder *e, bool final)
 static void fail(struct encoder *e, const char *message)
 {
 	mc_log(LOG_ERROR, "[android-mediacodec] session=%llu event=error codec=%s message=%s",
-	     (unsigned long long)e->session_id, e->hevc ? "hevc" : "h264", message);
+	     (unsigned long long)e->session_id, e->format->codec, message);
 	pthread_mutex_lock(&e->mutex);
 	if (!e->failed)
 		e->failure_message = message;
@@ -165,6 +177,11 @@ static uint8_t *annexb(const uint8_t *src, size_t n)
 	}
 	return out;
 }
+static bool is_hevc(const struct encoder *e)
+{
+	return strcmp(e->format->codec, "hevc") == 0;
+}
+
 static void save_config(struct encoder *e, const uint8_t *data, size_t size)
 {
 	if (size > 1048576) {
@@ -185,10 +202,10 @@ static void save_config(struct encoder *e, const uint8_t *data, size_t size)
 			e->pending_config = brealloc(e->pending_config, e->pending_size + size);
 			memcpy(e->pending_config + e->pending_size, copy, size);
 			e->pending_size += size;
-			bool complete = e->hevc ? hevc_headers_ready(e->pending_config, e->pending_size) :
+			bool complete = is_hevc(e) ? hevc_headers_ready(e->pending_config, e->pending_size) :
 				(avc_has_nal(e->pending_config, e->pending_size, 7) && avc_has_nal(e->pending_config, e->pending_size, 8));
 			if (complete) {
-				bool supported = e->hevc ? hevc_sps_8bit_420(e->pending_config, e->pending_size) :
+				bool supported = is_hevc(e) ? hevc_sps_8bit_420(e->pending_config, e->pending_size) :
 					avc_sps_8bit_420(e->pending_config, e->pending_size);
 				if (!supported)
 					error = "Codec SPS is not supported single-layer 8-bit 4:2:0";
@@ -206,13 +223,31 @@ static void save_config(struct encoder *e, const uint8_t *data, size_t size)
 	if (error)
 		fail(e, error);
 }
+static void save_av1_config(struct encoder *e, const uint8_t *data, size_t size)
+{
+	size_t header_size;
+	const uint8_t *header = av1_sequence_header(data, size, &header_size);
+	if (!header)
+		return;
+	if (header_size > 1048576) {
+		fail(e, "AV1 sequence header exceeds 1 MiB");
+		return;
+	}
+	pthread_mutex_lock(&e->mutex);
+	if (!e->extra) {
+		e->extra = bmemdup(header, header_size);
+		e->extra_size = header_size;
+	}
+	pthread_mutex_unlock(&e->mutex);
+}
+
 static void format_config(struct encoder *e)
 {
 	AMediaFormat *f = AMediaCodec_getOutputFormat(e->codec);
 	if (!f)
 		return;
 	mc_log(LOG_INFO, "[android-mediacodec] session=%llu event=format codec=%s format=%s",
-	     (unsigned long long)e->session_id, e->hevc ? "hevc" : "h264", AMediaFormat_toString(f));
+	     (unsigned long long)e->session_id, e->format->codec, AMediaFormat_toString(f));
 	void *a = NULL, *b = NULL;
 	size_t an = 0, bn = 0;
 	AMediaFormat_getBuffer(f, "csd-0", &a, &an);
@@ -222,7 +257,9 @@ static void format_config(struct encoder *e)
 		fail(e, "Codec configuration exceeds 1 MiB");
 		return;
 	}
-	if (a && an) {
+	if (a && an && !strcmp(e->format->codec, "av1"))
+		save_av1_config(e, a, an);
+	else if (a && an && strcmp(e->format->codec, "vp9")) {
 		uint8_t *x = annexb(a, an), *y = b && bn ? annexb(b, bn) : NULL;
 		if (x && (!bn || y)) {
 			uint8_t *both = bmalloc(an + bn);
@@ -247,8 +284,8 @@ static void inband_config(struct encoder *e, const uint8_t *data, size_t size)
 	while (hevc_next_nal(data, size, &cursor, &start, &end)) {
 		if (start >= end)
 			continue;
-		unsigned type = e->hevc ? (data[start] >> 1) & 63 : data[start] & 31;
-		bool parameter = e->hevc ? (type >= 32 && type <= 34) : (type == 7 || type == 8);
+		unsigned type = is_hevc(e) ? (data[start] >> 1) & 63 : data[start] & 31;
+		bool parameter = is_hevc(e) ? (type >= 32 && type <= 34) : (type == 7 || type == 8);
 		if (!parameter)
 			continue;
 		size_t length = end - start;
@@ -270,6 +307,8 @@ static void *drain(void *data)
 {
 	struct encoder *e = data;
 	int64_t eos_deadline_ns = 0;
+	const bool av1 = !strcmp(e->format->codec, "av1");
+	const bool vp9 = !strcmp(e->format->codec, "vp9");
 	for (;;) {
 		pthread_mutex_lock(&e->mutex);
 		bool stop = e->stopping;
@@ -310,9 +349,12 @@ static void *drain(void *data)
 			fail(e, "Invalid MediaCodec output buffer");
 		else if (info.flags & AMEDIACODEC_BUFFER_FLAG_PARTIAL_FRAME)
 			fail(e, "Partial video output buffers are unsupported");
-		else if (info.size && (info.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG))
-			save_config(e, buf + info.offset, (size_t)info.size);
-		else if (info.size) {
+		else if (info.size && (info.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG)) {
+			if (av1)
+				save_av1_config(e, buf + info.offset, (size_t)info.size);
+			else if (!vp9)
+				save_config(e, buf + info.offset, (size_t)info.size);
+		} else if (info.size) {
 			if (info.presentationTimeUs < 0 ||
 			    (e->have_output_pts && info.presentationTimeUs < e->last_output_us)) {
 				AMediaCodec_releaseOutputBuffer(e->codec, (size_t)index, false);
@@ -322,14 +364,28 @@ static void *drain(void *data)
 			e->have_output_pts = true;
 			e->last_output_us = info.presentationTimeUs;
 			// Copy each access unit once; validation and queue ownership share it.
-			uint8_t *access = (size_t)info.size <= MAX_ACCESS_UNIT ? annexb(buf + info.offset, (size_t)info.size) : NULL;
+			const uint8_t *payload = buf + info.offset;
+			const size_t size = (size_t)info.size;
+			uint8_t *access = NULL;
+			if (size <= MAX_ACCESS_UNIT) {
+				if (av1 || vp9) {
+					/* VP9 Profile 0 starts with frame marker 2 and profile bits 0. */
+					if (!vp9 || (payload[0] & 0xf0) == 0x80)
+						access = bmemdup(payload, size);
+				} else {
+					access = annexb(payload, size);
+				}
+			}
 			if (!access)
 				fail(e, "Invalid or oversized MediaCodec access unit");
 			pthread_mutex_lock(&e->mutex);
-			bool have_extra = e->extra != NULL;
+			bool have_extra = vp9 || e->extra != NULL;
 			pthread_mutex_unlock(&e->mutex);
 			if (access && !have_extra) {
-				inband_config(e, access, (size_t)info.size);
+				if (av1)
+					save_av1_config(e, access, size);
+				else
+					inband_config(e, access, size);
 				pthread_mutex_lock(&e->mutex);
 				have_extra = e->extra != NULL;
 				pthread_mutex_unlock(&e->mutex);
@@ -363,7 +419,7 @@ static void *drain(void *data)
 					if (p->key) e->keyframes++;
 					if (e->flow.output == 1)
 						mc_log(LOG_INFO, "[android-mediacodec] session=%llu event=first-packet codec=%s headers=valid keyframe=%d bytes=%zu",
-							 (unsigned long long)e->session_id, e->hevc ? "hevc" : "h264", p->key, p->size);
+							 (unsigned long long)e->session_id, e->format->codec, p->key, p->size);
 				}
 				pthread_cond_broadcast(&e->ready);
 				pthread_mutex_unlock(&e->mutex);
@@ -384,18 +440,11 @@ static void *drain(void *data)
 	pthread_mutex_unlock(&e->mutex);
 	return NULL;
 }
-static const char *name(void *unused)
+static const char *name(void *type_data)
 {
-	UNUSED_PARAMETER(unused);
-	return obs_module_text("Encoder");
+	return ((const struct codec_spec *)type_data)->name;
 }
-#ifdef ENABLE_HEVC
-static const char *name_hevc(void *unused)
-{
-	UNUSED_PARAMETER(unused);
-	return obs_module_text("EncoderHEVC");
-}
-#endif
+
 static void defaults(obs_data_t *s)
 {
 	obs_data_set_default_int(s, "bitrate", 10000);
@@ -498,9 +547,9 @@ static bool start_candidate(struct encoder *e, const char *component, int w, int
 	AMediaFormat *f = AMediaFormat_new();
 	if (!f)
 		goto error;
-	AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, e->hevc ? "video/hevc" : "video/avc");
-	if (e->hevc)
-		AMediaFormat_setInt32(f, "profile", 1); /* HEVCProfileMain, 8-bit */
+	AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, e->format->mime);
+	if (e->format->profile)
+		AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_PROFILE, e->format->profile);
 	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_WIDTH, w);
 	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, h);
 	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7f000789);
@@ -536,7 +585,7 @@ static bool start_candidate(struct encoder *e, const char *component, int w, int
 	e->started = true;
 	e->component = bstrdup(component);
 	mc_log(LOG_INFO, "[android-mediacodec] session=%llu event=started codec=%s component=%s hardware=true software=false input=Surface width=%d height=%d fps_num=%d fps_den=%d bitrate=%lld",
-	     (unsigned long long)e->session_id, e->hevc ? "hevc" : "h264", component, w, h, query_num,
+	     (unsigned long long)e->session_id, e->format->codec, component, w, h, query_num,
 	     e->fps_den, (long long)e->bitrate);
 	return true;
 error:
@@ -548,7 +597,7 @@ static void *create(obs_data_t *s, obs_encoder_t *obs)
 {
 	struct encoder *e = bzalloc(sizeof(*e));
 	e->obs = obs;
-	e->hevc = strcmp(obs_encoder_get_id(obs), CODEC_HEVC_ID) == 0;
+	e->format = obs_encoder_get_type_data(obs);
 	e->session_id = os_gettime_ns();
 	pthread_mutex_init(&e->mutex, NULL);
 	pthread_condattr_t attr;
@@ -633,7 +682,7 @@ static void *create(obs_data_t *s, obs_encoder_t *obs)
 		calldata_set_int(&cd, "fps_num", query_num);
 		calldata_set_int(&cd, "fps_den", e->fps_den);
 		calldata_set_int(&cd, "index", index);
-		calldata_set_string(&cd, "mime", e->hevc ? "video/hevc" : "video/avc");
+		calldata_set_string(&cd, "mime", e->format->mime);
 		calldata_set_int(&cd, "bitrate", e->mode == 0 ? 0 : e->bitrate);
 		calldata_set_int(&cd, "mode", e->mode);
 		char *component = NULL;
@@ -651,7 +700,7 @@ static void *create(obs_data_t *s, obs_encoder_t *obs)
 		calldata_t controls;
 		calldata_init(&controls);
 		calldata_set_string(&controls, "name", component);
-		calldata_set_string(&controls, "mime", e->hevc ? "video/hevc" : "video/avc");
+		calldata_set_string(&controls, "mime", e->format->mime);
 		calldata_set_int(&controls, "mode", e->mode);
 		bool supported = proc_handler_call(obs_get_proc_handler(), "android_mediacodec_query_controls", &controls) &&
 			calldata_bool(&controls, "supported");
@@ -795,7 +844,7 @@ static bool encode(void *data, struct encoder_texture *t, int64_t pts, uint64_t 
 		mc_log(shed ? LOG_WARNING : LOG_INFO,
 			"[android-mediacodec] session=%llu event=%s codec=%s pending=%llu degraded=%d dropped_load=%llu",
 			(unsigned long long)e->session_id, shed ? "shedding" : "recovered",
-			e->hevc ? "hevc" : "h264", (unsigned long long)pending_now, shed_degraded,
+			e->format->codec, (unsigned long long)pending_now, shed_degraded,
 			(unsigned long long)shed_dropped);
 	if (shed) {
 		/* Keep draining while shedding: the codec is still producing packets
@@ -922,9 +971,7 @@ static void video_info(void *data, struct video_scale_info *info)
 	info->range = VIDEO_RANGE_PARTIAL;
 }
 static struct obs_encoder_info encoder_info = {
-	.id = CODEC_ID,
 	.type = OBS_ENCODER_VIDEO,
-	.codec = "h264",
 	.get_name = name,
 	.create = create,
 	.destroy = destroy,
@@ -939,13 +986,22 @@ static struct obs_encoder_info encoder_info = {
 };
 bool obs_module_load(void)
 {
-	obs_register_encoder(&encoder_info);
-#ifdef ENABLE_HEVC
-	struct obs_encoder_info hevc_info = encoder_info;
-	hevc_info.id = CODEC_HEVC_ID;
-	hevc_info.codec = "hevc";
-	hevc_info.get_name = name_hevc;
-	obs_register_encoder(&hevc_info);
-#endif
+	for (size_t i = 0; i < sizeof(codecs) / sizeof(codecs[0]); ++i) {
+		const struct codec_spec *format = &codecs[i];
+		calldata_t cd;
+		calldata_init(&cd);
+		calldata_set_string(&cd, "mime", format->mime);
+		bool available = proc_handler_call(obs_get_proc_handler(), "android_mediacodec_encoder_available", &cd) &&
+				 calldata_bool(&cd, "supported");
+		calldata_free(&cd);
+		if (!available)
+			continue;
+
+		struct obs_encoder_info info = encoder_info;
+		info.id = format->id;
+		info.codec = format->codec;
+		info.type_data = (void *)format;
+		obs_register_encoder(&info);
+	}
 	return true;
 }

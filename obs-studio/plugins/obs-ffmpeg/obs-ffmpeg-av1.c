@@ -316,8 +316,8 @@ obs_properties_t *av1_properties(enum av1_encoder_type type)
 		obs_property_list_add_int(p, "Hmm, not bad speed (11)", 11);
 		obs_property_list_add_int(p, "Whoa, although quality might be not so great (12)", 12);
 	} else if (type == AV1_ENCODER_TYPE_AOM) {
-		obs_property_list_add_int(p, "Probably too slow (7)", 7);
-		obs_property_list_add_int(p, "Okay (8)", 8);
+		obs_property_list_add_int(p, obs_module_text("AOMAV1PresetQuality"), 7);
+		obs_property_list_add_int(p, obs_module_text("AOMAV1PresetSpeed"), 8);
 #ifndef __ANDROID__
 		obs_property_list_add_int(p, "Fast (9)", 9);
 		obs_property_list_add_int(p, "Fastest (10)", 10);

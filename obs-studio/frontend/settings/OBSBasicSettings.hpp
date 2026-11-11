@@ -22,6 +22,7 @@
 
 #include <utility/FFmpegShared.hpp>
 
+#include <QHash>
 #include <QPointer>
 
 #define VOLUME_METER_DECAY_FAST 23.53
@@ -94,6 +95,7 @@ private:
 	QPointer<QLabel> advOutRecWarning;
 	QPointer<QLabel> simpleOutRecWarning;
 
+	QHash<QString, QString> softwarePresets;
 	QString curPreset;
 	QString curQSVPreset;
 	QString curNVENCPreset;
@@ -303,6 +305,8 @@ private:
 	void UpdateAdvOutStreamDelayEstimate();
 
 	void FillSimpleRecordingValues();
+	void FillSimpleSoftwarePresets(QComboBox *combo, const QString &encoder, bool recording);
+	static void GroupAndroidVideoEncoders(QComboBox *combo);
 	void FillAudioMonitoringDevices();
 
 	void RecalcOutputResPixels(const char *resText);

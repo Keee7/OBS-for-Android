@@ -45,6 +45,34 @@ bool OBSAndroidAvcAvailable(uint32_t width, uint32_t height, uint32_t num, uint3
 	return !findCodec("video/avc", width, height, num, den).isEmpty();
 }
 
+static bool hasHardwareEncoder(const char *mime, jint mode)
+{
+	const auto type = QJniObject::fromString(QString::fromUtf8(mime));
+	return QJniObject::callStaticMethod<jboolean>("com/obsproject/studio/ObsCodecCapabilities",
+		"hasHardwareEncoder", "(Ljava/lang/String;I)Z", type.object<jstring>(), mode);
+}
+
+bool OBSAndroidCbrEncoderAvailable(const char *id)
+{
+	const char *codec = obs_get_encoder_codec(id);
+	if (!codec)
+		return false;
+	if (strcmp(codec, "h264") == 0)
+		return hasHardwareEncoder("video/avc", 2);
+	if (strcmp(codec, "hevc") == 0)
+		return hasHardwareEncoder("video/hevc", 2);
+	if (strcmp(codec, "av1") == 0)
+		return hasHardwareEncoder("video/av01", 2);
+	if (strcmp(codec, "vp9") == 0)
+		return hasHardwareEncoder("video/x-vnd.on2.vp9", 2);
+	return false;
+}
+
+static void queryEncoderAvailability(void *, calldata_t *cd)
+{
+	calldata_set_bool(cd, "supported", hasHardwareEncoder(calldata_string(cd, "mime"), -1));
+}
+
 static void queryCodec(void *, calldata_t *cd)
 {
 	const auto width = calldata_int(cd, "width");
@@ -58,8 +86,7 @@ static void queryCodec(void *, calldata_t *cd)
 	QByteArray name;
 	if (width > 0 && height > 0 && num > 0 && den > 0 &&
 	    width <= INT32_MAX && height <= INT32_MAX && num <= INT32_MAX && den <= INT32_MAX &&
-	    index >= 0 && index <= INT32_MAX && bitrate >= 0 && bitrate <= INT32_MAX && mode >= 0 && mode <= 2 && mime &&
-	    (strcmp(mime, "video/avc") == 0 || strcmp(mime, "video/hevc") == 0))
+	    index >= 0 && index <= INT32_MAX && bitrate >= 0 && bitrate <= INT32_MAX && mode >= 0 && mode <= 2 && mime)
 		name = findCodec(mime, uint32_t(width), uint32_t(height), uint32_t(num), uint32_t(den), uint32_t(index), uint32_t(bitrate), int(mode));
 	calldata_set_string(cd, "name", name.constData());
 	blog(LOG_INFO, "MediaCodec %s %lldx%lld %lld/%lld bitrate=%lld index=%lld: %s",
@@ -100,6 +127,9 @@ void OBSAndroidRegisterCodecQuery()
 	JavaVM *vm = nullptr;
 	if (env.isValid() && env->GetJavaVM(&vm) == JNI_OK)
 		obs_android_set_java_vm(vm);
+
+	proc_handler_add(obs_get_proc_handler(), "void android_mediacodec_encoder_available(string mime, out bool supported)",
+		queryEncoderAvailability, nullptr);
 
 	proc_handler_add(obs_get_proc_handler(),
 		"void android_mediacodec_query_controls(string name, string mime, int mode, out bool supported, out int complexity_min, out int complexity_max, out int quality_min, out int quality_max)",

@@ -29,6 +29,7 @@
 #endif
 #include <utility/audio-encoders.hpp>
 #ifdef __ANDROID__
+#include <utility/AndroidCodecCapabilities.hpp>
 #include <utility/android-window-fit.hpp>
 #endif
 #include <utility/BaseLexer.hpp>
@@ -447,6 +448,17 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	HookWidget(ui->simpleOutputABitrate, COMBO_CHANGED,  OUTPUTS_CHANGED);
 	HookWidget(ui->simpleOutAdvanced,    CHECK_CHANGED,  OUTPUTS_CHANGED);
 	HookWidget(ui->simpleOutPreset,      COMBO_CHANGED,  OUTPUTS_CHANGED);
+	HookWidget(ui->simpleOutRecPreset,   COMBO_CHANGED,  OUTPUTS_CHANGED);
+	connect(ui->simpleOutPreset, &QComboBox::activated, this, [this](int index) {
+		const QString encoder = ui->simpleOutStrEncoder->currentData().toString();
+		if (const char *key = SimpleSoftwarePresetKey(QT_TO_UTF8(encoder), false))
+			softwarePresets.insert(QString::fromLatin1(key), ui->simpleOutPreset->itemData(index).toString());
+	});
+	connect(ui->simpleOutRecPreset, &QComboBox::activated, this, [this](int index) {
+		const QString encoder = ui->simpleOutRecEncoder->currentData().toString();
+		if (const char *key = SimpleSoftwarePresetKey(QT_TO_UTF8(encoder), true))
+			softwarePresets.insert(QString::fromLatin1(key), ui->simpleOutRecPreset->itemData(index).toString());
+	});
 	HookWidget(ui->simpleOutCustom,      EDIT_CHANGED,   OUTPUTS_CHANGED);
 	HookWidget(ui->simpleOutRecQuality,  COMBO_CHANGED,  OUTPUTS_CHANGED);
 	HookWidget(ui->simpleOutRecEncoder,  COMBO_CHANGED,  OUTPUTS_CHANGED);
@@ -1792,6 +1804,27 @@ static inline bool IsSurround(const char *speakers)
 	return false;
 }
 
+static constexpr int UnavailableEncoderRole = Qt::UserRole + 1;
+
+static int AddUnavailableMediaCodecEncoder(QComboBox *combo, const char *encoder)
+{
+#ifdef __ANDROID__
+	const QString id = QT_UTF8(encoder);
+	if (id.startsWith("android_mediacodec")) {
+		const int row = combo->count();
+		combo->addItem(QTStr("Basic.Settings.Output.Encoder.Unavailable").arg(id), id);
+		combo->setItemData(row, true, UnavailableEncoderRole);
+		if (auto *model = qobject_cast<QStandardItemModel *>(combo->model()))
+			model->item(row)->setFlags(Qt::NoItemFlags);
+		return row;
+	}
+#else
+	UNUSED_PARAMETER(combo);
+	UNUSED_PARAMETER(encoder);
+#endif
+	return -1;
+}
+
 void OBSBasicSettings::LoadSimpleOutputSettings()
 {
 	const char *path = config_get_string(main->Config(), "SimpleOutput", "FilePath");
@@ -1871,9 +1904,10 @@ void OBSBasicSettings::LoadSimpleOutputSettings()
 	ui->simpleOutRecQuality->setCurrentIndex(idx);
 
 	idx = ui->simpleOutStrEncoder->findData(QString(streamEnc));
-	if (idx == -1) {
+	if (idx == -1)
+		idx = AddUnavailableMediaCodecEncoder(ui->simpleOutStrEncoder, streamEnc);
+	if (idx == -1)
 		idx = 0;
-	}
 	ui->simpleOutStrEncoder->setCurrentIndex(idx);
 
 	idx = ui->simpleOutStrAEncoder->findData(QString(streamAudioEnc));
@@ -1883,6 +1917,8 @@ void OBSBasicSettings::LoadSimpleOutputSettings()
 	ui->simpleOutStrAEncoder->setCurrentIndex(idx);
 
 	idx = ui->simpleOutRecEncoder->findData(QString(recEnc));
+	if (idx == -1)
+		idx = AddUnavailableMediaCodecEncoder(ui->simpleOutRecEncoder, recEnc);
 	ui->simpleOutRecEncoder->setCurrentIndex(idx);
 
 	idx = ui->simpleOutRecAEncoder->findData(QString(recAudioEnc));
@@ -2028,6 +2064,12 @@ void OBSBasicSettings::LoadAdvOutputStreamingEncoderProperties()
 	curAdvStreamEncoder = type;
 
 	if (!SetComboByValue(ui->advOutEncoder, type)) {
+		const int unavailable = AddUnavailableMediaCodecEncoder(ui->advOutEncoder, type);
+		if (unavailable >= 0) {
+			ui->advOutEncoder->setCurrentIndex(unavailable);
+			UpdateStreamDelayEstimate();
+			return;
+		}
 		uint32_t caps = obs_get_encoder_caps(type);
 		if ((caps & ENCODER_HIDE_FLAGS) != 0) {
 			QString encName = QT_UTF8(obs_encoder_get_display_name(type));
@@ -2141,6 +2183,11 @@ void OBSBasicSettings::LoadAdvOutputRecordingEncoderProperties()
 	curAdvRecordEncoder = type;
 
 	if (!SetComboByValue(ui->advOutRecEncoder, type)) {
+		const int unavailable = AddUnavailableMediaCodecEncoder(ui->advOutRecEncoder, type);
+		if (unavailable >= 0) {
+			ui->advOutRecEncoder->setCurrentIndex(unavailable);
+			return;
+		}
 		uint32_t caps = obs_get_encoder_caps(type);
 		if ((caps & ENCODER_HIDE_FLAGS) != 0) {
 			QString encName = QT_UTF8(obs_encoder_get_display_name(type));
@@ -3574,9 +3621,11 @@ void OBSBasicSettings::SaveOutputSettings()
 	SaveCheckBox(ui->simpleNoSpace, "SimpleOutput", "FileNameWithoutSpace");
 	SaveComboData(ui->simpleOutRecFormat, "SimpleOutput", "RecFormat2");
 	SaveCheckBox(ui->simpleOutAdvanced, "SimpleOutput", "UseAdvanced");
-	if (encoder != SIMPLE_ENCODER_ANDROID_MEDIACODEC && encoder != SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC &&
-	    encoder != SIMPLE_ENCODER_SOFTWARE_HEVC && encoder != SIMPLE_ENCODER_SOFTWARE_AV1)
+	if (!IsSimpleMediaCodecEncoder(QT_TO_UTF8(encoder)) && !SimpleSoftwarePresetKey(QT_TO_UTF8(encoder), false))
 		SaveComboData(ui->simpleOutPreset, "SimpleOutput", presetType);
+	for (auto it = softwarePresets.cbegin(); it != softwarePresets.cend(); ++it)
+		config_set_string(main->Config(), "SimpleOutput", QT_TO_UTF8(it.key()), QT_TO_UTF8(it.value()));
+	softwarePresets.clear();
 	SaveEdit(ui->simpleOutCustom, "SimpleOutput", "x264Settings");
 	SaveComboData(ui->simpleOutRecQuality, "SimpleOutput", "RecQuality");
 	SaveComboData(ui->simpleOutRecEncoder, "SimpleOutput", "RecEncoder");
@@ -4745,6 +4794,8 @@ static void DisableIncompatibleCodecs(QComboBox *cbox, const QString &format, co
 	/* Check if selected encoders and output format are compatible, disable incompatible items. */
 	bool currentCompatible = true;
 	for (int idx = 0; idx < cbox->count(); idx++) {
+		if (cbox->itemData(idx, UnavailableEncoderRole).toBool())
+			continue;
 		QString encName = cbox->itemData(idx).toString();
 		string encoderId = (encName == "none") ? streamEncoder.toStdString() : encName.toStdString();
 		QString encDisplayName = (encName == "none") ? strEncLabel
@@ -4761,9 +4812,9 @@ static void DisableIncompatibleCodecs(QComboBox *cbox, const QString &format, co
 
 		const char *codec = obs_get_encoder_codec(encoderId.c_str());
 
-		bool is_compatible = ContainerSupportsCodec(format.toStdString(), codec);
+		bool is_compatible = codec && ContainerSupportsCodec(format.toStdString(), codec);
 		/* Fall back to FFmpeg check if codec not one of the built-in ones. */
-		if (!is_compatible && !IsBuiltinCodec(codec)) {
+		if (codec && !is_compatible && !IsBuiltinCodec(codec)) {
 			string ext = GetFormatExt(QT_TO_UTF8(format));
 			is_compatible = FFCodecAndFormatCompatible(codec, ext.c_str());
 		}
@@ -4969,6 +5020,54 @@ bool EncoderAvailable(const char *encoder)
 	return false;
 }
 
+void OBSBasicSettings::GroupAndroidVideoEncoders(QComboBox *combo)
+{
+#ifdef __ANDROID__
+	auto *model = qobject_cast<QStandardItemModel *>(combo->model());
+	if (!model)
+		return;
+	const QSignalBlocker block(combo);
+	int hardwareRow = 0;
+	for (int row = 0; row < combo->count(); ++row) {
+		if (!combo->itemData(row).toString().startsWith("android_mediacodec"))
+			continue;
+		if (row != hardwareRow)
+			model->insertRow(hardwareRow, model->takeRow(row));
+		++hardwareRow;
+	}
+#else
+	UNUSED_PARAMETER(combo);
+#endif
+}
+
+void OBSBasicSettings::FillSimpleSoftwarePresets(QComboBox *combo, const QString &encoder, bool recording)
+{
+	const char *key = SimpleSoftwarePresetKey(QT_TO_UTF8(encoder), recording);
+	if (!key)
+		return;
+	const QSignalBlocker block(combo);
+	combo->clear();
+	const char *id = get_simple_output_encoder(QT_TO_UTF8(encoder));
+	OBSProperties props = obs_get_encoder_properties(id);
+	obs_property_t *p = props ? obs_properties_get(props, "preset") : nullptr;
+	if (!p)
+		return;
+
+	const bool av1 = encoder == SIMPLE_ENCODER_SOFTWARE_AV1;
+	const size_t count = obs_property_list_item_count(p);
+	for (size_t i = 0; i < count; ++i) {
+		const QString value = av1 ? QString::number(obs_property_list_item_int(p, i))
+					  : QT_UTF8(obs_property_list_item_string(p, i));
+		combo->addItem(QT_UTF8(obs_property_list_item_name(p, i)), value);
+	}
+	const QString preset = softwarePresets.value(QString::fromLatin1(key),
+		QT_UTF8(config_get_string(main->Config(), "SimpleOutput", key)));
+	int index = combo->findData(preset);
+	if (index < 0)
+		index = combo->findData(av1 ? QStringLiteral("8") : QStringLiteral("ultrafast"));
+	combo->setCurrentIndex(index);
+}
+
 void OBSBasicSettings::FillSimpleRecordingValues()
 {
 #define ADD_QUALITY(str) \
@@ -5003,10 +5102,14 @@ void OBSBasicSettings::FillSimpleRecordingValues()
 		ui->simpleOutRecEncoder->addItem(QStringLiteral("Software HEVC (x265)"), QString(SIMPLE_ENCODER_SOFTWARE_HEVC));
 	if (EncoderAvailable("ffmpeg_aom_av1"))
 		ui->simpleOutRecEncoder->addItem(QStringLiteral("Software AV1 (AOM)"), QString(SIMPLE_ENCODER_SOFTWARE_AV1));
-	if (EncoderAvailable("android_mediacodec_h264"))
+	if (OBSAndroidCbrEncoderAvailable("android_mediacodec_h264"))
 		ui->simpleOutRecEncoder->addItem(QStringLiteral("Android MediaCodec H.264"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC));
-	if (EncoderAvailable("android_mediacodec_hevc"))
+	if (OBSAndroidCbrEncoderAvailable("android_mediacodec_hevc"))
 		ui->simpleOutRecEncoder->addItem(QStringLiteral("Android MediaCodec HEVC (H.265)"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC));
+	if (OBSAndroidCbrEncoderAvailable("android_mediacodec_av1"))
+		ui->simpleOutRecEncoder->addItem(QStringLiteral("Android MediaCodec AV1"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1));
+	if (OBSAndroidCbrEncoderAvailable("android_mediacodec_vp9"))
+		ui->simpleOutRecEncoder->addItem(QStringLiteral("Android MediaCodec VP9"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_VP9));
 #endif
 	ui->simpleOutRecEncoder->addItem(ENCODER_STR("Software"), QString(SIMPLE_ENCODER_X264));
 	ui->simpleOutRecEncoder->addItem(ENCODER_STR("SoftwareLowCPU"), QString(SIMPLE_ENCODER_X264_LOWCPU));
@@ -5061,6 +5164,8 @@ void OBSBasicSettings::FillSimpleRecordingValues()
 		ui->simpleOutRecAEncoder->addItem(QTStr("Basic.Settings.Output.Simple.Codec.Opus"), "opus");
 	}
 
+	GroupAndroidVideoEncoders(ui->simpleOutRecEncoder);
+
 #undef ADD_QUALITY
 #undef ENCODER_STR
 }
@@ -5101,8 +5206,6 @@ void OBSBasicSettings::SimpleRecordingQualityChanged()
 	SimpleReplayBufferChanged();
 }
 
-extern const char *get_simple_output_encoder(const char *encoder);
-
 void OBSBasicSettings::SimpleStreamingEncoderChanged()
 {
 	QString encoder = ui->simpleOutStrEncoder->currentData().toString();
@@ -5116,10 +5219,15 @@ void OBSBasicSettings::SimpleStreamingEncoderChanged()
 	ui->simpleOutCustom->setVisible(ui->simpleOutAdvanced->isChecked());
 	ui->simpleOutCustomLabel->setVisible(ui->simpleOutAdvanced->isChecked());
 
-	if (encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC || encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC ||
-	    encoder == SIMPLE_ENCODER_SOFTWARE_HEVC || encoder == SIMPLE_ENCODER_SOFTWARE_AV1) {
-		// Android hardware AVC has bitrate/keyframe settings, not x264 speed presets.
-		// Preserve the existing x264 settings when switching between encoders.
+	if (SimpleSoftwarePresetKey(QT_TO_UTF8(encoder), false)) {
+		ui->simpleOutAdvanced->setVisible(false);
+		ui->simpleOutCustom->setVisible(false);
+		ui->simpleOutCustomLabel->setVisible(false);
+		FillSimpleSoftwarePresets(ui->simpleOutPreset, encoder, false);
+		return;
+	}
+
+	if (IsSimpleMediaCodecEncoder(QT_TO_UTF8(encoder))) {
 		ui->simpleOutAdvanced->setVisible(false);
 		ui->simpleOutPreset->setVisible(false);
 		ui->simpleOutPresetLabel->setVisible(false);
@@ -5421,6 +5529,8 @@ static void DisableIncompatibleSimpleCodecs(QComboBox *cbox, const QString &form
 
 	bool currentCompatible = true;
 	for (int idx = 0; idx < cbox->count(); idx++) {
+		if (cbox->itemData(idx, UnavailableEncoderRole).toBool())
+			continue;
 		QString encName = cbox->itemData(idx).toString();
 		QString codec;
 
@@ -5588,6 +5698,14 @@ void OBSBasicSettings::SimpleRecordingEncoderChanged()
 		}
 		warning += SIMPLE_OUTPUT_WARNING("CannotPause");
 	}
+
+	const QString recEncoder = ui->simpleOutRecEncoder->currentData().toString();
+	const bool showPreset = qual != "Stream" && qual != "Lossless" &&
+				SimpleSoftwarePresetKey(QT_TO_UTF8(recEncoder), true);
+	ui->simpleOutRecPreset->setVisible(showPreset);
+	ui->simpleOutRecPresetLabel->setVisible(showPreset);
+	if (showPreset)
+		FillSimpleSoftwarePresets(ui->simpleOutRecPreset, recEncoder, true);
 
 	if (qual != "Lossless" && (format == "mp4" || format == "mov")) {
 		if (!warning.isEmpty()) {

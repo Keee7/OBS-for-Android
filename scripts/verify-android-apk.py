@@ -120,6 +120,10 @@ def main():
                         errors.append('obs-ffmpeg.so contains the obsolete FFmpeg codec_name patch; rebuild FFmpeg')
                     if b'Output buffer width=%d height=%d stride=%d slice-height=%d' not in payload:
                         errors.append('FFmpeg MediaCodec crop and layout patch missing from APK')
+                    if b'No hardware-accelerated MediaCodec video decoder found' not in payload:
+                        errors.append('FFmpeg strict hardware decoder selection missing from APK')
+                    if b'Display dimensions %dx%d exceed storage %dx%d' not in payload:
+                        errors.append('FFmpeg libaom AV1 software decoder missing from APK')
                     if b'FFmpeg MediaCodec Java VM registered' not in payload:
                         errors.append('FFmpeg MediaCodec Java VM registration missing from APK')
                 if short == 'android-screen.so' and b'alpha_mode' not in payload:

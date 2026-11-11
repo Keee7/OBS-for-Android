@@ -1,4 +1,7 @@
 #include "OBSBasicSettings.hpp"
+#ifdef __ANDROID__
+#include <utility/AndroidCodecCapabilities.hpp>
+#endif
 
 #ifdef YOUTUBE_ENABLED
 #include <docks/YouTubeAppDock.hpp>
@@ -1424,6 +1427,8 @@ bool OBSBasicSettings::UpdateResFPSLimits()
 
 static bool service_supports_codec(const char **codecs, const char *codec)
 {
+	if (!codec)
+		return false;
 	if (!codecs) {
 		return true;
 	}
@@ -1469,7 +1474,7 @@ bool OBSBasicSettings::ServiceAndVCodecCompatible()
 	if (simple) {
 		QString encoder = ui->simpleOutStrEncoder->currentData().toString();
 		const char *id = get_simple_output_encoder(QT_TO_UTF8(encoder));
-		codec = obs_get_encoder_codec(id);
+		codec = id ? obs_get_encoder_codec(id) : nullptr;
 	} else {
 		QString encoder = ui->advOutEncoder->currentData().toString();
 		codec = obs_get_encoder_codec(QT_TO_UTF8(encoder));
@@ -1764,10 +1769,12 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 	}
 
 	ui->advOutEncoder->model()->sort(0);
+	GroupAndroidVideoEncoders(ui->advOutEncoder);
 	ui->advOutAEncoder->model()->sort(0);
 
 	if (!streamOnly) {
 		ui->advOutRecEncoder->model()->sort(0);
+		GroupAndroidVideoEncoders(ui->advOutRecEncoder);
 		ui->advOutRecEncoder->insertItem(0, TEXT_USE_STREAM_ENC, "none");
 		ui->advOutRecAEncoder->model()->sort(0);
 		ui->advOutRecAEncoder->insertItem(0, TEXT_USE_STREAM_ENC, "none");
@@ -1783,10 +1790,15 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 		ui->simpleOutStrEncoder->addItem(QStringLiteral("Software HEVC (x265)"), QString(SIMPLE_ENCODER_SOFTWARE_HEVC));
 	if (service_supports_encoder(vcodecs, "ffmpeg_aom_av1"))
 		ui->simpleOutStrEncoder->addItem(QStringLiteral("Software AV1 (AOM)"), QString(SIMPLE_ENCODER_SOFTWARE_AV1));
-	if (service_supports_encoder(vcodecs, "android_mediacodec_h264"))
+	if (service_supports_encoder(vcodecs, "android_mediacodec_h264") &&
+	    OBSAndroidCbrEncoderAvailable("android_mediacodec_h264"))
 		ui->simpleOutStrEncoder->addItem(QStringLiteral("Android MediaCodec H.264"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC));
-	if (service_supports_encoder(vcodecs, "android_mediacodec_hevc"))
+	if (service_supports_encoder(vcodecs, "android_mediacodec_hevc") &&
+	    OBSAndroidCbrEncoderAvailable("android_mediacodec_hevc"))
 		ui->simpleOutStrEncoder->addItem(QStringLiteral("Android MediaCodec HEVC (H.265)"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC));
+	if (service_supports_encoder(vcodecs, "android_mediacodec_av1") &&
+	    OBSAndroidCbrEncoderAvailable("android_mediacodec_av1"))
+		ui->simpleOutStrEncoder->addItem(QStringLiteral("Android MediaCodec AV1"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1));
 #endif
 	ui->simpleOutStrEncoder->addItem(ENCODER_STR("Software"), QString(SIMPLE_ENCODER_X264));
 #ifdef _WIN32
@@ -1851,6 +1863,8 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 		ui->simpleOutStrAEncoder->addItem(QTStr("Basic.Settings.Output.Simple.Codec.Opus"), "opus");
 	}
 #undef ENCODER_STR
+
+	GroupAndroidVideoEncoders(ui->simpleOutStrEncoder);
 
 	/* ------------------------------------------------- */
 	/* Find fallback encoders                            */

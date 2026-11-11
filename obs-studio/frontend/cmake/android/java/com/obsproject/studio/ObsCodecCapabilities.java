@@ -32,6 +32,48 @@ public final class ObsCodecCapabilities {
     private static final LinkedHashMap<String, String[]> cache = new LinkedHashMap<>();
     private static MediaCodecInfo[] codecs;
 
+    private static int encoderProfile(String mime) {
+        switch (mime) {
+        case "video/avc": return 0;
+        case "video/hevc": return MediaCodecInfo.CodecProfileLevel.HEVCProfileMain;
+        case "video/av01": return MediaCodecInfo.CodecProfileLevel.AV1ProfileMain8;
+        case "video/x-vnd.on2.vp9": return MediaCodecInfo.CodecProfileLevel.VP9Profile0;
+        default: return -1;
+        }
+    }
+
+    private static boolean supportsSurfaceProfile(MediaCodecInfo.CodecCapabilities caps, int profile) {
+        boolean surface = false;
+        for (int color : caps.colorFormats)
+            if (color == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) surface = true;
+        if (!surface || caps.getVideoCapabilities() == null || caps.getEncoderCapabilities() == null)
+            return false;
+        if (profile == 0) return true;
+        for (MediaCodecInfo.CodecProfileLevel p : caps.profileLevels)
+            if (p.profile == profile) return true;
+        return false;
+    }
+
+    public static synchronized boolean hasHardwareEncoder(String mime, int mode) {
+        int profile = encoderProfile(mime);
+        if (profile < 0) return false;
+        if (codecs == null) codecs = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
+        for (MediaCodecInfo info : codecs) {
+            if (!info.isEncoder() || !info.isHardwareAccelerated() || info.isSoftwareOnly() || info.isAlias()) continue;
+            for (String type : info.getSupportedTypes()) {
+                if (!mime.equalsIgnoreCase(type)) continue;
+                try {
+                    MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(type);
+                    if (supportsSurfaceProfile(caps, profile)
+                            && (mode < 0 || caps.getEncoderCapabilities().isBitrateModeSupported(mode))) return true;
+                } catch (IllegalArgumentException | SecurityException e) {
+                    Log.w(TAG, "Ignoring codec " + info.getName(), e);
+                }
+            }
+        }
+        return false;
+    }
+
     public static String[] findAvcEncoders(int width, int height, double fps) {
         return findEncoders("video/avc", width, height, fps, 0);
     }
@@ -40,8 +82,9 @@ public final class ObsCodecCapabilities {
     }
     public static synchronized String[] findEncodersMode(String mime, int width, int height, double fps, int bitrate, int mode) {
         ArrayList<String> result = new ArrayList<>();
+        int profile = encoderProfile(mime);
         if (Build.VERSION.SDK_INT < 29 || width <= 0 || height <= 0 || !Double.isFinite(fps) || fps <= 0
-                || bitrate < 0 || mode < 0 || mode > 2 || !("video/avc".equals(mime) || "video/hevc".equals(mime))) return new String[0];
+                || bitrate < 0 || mode < 0 || mode > 2 || profile < 0) return new String[0];
         String key = mime + ":" + width + ":" + height + ":" + fps + ":" + bitrate + ":" + mode;
         if (cache.containsKey(key)) return cache.get(key).clone();
         if (codecs == null) codecs = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
@@ -51,21 +94,14 @@ public final class ObsCodecCapabilities {
                 for (String type : info.getSupportedTypes()) {
                     if (!mime.equalsIgnoreCase(type)) continue;
                     MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(type);
-                    boolean surface = false;
-                    for (int color : caps.colorFormats)
-                        if (color == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) surface = true;
                     MediaCodecInfo.VideoCapabilities video = caps.getVideoCapabilities();
                     MediaCodecInfo.EncoderCapabilities enc = caps.getEncoderCapabilities();
-                    boolean profile = !"video/hevc".equals(mime);
-                    for (MediaCodecInfo.CodecProfileLevel p : caps.profileLevels)
-                        if (p.profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain) profile = true;
-                    boolean supported = surface && video != null && enc != null
-                        && profile && (mode == 0 || bitrate == 0 || video.getBitrateRange().contains(bitrate))
+                    boolean supported = supportsSurfaceProfile(caps, profile) && (mode == 0 || bitrate == 0 || video.getBitrateRange().contains(bitrate))
                         && video.areSizeAndRateSupported(width, height, fps)
                         && enc.isBitrateModeSupported(mode);
-                    if (supported && "video/hevc".equals(mime)) {
+                    if (supported && profile > 0) {
                         MediaFormat f = MediaFormat.createVideoFormat(mime, width, height);
-                        f.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain);
+                        f.setInteger(MediaFormat.KEY_PROFILE, profile);
                         f.setFloat(MediaFormat.KEY_FRAME_RATE, (float)fps);
                         if (bitrate > 0) f.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
                         supported = caps.isFormatSupported(f);
