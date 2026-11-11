@@ -69,7 +69,7 @@ static void init_hw_decoder(struct mp_decode *d, AVCodecContext *c)
 	}
 }
 
-static int mp_open_codec(struct mp_decode *d, bool hw, const char *codec_name)
+static int mp_open_codec(struct mp_decode *d, bool hw, bool force_ndk)
 {
 	AVCodecContext *c;
 	int ret;
@@ -94,14 +94,9 @@ static int mp_open_codec(struct mp_decode *d, bool hw, const char *codec_name)
 		c->thread_count = 0;
 
 	AVDictionary *options = NULL;
-	if (codec_name) {
-		av_dict_set(&options, "codec_name", codec_name, 0);
+	if (force_ndk)
 		av_dict_set(&options, "ndk_codec", "1", 0);
-	}
 	ret = avcodec_open2(c, d->codec, &options);
-	/* Do not claim a hardware selection if FFmpeg ignored our option. */
-	if (ret >= 0 && codec_name && av_dict_get(options, "codec_name", NULL, 0))
-		ret = AVERROR_OPTION_NOT_FOUND;
 	av_dict_free(&options);
 	if (ret < 0)
 		goto fail;
@@ -184,43 +179,43 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 
 #ifdef __ANDROID__
 	/* MediaCodec's byte-buffer mode returns CPU-readable frames; it is a
-	 * separate decoder, not an AVHWDevice-backed version of the SW codec. */
+	 * separate decoder, not an AVHWDevice-backed version of the SW codec.
+	 * 勾选"硬件解码"时优先使用 FFmpeg 的 *_mediacodec 解码器（具体组件由系统选择），
+	 * 打开失败回退到 FFmpeg 原生软解；不勾选时直接用软解。 */
 	if (hw && type == AVMEDIA_TYPE_VIDEO) {
 		const char *name = NULL;
-		const char *mime = NULL;
 		switch (id) {
-		case AV_CODEC_ID_H264: name = "h264_mediacodec"; mime = "video/avc"; break;
-		case AV_CODEC_ID_HEVC: name = "hevc_mediacodec"; mime = "video/hevc"; break;
-		case AV_CODEC_ID_VP8: name = "vp8_mediacodec"; mime = "video/x-vnd.on2.vp8"; break;
-		case AV_CODEC_ID_VP9: name = "vp9_mediacodec"; mime = "video/x-vnd.on2.vp9"; break;
-		case AV_CODEC_ID_AV1: name = "av1_mediacodec"; mime = "video/av01"; break;
+		case AV_CODEC_ID_H264: name = "h264_mediacodec"; break;
+		case AV_CODEC_ID_HEVC: name = "hevc_mediacodec"; break;
+		case AV_CODEC_ID_VP8: name = "vp8_mediacodec"; break;
+		case AV_CODEC_ID_VP9: name = "vp9_mediacodec"; break;
+		case AV_CODEC_ID_AV1: name = "av1_mediacodec"; break;
 		default: break;
 		}
 		/* Preserve alpha-aware libvpx for VP8/VP9. */
 		if (name && strncmp(d->codec->name, "libvpx", 6) != 0) {
 			const AVCodec *software = d->codec;
 			const AVCodec *hardware = avcodec_find_decoder_by_name(name);
-			char component[256];
-			if (hardware && obs_android_find_hardware_decoder(mime, component, sizeof(component))) {
+			if (hardware) {
 				d->codec = hardware;
-				ret = mp_open_codec(d, false, component);
+				ret = mp_open_codec(d, false, true);
 				if (ret >= 0) {
 					d->android_hw_first_frame_pending = true;
-					strncpy(d->android_hw_component, component, sizeof(d->android_hw_component) - 1);
+					strncpy(d->android_hw_component, "unknown", sizeof(d->android_hw_component) - 1);
 					d->android_hw_component[sizeof(d->android_hw_component) - 1] = '\0';
-					blog(LOG_INFO, "MP: hardware MediaCodec decoder opened: %s (%s)", name, component);
+					blog(LOG_INFO, "MP: MediaCodec decoder opened: %s (component and hardware status unknown)", name);
 					goto codec_opened;
 				}
-				blog(LOG_WARNING, "MP: hardware decoder %s failed to open (%s); falling back to software",
-				     component, av_err2str(ret));
+				blog(LOG_WARNING, "MP: hardware decoder %s failed to open (%s); falling back to software", name,
+				     av_err2str(ret));
 				d->codec = software;
 			} else {
-				blog(LOG_INFO, "MP: no hardware MediaCodec decoder available for %s; using software", mime);
+				blog(LOG_INFO, "MP: %s decoder not available; using software", name);
 			}
 		}
 	}
 #endif
-	ret = mp_open_codec(d, hw, NULL);
+	ret = mp_open_codec(d, hw, false);
 	if (ret < 0) {
 		blog(LOG_WARNING, "MP: Failed to open %s decoder: %s", av_get_media_type_string(type), av_err2str(ret));
 		return false;
@@ -355,7 +350,7 @@ static int decode_packet(struct mp_decode *d, int *got_frame)
 #ifdef __ANDROID__
 	if (*got_frame && d->android_hw_first_frame_pending) {
 		const char *pixel_format = av_get_pix_fmt_name(d->in_frame->format);
-		blog(LOG_INFO, "MP: hardware decoder first frame: decoder=%s component=%s hardware=true "
+		blog(LOG_INFO, "MP: MediaCodec decoder first frame: decoder=%s component=%s hardware=unknown "
 			       "width=%d height=%d coded=%dx%d linesize=%d,%d,%d "
 			       "crop=%zu,%zu,%zu,%zu pixfmt=%s",
 		     d->codec->name, d->android_hw_component, d->in_frame->width, d->in_frame->height,
