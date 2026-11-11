@@ -23,7 +23,7 @@ SDK="${ANDROID_SDK_ROOT:?缺 ANDROID_SDK_ROOT，先 source ~/.obs-android-env.sh
 QT="${QT_DIR:?缺 QT_DIR}"
 HOST="${QT_HOST_PATH:?缺 QT_HOST_PATH}"
 NDK="${NDK_ROOT:?缺 NDK_ROOT}"
-GRADLE_BIN="${GRADLE_BIN:-$HOME/toolchain/gradle-8.14.5/bin}"
+GRADLE_BIN="${GRADLE_BIN:-$HOME/toolchain/gradle-9.3.1/bin}"
 COMPILE_SDK_VERSION="${OBS_ANDROID_COMPILE_SDK_VERSION:-36}"
 case "$COMPILE_SDK_VERSION" in
   ''|*[!0-9]*) echo "FATAL: OBS_ANDROID_COMPILE_SDK_VERSION 必须为 SDK 平台版本号" >&2; exit 1 ;;
@@ -103,7 +103,7 @@ if [ -n "$PLUG_SRC" ]; then
     [ -f "$f" ] || continue
     if [ -x "$STRIP_BIN" ]; then "$STRIP_BIN" --strip-unneeded "$f" || true; fi
   done
-  ( cd "$PKG_ASSETS" && ls -1 ./*.so | sed 's#^\./##' ) > "$PKG_ASSETS/MANIFEST"
+  python3 "$SCRIPT_DIR/android-plugin-bundle.py" generate "$PKG_ASSETS" || exit 1
   echo "=== 插件暂存 → frontend/cmake/android/assets/obs-plugins/: $(cd "$PKG_ASSETS" && ls -1 *.so | tr '\n' ' ') ==="
 else
   echo "WARNING: rundir 里没找到 obs-plugins 目录 —— APK 不会带 OBS 插件"
@@ -142,12 +142,19 @@ echo "=== androiddeployqt 出包（日志 $LOGDIR/fe-$ABI-apk-wsl.log） ==="
     --apk "$FE/android-build/obs-studio.apk" \
     --depfile "$FE/android-build/obs-studio.d" \
     --android-platform "android-$COMPILE_SDK_VERSION" \
-    --builddir "$FE" --release ) > "$LOGDIR/fe-$ABI-apk-wsl.log" 2>&1
+    --builddir "$FE" --release --aux-mode ) > "$LOGDIR/fe-$ABI-apk-wsl.log" 2>&1
 APK_RC=$?
 echo "=== androiddeployqt exit=$APK_RC ==="
 grep -iE "BUILD FAILED|FAILURE|CANNOT LINK|Exception|error:" "$LOGDIR/fe-$ABI-apk-wsl.log" | head -25
 grep -iE "BUILD SUCCESSFUL|Android package built successfully" "$LOGDIR/fe-$ABI-apk-wsl.log" | tail -3
 [ "$APK_RC" = 0 ] || { echo "FATAL: androiddeployqt 出包失败，看 $LOGDIR/fe-$ABI-apk-wsl.log"; exit 1; }
+
+python3 "$SCRIPT_DIR/qt-android-ime/patch-qt-android-jar.py" \
+    --qt-version 6.11.1 --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
+    --android-jar "$SDK/platforms/android-$COMPILE_SDK_VERSION/android.jar" \
+    --javac "$JAVA_HOME/bin/javac" --output "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" || exit 1
+cp -f "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" "$AB_DIR/libs/Qt6Android.jar" || exit 1
+gradle --no-daemon -p "$AB_DIR" assembleRelease || exit 1
 
 # ---- 应用库 main 可被 dlsym 校验 ----
 RE="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
@@ -160,6 +167,9 @@ fi
 APK=$(find "$BUILD_DIR" -path "*build/outputs/apk/release/*-unsigned.apk" 2>/dev/null | head -1)
 [ -n "$APK" ] || APK=$(find "$BUILD_DIR" -path "*build/outputs/apk/*.apk" ! -name '*-signed*.apk' 2>/dev/null | head -1)
 [ -n "$APK" ] || { echo "FATAL: 未找到生成的 APK"; exit 1; }
+
+python3 "$SCRIPT_DIR/qt-android-ime/verify-runtime-apk.py" "$APK" || exit 1
+python3 "$SCRIPT_DIR/android-plugin-bundle.py" verify "$APK" || exit 1
 
 APKSIGNER="$SDK/build-tools/36.0.0/apksigner"
 [ -f "$APKSIGNER" ] || APKSIGNER="$SDK/build-tools/34.0.0/apksigner"

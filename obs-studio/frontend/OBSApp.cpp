@@ -2780,11 +2780,8 @@ void OBSApp::addLogLine(int logLevel, const QString &message)
 void OBSApp::loadAppModules()
 {
 #ifdef __ANDROID__
-	/* 插件 .so 必须**先**解到 $OBS_ROOT_PATH/lib —— 紧接着的 loadAllPlugins() 会先调
-	 * obs_load_core_modules()，它按 obs_core_modules[] 逐个到那个目录找 .so。
-	 * 不能放在 PrepareAndroidRuntimePaths()（main() 最前面）：Qt 的 assets: 引擎
-	 * 要等 QApplication 初始化后才注册。 */
-	EnsureAndroidPluginBinaries();
+	if (!EnsureAndroidPluginBinaries())
+		throw "Could not prepare the Android plugin bundle. Check the app log and restart OBS.";
 #endif
 
 	using PluginMode = OBS::PluginManager::Mode;

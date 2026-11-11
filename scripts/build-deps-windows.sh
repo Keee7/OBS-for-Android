@@ -57,14 +57,15 @@ prepare() {
   fi
 }
 prepare "$SOURCES_ROOT/x264" "$WORK_ROOT/src/x264"
-prepare "$SOURCES_ROOT/ffmpeg-8.0.3" "$WORK_ROOT/src/ffmpeg"
+ffmpeg_work="$WORK_ROOT/src/ffmpeg-8.0.3"
+prepare "$SOURCES_ROOT/ffmpeg-8.0.3" "$ffmpeg_work"
 # Idempotently apply our MediaCodec fixes to a pristine or existing source tree.
 patch_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-native-deps"
 for patch_file in "$patch_dir/ffmpeg-8.0.3-mediacodec-android.patch"; do
-  if patch -d "$WORK_ROOT/src/ffmpeg" -p1 -R --force --dry-run --silent < "$patch_file"; then
+  if patch -d "$ffmpeg_work" -p1 -R --force --dry-run --silent < "$patch_file"; then
     echo "Already applied: $patch_file"
-  elif patch -d "$WORK_ROOT/src/ffmpeg" -p1 --force --dry-run --silent < "$patch_file"; then
-    patch -d "$WORK_ROOT/src/ffmpeg" -p1 --force < "$patch_file"
+  elif patch -d "$ffmpeg_work" -p1 --force --dry-run --silent < "$patch_file"; then
+    patch -d "$ffmpeg_work" -p1 --force < "$patch_file"
   else
     echo "FFmpeg patch does not match this source tree: $patch_file" >&2
     exit 1
@@ -113,7 +114,7 @@ if [[ "$targets" == *' x264 '* ]]; then
    make install-lib-static)
 fi
 if [[ "$targets" == *' ffmpeg '* ]]; then
-  (cd "$WORK_ROOT/src/ffmpeg"
+  (cd "$ffmpeg_work"
    ./configure --prefix="$prefix" --enable-cross-compile --target-os=android --arch=aarch64 \
      --cc="$CC" --ar="$AR" --ranlib="$RANLIB" --strip="$STRIP" --enable-static --disable-shared \
      --disable-doc --disable-programs --disable-debug --disable-stripping --disable-autodetect \

@@ -29,38 +29,16 @@
  * 非 debuggable 包 run-as 不进去 —— 所以这里额外打一份到 logcat。 */
 #define CORE_LOG(...) __android_log_print(ANDROID_LOG_INFO, "OBS-core", __VA_ARGS__)
 
-/* OBS 33.0 把"核心模块"（随安装包的第一方插件）从第三方插件里拆了出来，并且把枚举
- * 方式按平台拆成 obs-core-modules-loader-{mac,win,nix}.c。Android 不属于其中任何一个
- * （libobs/CMakeLists.txt 的 PLATFORM_ID 里没有 Android），所以必须在这里提供
- * load_core_modules()，否则 obs_load_core_modules() 会 undefined reference。
- *
- * 桌面 nix 版是"逐个 find_core_module($exe/../lib/obs-plugins/<name>)"。Android 的
- * 插件由 AndroidRuntimeBootstrap::EnsureAndroidPluginBinaries() 从 APK 的
- * assets/obs-plugins/ 解到 $OBS_ROOT_PATH/lib，路径换成那里，其余逻辑一致。
- *
- * 为什么必须以 OBS_MODULE_TYPE_CORE 装载（而不是当普通插件）：
- *   1. PluginManager 会跳过 core 模块（PluginManager.cpp:42 `obs_is_core_module()`），
- *      所以内置插件不会出现在"插件管理器"里 —— 与桌面行为一致；
- *   2. core 模块不受用户 disabled 配置影响（obs-module.c:502），不会被误禁用；
- *   3. 之后 loadPlugins() 扫同一个目录时，重复项会被 obs-module.c:516-526 的
- *      "already loaded" 检查跳过 —— 于是 core 之外的内置插件（可选采集插件）与用户
- *      自己放进 $OBS_ROOT_PATH/lib 的插件才以 PLUGIN 类型载入、才会出现在管理器里。
- *
- * 清单 obs_core_modules[] 由 plugins/CMakeLists.txt 的 set_obs_core_modules() 生成，
- * 即白名单里除可选项之外的全部模块；具体数量随白名单变化，不要写死。
- *
- * 注意 `find_core_module()` 的 binary 参数**不带扩展名**，函数内部会自己拼
- * get_module_extension()；data 传带 %module% 的模板，由 make_data_directory() 替换。 */
-
 extern bool find_core_module(struct obs_runtime_module_info *info, obs_find_module_callback2_t callback,
 			     void *data);
 
 void load_core_modules(obs_find_module_callback2_t callback, void *data)
 {
 	const char *root = getenv("OBS_ROOT_PATH");
-	if (!root || !*root) {
-		blog(LOG_ERROR, "[android] OBS_ROOT_PATH 未设置，无法定位核心模块");
-		CORE_LOG("OBS_ROOT_PATH 未设置");
+	const char *bundle = getenv("OBS_ANDROID_BUNDLED_PLUGIN_DIR");
+	if (!root || !*root || !bundle || !*bundle) {
+		blog(LOG_ERROR, "[android] Android plugin bundle not initialized");
+		CORE_LOG("Android plugin bundle not initialized");
 		return;
 	}
 
@@ -74,8 +52,8 @@ void load_core_modules(obs_find_module_callback2_t callback, void *data)
 	for (unsigned int i = 0; i < obs_core_modules_count; i++) {
 		const char *name = obs_core_modules[i];
 
-		dstr_copy(&bin, root);
-		dstr_cat(&bin, "/lib/");
+		dstr_copy(&bin, bundle);
+		dstr_cat(&bin, "/");
 		dstr_cat(&bin, name);
 
 		struct obs_runtime_module_info info = {
