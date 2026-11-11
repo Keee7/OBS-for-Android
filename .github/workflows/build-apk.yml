@@ -3,7 +3,7 @@ name: Build Android APK
 # 触发：
 #   push 到 main           → 构建；有密钥则签名
 #   push tag v*            → 构建 + 创建 GitHub Release
-#   pull_request           → 只构建不签名（fork 的 PR 拿不到 Secrets）
+#   pull_request           → 使用公开的开发密钥签名（fork 的 PR 拿不到 Secrets）
 #   workflow_dispatch      → 手动，可勾"签名 / 发布 Release"
 on:
   push:
@@ -190,10 +190,10 @@ jobs:
 
       - name: Build APK
         env:
-          SIGN_KEYSTORE: ${{ steps.keystore.outputs.available == 'true' && format('{0}/release.jks', runner.temp) || '' }}
-          SIGN_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          SIGN_STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          SIGN_KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          SIGN_KEYSTORE: ${{ github.event_name == 'pull_request' && format('{0}/android-shell/debug.keystore', github.workspace) || (steps.keystore.outputs.available == 'true' && format('{0}/release.jks', runner.temp) || '') }}
+          SIGN_KEY_ALIAS: ${{ github.event_name == 'pull_request' && 'androiddebugkey' || secrets.ANDROID_KEY_ALIAS }}
+          SIGN_STORE_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SIGN_KEY_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEY_PASSWORD }}
         run: bash scripts/ci-build-android.sh
 
       - name: Check document images and encoder backpressure on host
