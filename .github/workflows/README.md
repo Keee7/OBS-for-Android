@@ -54,7 +54,7 @@ bash scripts/generate-release-key.sh ~/obs-release.jks
 | --- | --- |
 | push 到 `main` | 构建；配了 Secrets 就签名 |
 | push 一个 `v*` tag（如 `v0.1.19`） | 构建 + 签名 + **创建 GitHub Release** 并附件 APK |
-| Pull Request | 只构建、**不签名**（fork 的 PR 拿不到 Secrets），出未签名包 |
+| Pull Request | 使用仓库中的公开开发密钥签名，产物可安装；与私有密钥签名的包不能直接覆盖安装 |
 | 手动 `workflow_dispatch` | 可勾选"签名"与"发布 Release" |
 
 产物在 Actions 页面的 **Artifacts** 里（保留 30 天），文件名 `obs-android-apk-<commit sha>`。
@@ -150,7 +150,7 @@ bash scripts/ci-build-android.sh
 - **依赖构建是源码级**：`fetch.sh` 里 `x264`/`rnnoise` 用的是分支（`master`）而不是 tag，
   所以不同时间构建出来的依赖**不是逐字节可复现**的。要严格复现请把版本钉到具体 commit。
 - **Release 只在该次构建真的签过名时才创建**（避免发出装不上的包）。
-- 工作流对 PR 不签名、也不发布。来自 fork 的 PR 拿不到 Secrets，这是 GitHub 的设计。
+- 工作流对 PR 使用公开开发密钥签名，不使用私有 Secrets，也不发布 Release。来自 fork 的 PR 拿不到 Secrets，这是 GitHub 的设计。
 
 ---
 
