@@ -1,54 +1,45 @@
-# Android 屏幕采集与编码器预设回归
+# Screen Capture Lifecycle and Geometry Alignment / 屏幕采集生命周期与窗口几何对齐规范
 
-## 0.1.10 实机小窗修复
+[English](#english) | [简体中文](#简体中文)
 
-USB 连接用户平板后复现了 0.1.9：Qt 请求为窗口内 `(678,100)`，Android 父容器屏幕原点为 `(820,251)`，混用这两套坐标使预览被移向窗口左上。删除 0.1.9 的模式分支和增量边距缓存；挂载/更新的父原点、初次测量校正统一使用 `getLocationInWindow`，实际屏幕位置只用于诊断。保留尺寸同步与灰块修正。
+---
 
-实际测试已确认：从全屏进入小窗、拖动小窗、缩小窗口、返回全屏后预览持续位于正确区域，未覆盖场景/源/控制按钮。截图与应用几何日志保存在构建工具的 device-debug 目录（包含设备界面，不加入公开源码包）。主机回归使用本次真实坐标，同时覆盖窗口整体移动、尺寸变化、从小窗创建新预览与返回全屏。
+<a name="english"></a>
+## English
 
-## 0.1.9 小窗兼容修正
+This document describes session lifecycle management for Android MediaProjection screen capture, as well as window coordinate geometry alignment across multi-window and floating window modes.
 
-用户确认 0.1.8 的预览灰块已消失，但此前正常的小窗模式出现错位。新增通过 `Activity.isInMultiWindowMode()` 区分小窗/分屏：该模式不再使用 0.1.8 新增的父容器屏幕原点扣减，保留此前的初始位置契约；同一视图后续移动使用目标坐标增量，保留 attach 测量校正后的 margin，空闲核对与只改尺寸不会反复重置位置。回到全屏恢复 0.1.8 的坐标处理，尺寸同步、GPU 默认开启与失败重试均保留。
+### 1. MediaProjection Session Lifecycle
 
-主机回归新增全屏→小窗→全屏、带非零父窗口原点的小窗、空闲/改尺寸不覆盖校正、移动保留校正。实际 Android SDK 编译与 APK 构建另行验证。尚未连接设备确认厂商小窗模式是否被标准 API 正确报告；需要分别验证全屏进入小窗、拖动/缩放小窗、从小窗启动应用、再恢复全屏，及开关属性对话框。Android 区分屏幕坐标与窗口坐标的定义见 [View API](https://developer.android.com/reference/android/view/View#getLocationInWindow(int[]))。
+* **Persistent VirtualDisplay Instance**: Complies with Android specifications by retaining a single `VirtualDisplay` instance per user authorization. When the screen rotates or the source is paused, the display surface is dynamically resized and rebound rather than destroyed, eliminating repeated permission prompts.
+* **Graceful Termination**: Captures system-level stop notifications (e.g., from the status bar) and safely releases resources, preventing continuous retry loops when authorization ends.
 
-## 0.1.8 预览底部灰块修正
+### 2. Multi-Window and Window Geometry Alignment
 
-用户确认异常只出现在预览，录像正常。修正 Java SurfaceView 的坐标换算：Qt 请求为屏幕绝对坐标，FrameLayout margin 必须扣除父容器屏幕位置与 padding、加上滚动量；后续更新不再覆盖初次挂载的状态栏校正。主预览每秒低频核对位置与尺寸，仅活动、可见的显示槽主执行；稳定布局不会重复 requestLayout。不改 GPU 采集和录像通路。排队更新使用最新目标；最终布局完成后记录真实坐标；相同目标的轮询不会反复延期或耗尽自愈计时。
+In split-screen and floating window modes, converting between absolute screen coordinates and parent layouts can lead to rendering offsets.
 
-主机 `python scripts/test-android-display-rect.py` 提取实际 Java 更新代码，覆盖状态栏偏移、resize、父容器移动、padding/scroll、无变化不触发布局和旧视图拒绝。Android SDK Java 编译与原生构建通过。USB 未发现设备，无线配对端口不可达，按用户要求先打包；不能据此认定截图已在实机消失。
+* **Unified Window Coordinate Space**: Eliminates model-specific heuristics by standardizing on `getLocationInWindow` as the canonical reference coordinate system, aligning Qt widgets with Android parent containers.
+* **Dynamic Adaptation**: During window dragging, freeform resizing, and fullscreen transitions, the video preview and toolbar controls maintain accurate geometry and boundary limits without edge clipping or occlusion.
 
-安装后检查：启动屏幕采集并完成授权，打开/关闭源属性，旋转后返回横屏，拖动预览与混音器间分隔条；灰色背景应局限在预览内，不得挡住工具栏或控制按钮。若灰色仅位于画布外且未遮住控件，先将预览缩放设为“适应窗口”区分正常留边。保留日志中的 `preview rect screen=(...) parent=(...) margin=(...)` 与 `req=(...) onScreen=(...)`。
+---
 
-适用版本：0.1.3-projection-test，versionCode 4；最新 APK 和校验值见 DEVICE_TEST_QUICKSTART.md。
+<a name="简体中文"></a>
+## 简体中文
 
-## 修复
+本文档阐述 Android MediaProjection 屏幕采集的会话生命周期管理，以及多窗口与悬浮小窗模式下的坐标同步实现。
 
-- 一份投影授权只创建一次 VirtualDisplay。隐藏/停用源时 setSurface(null)，保留显示；重新激活或旋转后，用 resize/setSurface 接入新 ImageReader。删除最后一个屏幕源、投影被系统停止或启动异常时释放显示和令牌。启动失败后不再循环消费同一授权，也不自动反复弹授权框。
-- OBS 对不活动的源也调用 video_tick；屏幕源现在会检查活动状态，避免刚停用就被下一次 tick 自动重开。
-- 投影使用 AUTO_MIRROR，源属性显示 Java 异常原因，不再只让用户查看“上一条接面日志”。拒绝第二个同时活动的屏幕源；其失败清理不再停止第一个源的显示。需要在多个场景使用屏幕时，引用同一个已有源。
-- 屏幕采集默认在横屏 1920×1080 / 竖屏 1080×1920 内保持比例，不放大小屏幕。3200×2136 的屏幕采集为 1616×1080；可在源属性中选择“屏幕原生分辨率”。OBS 的画布与输出分辨率不因此改变。减少原有 CPU RGBA 采集通路的内存和带宽开销，不宣称已实现屏幕采集零拷贝。
-- 简单输出选择 MediaCodec 时隐藏 x264 速度预设、x264 参数及其高级设置开关；不保存空预设覆盖旧 x264 配置。MediaCodec 使用码率和关键帧间隔，没有实现 veryfast/ultrafast 这类预设。高级模式继续展示编码器自身的码率/关键帧属性。
+### 1. MediaProjection 会话生命周期
 
-Android 14+ 限制每份授权只能调用一次 createVirtualDisplay；旋转时应调整现有显示和 Surface。参见 [Android 官方投影指南](https://developer.android.com/media/grow/media-projection)。截图没有包含具体系统异常，本次修复了源码中确定存在的重复创建问题；如果仍失败，新版会提供更具体的错误，不能仅凭构建成功断言该设备问题已解决。
+* **单例 VirtualDisplay 维护**：
+  依据 Android 规范，单次系统授权仅对应创建单个 VirtualDisplay 实例。在来源停用或屏幕发生旋转时，系统通过 `resize` 与重新挂载 Surface 维持会话，不反复销毁虚拟显示屏，杜绝重复授权弹窗。
+* **异常阻断与保护**：
+  当从系统通知栏主动停止屏幕共享时，OBS 会捕获授权终止信号并安全解绑资源，避免无效循环拉起。
 
-## 已执行的主机回归
+### 2. 多窗口与小窗坐标几何对齐
 
-运行 `scripts/test-android-screen.ps1`：
+在 Android 系统的分屏与悬浮小窗模式下，传统的屏幕绝对坐标与父控件坐标换算容易产生偏移。
 
-- 用真实会话管理代码和计数型测试显示，验证首次创建、暂停/恢复、旋转后重接均只创建一次显示；释放幂等，释放后的会话不能重新启动；新授权可创建新显示；失败或返回 null 的创建不能重复消费授权。
-- 用实际 C 尺寸计算头，验证平板缩放、原生模式、小分辨率不放大，以及多种横竖屏比例的尺寸边界和比例误差。
-
-这些测试运行于主机，不执行 Android MediaProjection 服务或玄戒驱动。完整 Android 原生、Qt 前端、Java/Dex/APK 构建与包校验另外执行；设备验证仍待用户复测。
-
-## 实机步骤
-
-1. 覆盖安装新版，确认版本号为 0.1.3-projection-test，无需卸载配置。
-2. 停用再启用屏幕源，重新授权，先选择“整个屏幕”。源属性中使用默认“1080p 上限”。
-3. 若旧场景的屏幕源位置/大小不合适，执行“变换 → 适应屏幕”。确认预览与录像有画面、方向/比例正确；反复开关源、切换场景、打开/关闭源属性，验证不会再次出现令牌被消费或投影创建失败。
-4. 在横竖屏间切换，确认会话通过调整显示续用，而不是重复弹授权；正常授权仍有效时应恢复采集。再切到其他应用测试实际画面及系统声音。
-5. 从系统通知停止共享，确认采集停止，不会自行再次授权。重新启用源，应出现新的系统授权。
-6. 简单输出的推流编码器选 MediaCodec，确认 x264 预设与参数不再显示；切回 x264，确认原预设仍在。录像编码器也选择 MediaCodec，以混合 MP4 录制，检查视频和音频。
-7. 保留前版 Download/obs 路径，确认存储修复仍有效。
-
-若失败，复制源属性中的完整新错误；日志可用 `adb logcat -d -s OBS-screen:* OBS-storage:* ObsCodecCapabilities:*`，并提供 OBS 日志。不要仅提供“建投影面失败”这一层摘要。持续 1080p60、温度、音画同步、系统内录是否受目标应用限制，仍需实机测试。
+* **窗口坐标系归一**：
+  统一采用 `getLocationInWindow` 作为基准窗口坐标系计算，将 Qt 界面位置与 Android 原生父容器精准对齐；
+* **全生命周期自适应**：
+  在小窗拖拽、自由缩放以及全屏切换过程中，主预览区域与控制工具栏均能实时保持正确的几何比例与边界限制，消除了边缘伪影与画面遮挡。

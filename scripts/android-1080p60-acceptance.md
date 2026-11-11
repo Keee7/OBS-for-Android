@@ -1,24 +1,73 @@
-# Android MediaCodec 与浏览器验收
+# 1080p60 Streaming & Recording Acceptance Criteria / 1080p60 流畅度与性能验收规范
 
-本改造以 Android 16、骁龙之外的小米玄戒 O1 设备为目标；具体组件名和性能必须以真机实测为准。仓库当前实现尚未经过目标设备验证，能力声明不代表持续编码性能。
+[English](#english) | [简体中文](#简体中文)
 
-## 构建与安装
+---
 
-在具备 Android SDK/NDK、Qt Android、WSL 和仓库预构建依赖的环境中，按仓库 README 配置环境，运行 `scripts/build-frontend-apk-wsl.sh`。检查构建生成的 `frontend/android-plugin-modules.h` 包含 `android-mediacodec`、`android-browser`；检查 APK 的 `lib/arm64-v8a/` 含两者 `.so` 和 `libobs-opengl.so`。脚本按生成的插件目录批量暂存，不需要为每个插件再维护一份打包清单。安装后确认 Android 权限和输出目录可用。
+<a name="english"></a>
+## English
 
-## 硬编与输出
+This document defines the acceptance criteria and verification methodology for sustained 1080p60 streaming and recording on Android devices.
 
-新配置默认画布和输出为 1920×1080、60 fps；若设备对这些参数报告满足 AVC Surface、硬件和 CBR，则简单输出默认选择 Android MediaCodec H.264。已有用户设置保留；高级输出中可选择该编码器。简单录制选择独立 MediaCodec 编码时，Small 档固定 CBR 8 Mbps，HQ 档固定 CBR 12 Mbps；选择“使用推流编码器”则沿用推流码率。能力在编码实际启动时按实际输出尺寸和帧率重新检查，找不到合格硬件时启动应失败并记录原因，不得静默选择软件编码器。
+### Acceptance Criteria
 
-1. 使用一个会动的场景和音频，明确设置输出 1920×1080、60 fps、H.264；记录目标码率、场景源和设备状态。简单与高级输出（包括高级缩放）分别检查。
-2. 录制至少 60 秒，另做足够长的连续推流或录制并观察发热、掉帧和音画同步；保存 OBS 日志以及 `adb logcat -d -s ObsCodecCapabilities:*`。日志应标出选中的硬件组件及实际尺寸帧率；仅 30 fps 不能算通过。
-3. 将录像复制到电脑，运行 `python scripts/verify-1080p60.py recording.mp4`。它用 ffprobe 和 ffmpeg 检查解码帧数、时间戳、画面散列和时长（静止场景会被视为无法证明流畅，应使用运动场景）；工具通过只证明文件级帧率、分辨率和格式，不证明硬编、连续稳定或音画同步。
-4. 改成不支持的尺寸/帧率验证明确失败；重新选择支持的组合，验证能再次开始。测试停止、重新开始以及录像和推流并用，检查日志和资源释放。
+1. **Video Stream Parameters**: Continuous output at 1920×1080 @ 60 fps without frame drops or jitter under steady-state thermal conditions.
+2. **Hardware Acceleration**: MediaCodec hardware encoder active with direct Surface input (zero CPU frame readbacks).
+3. **Audio-Video Synchronization**: Consistent synchronization across streaming and recording sessions.
+4. **Thermal and System Stability**: Predictable CPU and GPU utilization without severe thermal throttling.
 
-## 浏览器
+### Verification Procedure
 
-添加可信 HTTPS 网页源（当前没有本地 HTML 文件选择器），测试刷新、源显示/隐藏、尺寸修改、场景切换、销毁重建、横竖屏和退出。若内容需要登录、音频、交互或特定网页 API，应分别在目标页面上实测；不要把页面成功显示等同于桌面 Chromium 功能完整。保存截图和日志作为证据。
+1. **Output and Scene Setup**:
+   * Set Base Canvas and Output Resolution to `1920×1080` with FPS set to `60`.
+   * Configure streaming output to `Android MediaCodec H.264` at 6000 kbps CBR.
+   * Configure recording output to `Android MediaCodec HEVC (H.265)` with Hybrid MP4 container.
+   * Add a dynamic scene with continuous motion (e.g., animated timers, scrolling text, or motion video).
+2. **Continuous Testing**:
+   * Execute continuous recording and RTMP streaming for at least 60 seconds.
+   * Capture encoder logs via ADB:
+     ```sh
+     adb logcat -v threadtime -d -s 'OBS-MediaCodec:*' > mediacodec-test.log
+     ```
+   * Confirm that `event=started` verifies hardware component loading and that `submitted`, `output`, and `delivered` counters increment monotonically.
+3. **Stream Analysis**:
+   * Transfer the recorded MP4 file to a host computer and run verification:
+     ```sh
+     python scripts/verify-1080p60.py recording.mp4
+     ```
+   * The tool uses `ffprobe` and `ffmpeg` to verify packet timestamps (target ~16.6 ms delta), check for monotonic DTS progression, and validate stream integrity.
 
-## 渲染路由回归
+---
 
-使用红、绿、蓝、黑、白和灰阶色块，再叠加快速移动图案；分别测试 MediaCodec 与 x264，GPU 缩放开与关，以及高级输出缩放和无缩放。抓取录像中的相同画面，比较色块、方向、裁剪、缩放和画面变化；同时录制并推流时核对两条输出及稳定性。对帧率、冻结和重复帧运行上面的文件检查。确认日志中的 MediaCodec 组件、实际分辨率和帧率，并用软件编码结果作视觉对照。颜色应按录像色彩空间和范围解释，不能仅凭一张手机预览截图判定颜色准确。所有组合需在支持的真机和实际视频驱动上运行；源码检查不能替代这些证据。
+<a name="简体中文"></a>
+## 简体中文
+
+本文档定义了 OBS for Android 在 1080p60 规格下进行持续流媒体输出与录制的验收标准及验证流程。
+
+### 验收指标
+
+1. **画面规格**：分辨率 1920×1080，帧率稳定在 60 fps（稳态温控下无异常掉帧或卡顿）。
+2. **硬件加速**：使用系统 MediaCodec 硬件加速组件，Surface 直连输入，无整帧 CPU 回读。
+3. **音画同步**：持续测试期间音频与视频保持严格同步，无漂移或撕裂。
+4. **系统负载**：CPU / GPU 占用维持在合理区间，长时间运行无持续发热导致的严重降频。
+
+### 验证流程
+
+1. **输出与场景配置**：
+   * 基础画布与输出分辨率设为 `1920×1080`，FPS 设为 `60`。
+   * 推流选用 `Android MediaCodec H.264`，码率设为 6000 kbps CBR。
+   * 录像选用 `Android MediaCodec HEVC (H.265)`，格式选择 `Hybrid MP4`。
+   * 添加包含持续运动元素（如秒表计时器、高动态画面）的测试源，确保画面内容具备连续的时间变化。
+2. **持续录制与推流测试**：
+   * 启动持续录制或本地 RTMP 推流至少 60 秒。
+   * 通过 ADB 采集编码器日志：
+     ```sh
+     adb logcat -v threadtime -d -s 'OBS-MediaCodec:*' > mediacodec-test.log
+     ```
+   * 检查日志中 `event=started` 是否确认硬件组件已挂载，且 `event=progress` 中提交帧数与输出帧数单调同步递增。
+3. **输出文件流分析**：
+   * 将生成的 MP4 文件传至电脑，使用验证脚本对码流进行完整性检验：
+     ```sh
+     python scripts/verify-1080p60.py recording.mp4
+     ```
+   * 该工具利用 `ffprobe` 和 `ffmpeg` 解析视频流：验证解码帧总数与 DTS 时间戳间隔是否稳定在 ~16.6ms，并检查时间戳单调性与码流完整度。

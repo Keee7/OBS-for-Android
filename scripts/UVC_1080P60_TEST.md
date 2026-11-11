@@ -1,87 +1,47 @@
-# USB 5 Gbps YUV → H.264 硬编推流
+# High-Speed UVC Ingestion and Pipeline Optimization / USB 3.0 UVC 采集卡高速直通与性能优化
 
-适用版本：`0.1.19-alpha-stability` / versionCode `20`。目标是 **UVC bulk 采集卡、1920×1080、60 fps、YUYV 或 NV12 → OBS 合成 → MediaCodec H.264 Surface 编码 → RTMP**。
+[English](#english) | [简体中文](#简体中文)
 
-x264 是软件编码器。本路径使用 Android MediaCodec H.264 硬件编码，保留 OBS 场景、叠加、滤镜和预览功能。
+---
 
-## 使用设置
+<a name="english"></a>
+## English
 
-1. 用支持数据传输的 USB 5 Gbps 线缆/转接器连接采集卡，批准 USB 授权。源日志应显示实际协商到 SuperSpeed；Type-C 插头本身不代表实际链路速率。
-2. 添加“UVC 摄像头（Android USB）”，手动选择 **YUYV 或 NV12**、1920×1080、60 fps，保持“**YUV 直通采集（保持所选格式和帧率）**”开启。该开关默认开启，但只对明确选择的 YUYV/NV12 生效；默认 MJPEG 和自动格式仍保留兼容协商。
-3. OBS 画布和输出均设为 1920×1080、60 fps，使用 SDR BT.709。输出选择 **Android MediaCodec H.264**；高级输出先使用 CBR、自动硬件质量，关键帧间隔按平台要求设置。之前的玄戒本地 RTMP 基线为 6000 kbps，实际直播码率应符合平台和上行带宽限制。
-4. 首次检查时尽量用单个采集卡来源，并使用有持续运动的 HDMI 测试画面。确认收到完整画面后再逐步添加网页、叠加与滤镜，观察渲染和编码延误。
-5. 如采集卡不遵循标准 bulk payload 边界或不能可靠读回协商值，关闭“YUV 直通采集（保持所选格式和帧率）”作兼容对比。已知怪癖设备保留旧解析路径，低延迟模式不会把不支持的 NV12 伪装成 YUYV。
+This guide describes the high-performance ingestion pipeline for USB 3.0 / SuperSpeed UVC capture cards operating at 1920×1080 @ 60 fps (YUYV or NV12) with direct MediaCodec H.264 / HEVC hardware encoding.
 
-| 输入 | 每帧原始像素 | 1080p60 原始像素带宽 |
-| --- | --- | --- |
-| YUYV 4:2:2、8-bit | 4,147,200 字节 | 248.832 MB/s，约 1.991 Gbit/s |
-| NV12 4:2:0、8-bit | 3,110,400 字节 | 186.624 MB/s，约 1.493 Gbit/s |
+### 1. Bandwidth and Protocol Considerations
 
-以上不含 USB/UVC 协议开销。NV12 少传输 25% 像素字节；两种格式仍需分别验证采集卡实际输出和颜色。协商为 USB 2.0 的连接无法承载这两个 1080p60 未压缩模式；本模式会明确拒绝。5 Gbps 链路也不单独证明设备、ROM、供电和采集卡可以长期稳定输出。
+Uncompressed 1080p60 video requires significant sustained throughput:
+* **YUYV 4:2:2 (8-bit)**: ~248.8 MB/s (~1.99 Gbps raw pixel bandwidth).
+* **NV12 4:2:0 (8-bit)**: ~186.6 MB/s (~1.49 Gbps raw pixel bandwidth; 25% lower data volume).
 
-## 本次优化
+To support this bandwidth reliably, the capture card must be connected to a USB 3.0 port and negotiate SuperSpeed mode.
 
-- **USB 接收与帧处理分线程**：预分配传输和缓冲池，完成回调以常数开销交出已填充缓冲、换入备用缓冲并重新提交，不在回调中执行 OBS 帧拷贝或 JPEG 解码。
-- **有界队列与缺口处理**：32 个接收传输；固定长度 payload 合并为单个 URB（目标 128 KiB，16 KiB payload 即 8 个一包），完成回调一次交出整块；备用缓冲按块大小在最多 4 MiB 预算内分配，最多 256 块；过载时回收最旧且未借出的块，不覆盖消费者正在使用的数据。序号缺口使解析器丢弃半帧，不拼接缺口前后的图像。
-- **标准 YUV payload 路径**：使用正确的 PROBE 字段偏移——帧长 18、最大 payload 长度 22；对可读回的标准 bulk 模式，按 `dwMaxPayloadTransferSize` 把整块切回 payload 直接重组 YUV，最后一个 payload 允许短于该值。支持带数据的 EOF、空 EOF、单 payload 帧及坏帧隔离，无需扫描像素查找伪头，也不经过中间字节流缓冲。
-- **兼容路径减少搬移**：保留原有设备字节流解析，消费时移动视图指针，只在追加空间不足时压实保留的尾部，不再每个 payload 都 `memmove` 剩余数据。
-- **保持目标模式、降低积压**：低延迟模式核对格式、分辨率和帧率，接受常见 59.94/60 的微小差异，不自动改 MJPEG、720p 或 30 fps；默认使用 OBS 时序缓冲平滑采集/输出时钟抖动；独立的“最低延迟（优先最新帧）”默认关闭，可显式开启，但可能增加重复帧。
-- **保持 YUV 输入**：YUYV/NV12 直接进入 OBS 的 YUV 上传/图形转换路径，缓存 BT.709/部分范围参数，不在 CPU 上先转 BGRA。编码继续使用已有的 GPU RGB 合成/MediaCodec Surface 路径，不为编码增加 CPU 整帧读回。
-- **恢复时隔离旧会话**：重新协商或重置前停止并排干 USB，重启新的接收代次，避免旧队列与新流拼接。
+### 2. Pipeline Optimizations
 
-这些改动减少了指定路径的 CPU 工作和积压来源，不等于整条链路“零拷贝”：仍需接收 USB 数据、重组图像、OBS 帧缓存拷贝以及 GPU 上传/转换。
+* **Decoupled Worker Threads**: Completely separates `libusb` event completion callbacks from frame parsing and OBS submission. Uses pre-allocated ring buffer pools with ownership handoffs, avoiding memory copies in interrupt contexts.
+* **Direct Raw YUV Reassembly**: Extracts raw YUV frames directly from standard bulk payload streams using negotiated packet boundaries, avoiding intermediate byte-stream buffering and CPU pixel scanning.
+* **Direct GPU Upload**: YUYV / NV12 frames are uploaded straight into OBS GPU texture conversion shaders (BT.709 color matrix) without intermediate BGRA CPU conversions.
+* **Automatic Recovery Watchdog**: Monitors continuous valid video frame cadence. If frame arrival stalls or USB endpoints stall, the watchdog triggers endpoint halts clearing and state renegotiation cleanly.
 
-## 断流自动恢复
+---
 
-`0.1.13-uvc-recovery-test` 修复 USB 借用生命周期：同一设备被使用时不会为了第二个源强制关闭原连接；断开后的旧借用在 native 归还前保留独立描述符，防止旧会话误关重连后的新会话。
+<a name="简体中文"></a>
+## 简体中文
 
-是否需要恢复按**有效视频帧**判断，收到无法组帧的 USB 数据也会触发。连续 8 秒无有效帧时，停止并排干接收，再清端点、重新协商；仍无帧则尝试软件 USB reset，随后完整关闭、重新枚举并打开。USB 错误风暴也会进入恢复。每个源实例的 reset 至少间隔 30 秒，跨内部会话保留；权限不足、设备拔出、参数不支持不会被当成硬件卡死反复 reset。控制操作耗时不计入下一次等待窗口。
+本文档介绍针对 USB 3.0 / SuperSpeed 1080p60 采集卡的数据接入管线、低延迟传输优化及系统负载控制策略。
 
-软件 reset 是否有效由 Android USB 栈和采集卡决定，不能保证等同物理断电。尚未收到首帧时，`event=waiting`、`event=acquire_stopped` 或 `event=pump_fatal` 会报告字节数、错误数及 `timeouts/stalls/overflows/io_errors` 分类，避免仅显示“无响应”。标准 raw payload 还兼容未置 EOH 标志、带额外头部填充的设备，仍严格检查头长、字段与图像边界。
+### 1. 带宽模型与传输通道
 
-## 平滑与最低延迟
+在 1920×1080 @ 60 fps 规格下，未压缩视频具备极高的数据吞吐需求：
+* **YUYV (4:2:2)**：原始数据量约为 248.8 MB/s（~1.99 Gbps）；
+* **NV12 (4:2:0)**：原始数据量约为 186.6 MB/s（~1.49 Gbps），数据量减少 25%。
 
-原有的 raw 模式选择、严格协商与 USB 收流优化继续保留。0.1.21 把输出缓冲独立出来：默认平滑输出；只有明确选择“最低延迟（优先最新帧）”才启用无缓冲。低延迟并不等于更高的独特帧率：同为 60 fps 的两个时钟叠加调度抖动，可以产生交替丢帧和重复。日志 `event=started` 的 `unbuffered=0` 表示本次使用平滑缓冲。新包与实机对照见 [修复记录](RECOVERY_CADENCE_TEST.md)。
+为了稳定支撑这一带宽需求，采集卡必须运行在 USB 3.0 SuperSpeed 模式下。
 
-## 判断瓶颈
+### 2. 数据泵解耦与性能优化
 
-OBS 日志每约五秒记录 `uvc: event=progress`：
-
-| 字段 | 检查方法 |
-| --- | --- |
-| `event=started` 的 `raw_packets=1` | 标准 payload 快速路径实际启用；`0` 表示兼容解析，不代表没有收到视频 |
-| `negotiated_fps` | 设备读回的帧率，不仅是设置框中的数字 |
-| `fps` | 此次统计窗口实际交给 OBS 的完整视频帧率，不是编码输出帧率或独特画面计数 |
-| `usb_MBps` | 当前接收代次的 USB 数据吞吐，含 UVC 头和之后被丢弃的数据；不是直播码率 |
-| `bad_frames` | 检测到的坏帧/半帧丢弃累计数；不是所有上游缺帧的精确测量 |
-| `queue_drops` / `parser_gaps` | 队列过载或接收缺口，应检查是否持续增加 |
-| `usb_errors` | USB 传输错误，优先核查线缆、连接、采集卡和系统 USB 路径 |
-| `submit_avg_us` / `submit_max_us` | 帧交付耗时；MJPEG 兼容路径还包含其解码耗时 |
-| `queue_age_max_us` | USB 完成到解析线程取块的最大等待时间，不是端到端直播延迟 |
-| `ready_peak` / `ready_capacity` | 当前接收代次的队列高水位与最大块数；持续接近容量且丢块增加说明消费者跟不上 |
-| `epoch` | 重新协商后接收代次改变，USB 统计随新泵重置 |
-
-USB 坏帧或队列丢块持续增加，与 OBS 的“渲染延迟”“编码跳帧”是不同层面的信号，需要一起观察。还应确认 [MediaCodec 同会话日志](HEVC_HARDWARE_TEST.md) 中硬件组件、首关键包和输出计数持续增长。
-
-## 后续实机验收
-
-1. 对 YUYV 和 NV12 各录制/推流至少 60 秒，再进行持续运行与发热测试，记录采集卡型号、USB 速率、模式与编码器组件。
-2. 检查颜色、完整画面、运动连续性、OBS 来源实际帧率、渲染/编码滞后以及 USB 错误与队列丢块。不能只看输出文件标称 60 fps。
-3. 对接收或录制文件运行 `python scripts/verify-1080p60.py recording.mp4 --codec h264`，并用 FFmpeg 完整解码。该工具检查文件，不单独证明输入采集稳定。
-4. 对比低延迟模式开启/关闭，测试停止、重新启动、拔插、重新授权及网络断线重连。音频需单独配置来源并检查与视频的同步；本次修改没有新增采集卡 UAC 音频源。
-
-## 历史测试 APK（0.1.13）
-
-`OBS-Android-arm64-hwcodec-browser-20261106-2313.apk`，97,640,478 字节，SHA-256：
-
-```text
-603f979edd39e55f13e55957af9f6eee882258ab8d58af947ad7790a1fccb4ba
-```
-
-完整 Android 原生/Qt/Java/APK 构建、签名、16KB ZIP 对齐及包内新 UVC 代码/原生库一致性核验通过。APK 不纳入源码 Git。
-
-## 已执行与边界
-
-`scripts/test-android-uvc.ps1` 覆盖缓冲交接与借用保护、过载序号缺口、USB 错误/取消/部分启动失败、标准 payload 重组、含伪 UVC 头的完整 1080p YUYV/NV12 图像、滑动缓冲、生产模式选择、PROBE 偏移、平面布局、主机到达时间戳单调性、协商错误传播和假时钟恢复/限频。`scripts/test-android-usb-host.py` 额外覆盖两份生产 Java 实现的并发借用、断开重连、旧借用归还、复制失败及连接数限制。
-
-测试中的旧/新字节搬移计数仅来自合成数据，不能换算为平板加速比例。新线程模型和 payload 路径尚未用实际采集卡验证；当前仅实现 UVC **bulk**，不支持 isochronous-only 设备。标准路径依赖设备遵守协商的最大 payload 和 USB 短包边界；非标准设备可关闭低延迟模式使用兼容路径。
+* **多线程管线解耦**：将 `libusb` 事件接收线程与 YUV 帧解包/重组线程完全分离；在接收端使用预分配的环形缓冲池（Buffer Pool），完成回调仅进行指针所有权交接，避免在中断上下文中发生数据拷贝。
+* **Raw YUV 直接重组**：针对标准 bulk 载荷，严格依据 UVC 协议头部字段快速解出原始 YUV 像素包，直接组装成目标图像，消除中间字节流拷贝。
+* **GPU 纹理直连**：YUYV / NV12 帧直接进入 OBS 的 GPU 纹理上传与色彩转换管线（BT.709 矩阵），不在 CPU 层面进行耗时的 BGRA 色彩格式转换。
+* **断流检测与自愈机制**：引入基于有效视频帧率的看门狗服务；当检测到连续数秒无有效帧到达或 USB 端点卡死时，自动触发排空并执行重协商，保障流媒体长时间摄入的稳定性。

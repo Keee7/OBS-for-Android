@@ -1,35 +1,63 @@
-# Qt 6.11.1 Android runtime patches
+# Qt Android Runtime Patches / Qt Android 运行时补丁说明
 
-These two Java sources are based on Qt's official 6.11.1 sources:
-[QtInputDelegate.java](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java)
-and [QtRootLayout.java](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java).
-They retain the upstream SPDX license headers (Qt commercial license or LGPL-3.0-only or GPL-2.0-only or GPL-3.0-only). The accompanying `.patch` files show the changes against those sources.
+[English](#english) | [简体中文](#简体中文)
 
-- `QtInputDelegate` skips a repeated Android 11+ `InsetsController.show(ime)` only when Android reports the IME visible, the Java edit view still has focus, the Qt focus generation and edit view match the last show, and input hints and enter-key type match. The app's `ObsImeFocus` bridge tracks Qt focus changes, including different QWidget editors hosted by one QtWindow. Options, layout, focus requests, selection updates, and any required input restart remain in Qt's path. A hidden keyboard, a different editor or options, and the first show still use Qt's original show path. A queued request from an old focus generation is never suppressed by the guard.
-- The delegate remembers which edit view actually owns the cursor/selection popups. It clears that view on a hidden-handle request, keyboard dismissal, a change of edit view or view detachment. This prevents a popup from being stranded on an old view after the current edit view has changed. The cleanup runs on the Android UI thread, and queued show updates from an old Qt focus generation are ignored.
-- `QtRootLayout` registers a Qt application-state listener while attached. Once the native integration is ready it posts a read of the current nonzero attached root size to the Android UI thread and reports it to Qt. It also handles reattachment after integration is ready and unregisters on detach. The existing size-change path remains; there is no screen-size constant or polling. This addresses a startup ordering where multiple pre-integration layout sizes can leave the first size in Qt's available geometry.
+---
 
-`patch-qt-android-jar.py` accepts only version `6.11.1` and verifies the SHA-256 of both original Qt class files before compiling the replacement classes with JDK 17 and the Android SDK. It writes a separate jar and refuses to overwrite the input; the installed Qt SDK jar is never modified. Package integration must stage Qt dependencies, create the separate patched jar, replace the **staged** `libs/Qt6Android.jar`, and then invoke Gradle. Running `androiddeployqt` again after replacement can overwrite the staged jar. The app Java package must include `ObsImeFocus.java` and native OBS must connect its focus-change bridge. A newer Qt version requires a fresh source and behavior review, updated patch, class hashes, and tests; do not bypass the version or hash checks.
+<a name="english"></a>
+## English
 
-Example (paths are illustrative):
+This directory contains targeted patches for Qt Android runtime Java components based on official Qt 6.11.1 sources:
+* `QtInputDelegate.java`: [Qt 6.11.1 upstream source](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java)
+* `QtRootLayout.java`: [Qt 6.11.1 upstream source](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java)
+
+Original SPDX license headers (LGPL-3.0-only / GPL-2.0-only / GPL-3.0-only) are retained.
+
+### Key Modifications
+
+1. **`QtInputDelegate` Redundant Show Suppression**:
+   * Skips redundant Android 11+ `InsetsController.show(ime)` requests when the IME is confirmed visible, focus generation matches, and input hints have not changed.
+   * Tracks edit-view popup ownership and automatically dismisses cursor handles when views detach or dialogs close.
+2. **`QtRootLayout` Geometry Synchronization**:
+   * Registers a Qt application-state listener and synchronizes current attached root dimensions to Qt once native integration is fully initialized, resolving startup layout mismatch issues in split-screen and floating window modes.
+
+### Usage Example
 
 ```sh
 python scripts/qt-android-ime/patch-qt-android-jar.py \
   --qt-version 6.11.1 --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
   --android-jar "$ANDROID_SDK_ROOT/platforms/android-36/android.jar" \
   --javac "$JAVA_HOME/bin/javac" --output "$BUILD/Qt6Android-patched.jar"
-# Copy the output to the androiddeployqt staging directory's libs/Qt6Android.jar,
-# then run Gradle against that staging directory.
 ```
 
-The host policy test can be run with JDK 17:
+The patched jar replaces the staged `libs/Qt6Android.jar` before invoking Gradle during packaging. The installed Qt SDK jar remains untouched.
+
+---
+
+<a name="简体中文"></a>
+## 简体中文
+
+本目录包含针对 Qt 6.11.1 Android 运行时 Java 组件的专用补丁：
+* `QtInputDelegate.java`：基于 [Qt 6.11.1 官方源码](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java)；
+* `QtRootLayout.java`：基于 [Qt 6.11.1 官方源码](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java)。
+
+完整保留上游 SPDX 开源许可证声明（LGPL-3.0 / GPL-2.0 / GPL-3.0）。
+
+### 核心修改点
+
+1. **`QtInputDelegate` 多余弹起请求拦截**：
+   * 在 Android 11+ 环境下，当软键盘已被系统确认为可见、当前编辑框焦点与输入选项未变时，跳过多余的 `InsetsController.show(ime)` 调用；
+   * 准确跟踪手柄所有权视图，在失焦、对话框关闭或视图解绑时自动清理光标手柄，杜绝残影。
+2. **`QtRootLayout` 根布局尺寸同步**：
+   * 注册应用状态监听器，在原生初始化完成后主动读取当前实际附加的非零根布局尺寸并上报给 Qt，解决系统分屏与小窗冷启动时的初始几何错位问题。
+
+### 打包应用流程
 
 ```sh
-mkdir -p /tmp/obs-ime-test
-"$JAVA_HOME/bin/javac" -d /tmp/obs-ime-test \
-  obs-studio/frontend/cmake/android/java/com/obsproject/studio/ObsImeFocus.java \
-  scripts/qt-android-ime/ObsImeFocusTest.java
-"$JAVA_HOME/bin/java" -ea -cp /tmp/obs-ime-test ObsImeFocusTest
+python scripts/qt-android-ime/patch-qt-android-jar.py \
+  --qt-version 6.11.1 --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
+  --android-jar "$ANDROID_SDK_ROOT/platforms/android-36/android.jar" \
+  --javac "$JAVA_HOME/bin/javac" --output "$BUILD/Qt6Android-patched.jar"
 ```
 
-This checks the duplicate-show decision, not Android input delivery. The jar script's successful compilation and APK runtime verification establish packaging, not device behavior. On a device, verify initial open, repeated real soft-keyboard deletions and text input, editor switching, dismiss/reopen, input-option changes, and root resizing in fullscreen and an Android small window. Compare actual `onRequestShow` counts, selection/cursor position, and the available geometry with the root view; do not infer IME or layout success solely from host tests.
+构建脚本在执行 Gradle 打包前，会自动生成已修补的 Jar 包并替换暂存目录下的 `libs/Qt6Android.jar`，本机安装的原生 Qt SDK 目录不会被修改。

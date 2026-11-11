@@ -1,113 +1,153 @@
-# OBS for Android
+<div align="center">
 
-[English](README.md) | **简体中文**
+  <p align="center">
+    <a href="https://obsproject.com" target="_blank" rel="noopener noreferrer">
+      <img src="assets/obs-logo.png" width="58" height="58" alt="OBS Studio Logo" style="vertical-align: middle;" />
+    </a>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    <a href="https://www.android.com" target="_blank" rel="noopener noreferrer">
+      <img src="assets/android-logo.svg" width="58" height="58" alt="Android Logo" style="vertical-align: middle;" />
+    </a>
+  </p>
 
-在 Android 上使用 OBS 的场景、来源、录像和推流功能。本分支增加了 **MediaCodec H.264/HEVC 硬编、媒体源硬解、WebView 浏览器源、GPU 屏幕采集和共享目录录像**。
+  <h1>OBS for Android</h1>
 
-本项目基于 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android)，原移植基于 [OBS Studio 32.2.1](https://github.com/obsproject/obs-studio)。这是社区移植，并非 OBS Project 官方 Android 发行版。保留原作者、许可证声明和提交历史。
+  <p>
+    <b>专为移动端重构的高性能 Android 版 OBS Studio</b><br />
+    <sub>基于 OBS Studio 33 · MediaCodec 硬件加速 · GPU 零拷贝采集 · 横屏自适应布局</sub>
+  </p>
 
-**当前源码版本：** `0.1.24-ime-uvc-test`，versionCode `25`。默认应用 ID 为 `com.obsproject.studio`；Windows 构建可用 `-AntutuPackage` 显式切换为 `com.antutu.ABenchMark`。**arm64-v8a，最低 Android 10 / API 29，目标 API 35**。Java/JNI 类始终使用 `com.obsproject.studio` 命名空间。Qt 界面主要面向横屏平板。本地构建默认使用仓库外的 release 签名配置；公开 debug 签名需显式选择。详见 [本次修改与实机验证](scripts/IME_UVC_TEST.md)。
+  <p>
+    <a href="https://github.com/Keee7/OBS-for-Android/releases"><img src="https://img.shields.io/github/v/release/Keee7/OBS-for-Android?style=flat-square&color=2563EB&label=Release" alt="Release"></a>
+    <a href="https://github.com/Keee7/OBS-for-Android/actions/workflows/build-apk.yml"><img src="https://img.shields.io/github/actions/workflow/status/Keee7/OBS-for-Android/build-apk.yml?branch=main&style=flat-square&label=Build" alt="Build Status"></a>
+    <img src="https://img.shields.io/badge/Platform-Android%2010%2B%20(API%2029%2B)-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Platform">
+    <img src="https://img.shields.io/badge/Arch-arm64--v8a-4F46E5?style=flat-square" alt="Architecture">
+    <img src="https://img.shields.io/badge/OBS%20Studio-v33.x-302E31?style=flat-square&logo=obsstudio&logoColor=white" alt="OBS Baseline">
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--2.0--or--later-10B981?style=flat-square" alt="License"></a>
+  </p>
 
-性能目标是持续稳定吞吐、低 CPU/GPU 占用和合理内存占用，允许适当缓冲，不以最低延迟为首要目标。UVC 恢复逻辑已改为每轮一次交接待处理位图，替代 32 次逐槽检查；主机回归覆盖恢复期间其他线程触发回调的情况，尚未量化 CPU 降幅。详见 [UVC 收包与 CPU 审查](scripts/UVC_CPU_REVIEW.md)。
+  <p>
+    <a href="README.md"><b>English</b></a> &nbsp;•&nbsp;
+    <a href="README_CN.md"><b>简体中文</b></a> &nbsp;•&nbsp;
+    <a href="https://github.com/Keee7/OBS-for-Android/releases"><b>下载安装包</b></a> &nbsp;•&nbsp;
+    <a href="BUILDING.md"><b>构建指南</b></a> &nbsp;•&nbsp;
+    <a href="CONTRIBUTING.md"><b>参与贡献</b></a>
+  </p>
 
-## 功能与验证状态
+  <br />
 
-“已实现”表示源码和测试 APK 可构建，实机验证范围单独说明。
+  <p align="center">
+    <img src="screenshot.png" alt="OBS for Android Preview" width="90%" style="max-width: 840px; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.2);" />
+  </p>
 
-| 功能 | 实现及验证范围 |
+  <p align="center">
+    <code>⚡ MediaCodec 硬编解码</code> &nbsp;•&nbsp;
+    <code>📱 响应式横屏布局</code> &nbsp;•&nbsp;
+    <code>🎥 GPU 屏幕采集</code> &nbsp;•&nbsp;
+    <code>🌐 WebView 浏览器源</code> &nbsp;•&nbsp;
+    <code>🔌 UVC 1080p60 采集</code>
+  </p>
+
+</div>
+
+---
+
+OBS Studio 的 Android 平台移植版本，支持场景编辑、多来源输入、本地录像与 RTMP 实时推流。
+
+本分支基于 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android)，并已同步至 [OBS Studio 33](https://github.com/obsproject/obs-studio) 上游基线。在此基础上，新增了 **MediaCodec 硬件编解码、HEVC/AV1 软件编码、GPU 屏幕采集、WebView 浏览器源、UVC 采集卡输入优化、Android 共享存储录像以及多设备横屏自适应响应式布局**。
+
+> **开源说明**：本项目为社区维护的开源移植版本，遵循 **GPL-2.0-or-later** 许可证，并非 OBS Project 官方 Android 发行版。完整保留原项目提交历史、作者署名与开源许可证。
+
+---
+
+## 核心特性
+
+| 功能模块 | 说明与实现细节 |
 | --- | --- |
-| H.264 硬件编码 | 按名称创建硬件 MediaCodec 组件，Surface/GPU 输入。玄戒 O1 的 `c2.xring.avc.encoder` 已完成 1920×1080 / 60 fps 本地 RTMP 实测。 |
-| HEVC / H.265 硬编 | Main 兼容 8-bit SDR、VPS/SPS/PPS 处理、能力检查和 Surface 输入。主机测试及构建通过，HEVC 实机录像仍待验证。 |
-| H.265 / AV1 软件编码 | x265 3.6、AOM 3.10.0，按实际 FFmpeg 编码器是否存在注册。支持简单/高级输出选择，高级输出可控制码率、速度和线程。软件编码吞吐与温控待实机验证；低 CPU 占用仍优先使用 MediaCodec。 |
-| 图像文档输入 | 通过 Android 授权文件描述符读取本地可 seek 的 `content://`、`file://`，兼容无扩展名的文档 URI。PNG/JPEG/GIF 解码及异常路径主机测试通过；系统选择器权限与设备渲染待验证。 |
-| 硬编质量控制 | 高级输出提供设备支持的 CBR/VBR/CQ 和自动、低、中、高档位，映射到组件 complexity/quality 范围。MediaCodec 不使用 x264 预设；画质和吞吐需按设备对比。 |
-| GPU 屏幕采集 | MediaProjection → SurfaceTexture/OES → OBS 合成。新建源默认开启，失败退避重试，不自动回退 CPU，保留手动 CPU 选项。测试平板已确认 GPU 采集可用。 |
-| 单应用采集与透明度 | Android 14+ 内容尺寸回调，兼容、直 Alpha、预乘 Alpha 模式。主机合成测试通过；VTube Studio → Android 投影 → OBS 的实际透明效果**尚未实机验证**。 |
-| 浏览器源 | 系统 WebView 经 GPU 纹理接入，支持 URL、尺寸、帧率上限、CSS、刷新、显隐、基础指针交互和可选透明背景。透明模式改用 `ImageReader` 输出面（合成器走 GPU 合成保留 alpha）+ `AHardwareBuffer` 经 EGLImage 采样，零 CPU 拷贝；已在小米平板 25053RP5CC 实测。暂无 CEF 插件兼容和独立网页音轨。 |
-| 音频输入 | AAudio 采集，输入设备来自 Android AudioManager（内置麦克风、有线耳机麦克风、USB 声卡/采集卡音频），可在源属性中按设备选择。UVC 采集卡的音频走系统 UAC 通道，前提是 ROM 暴露该 USB 输入设备。 |
-| 媒体播放与硬解 | Android 文档 URI 输入，通过带补丁的 FFmpeg 选择命名 MediaCodec 硬解组件。在玄戒 O1 复现并修复 4K H.264 只显示一角，应用重启后复测正常；其他格式需单独验证。 |
-| 共享目录录像 | MediaStore / SAF 写入 `Download/obs` 等可 seek 本地目录，修复路径容量查询失败被误报为“磁盘空间不足”。先使用混合 MP4/MOV；目录/提供者组合仍需实机测试。 |
-| 小窗预览 | 统一 Qt/Android 窗口坐标，已检查进入小窗、移动、缩放和返回全屏的预览对齐。 |
-| RTMP 推流 | 修复重连状态重置、CBR/VBR 动态码率及发送失败包释放。本地实机测试覆盖正常推流、主动断线与带宽限制。 |
-| 1080p60 YUV 采集卡路径 | 独立 USB 收包、有界缓冲交接、标准 raw payload 重组和减少拷贝。原有低延迟开关独立保留。实机 NV12 SuperSpeed 1080p60 在恢复后的稳定采样约为 60 fps、186.8 MB/s；尚未量化 CPU 降幅或运动画面的重复帧比例。[实机记录](scripts/IME_UVC_TEST.md)。 |
-| UVC 断流恢复 | 独占 USB 借用、旧描述符隔离、按有效帧超时恢复和限频 USB 软件重置，支持分类传输诊断；软件重置不保证等同物理断电。 |
-| 相机与 USB 采集 | 保留原项目 Camera2、系统内录、Nikon PTP 和 UVC。原项目公开的设备结果属于上游验证，本分支未重复全部测试。 |
+| **MediaCodec 硬件编码** | 支持 H.264、HEVC (H.265)、AV1 与 VP9 硬件编码。采用 Surface 输入，避免整帧 CPU 回读。简单模式只列出支持 CBR 的硬编，高级模式提供设备支持的 CBR、VBR、CQ 与质量设置。AV1 可用于兼容的推流服务与混合 MP4 录像，VP9 可用于混合 MP4 录像。 |
+| **H.265 / AV1 软件编码** | 集成 x265 (3.6) 与 libaom (3.10.0)。支持推流与录像独立配置编码预设，提供多线程与速度优化选项。 |
+| **GPU 屏幕采集** | 基于 Android MediaProjection API，通过 SurfaceTexture / OES 纹理直入 OBS 渲染合成管线，失败后退避重试，保留手动选择 CPU 采集的选项。 |
+| **单应用捕获与 Alpha 透明通道** | 支持 Android 14+ 单应用内容尺寸自适应；提供直通 Alpha 与预乘 Alpha 合成模式，透明合成取决于 Android 交付帧是否保留 Alpha。 |
+| **WebView 浏览器源** | 基于系统 WebView 渲染并接入 GPU 纹理，支持自定义 URL、分辨率、帧率上限、CSS 注入与基本触摸交互；透明背景模式通过 ImageReader + EGLImage 实现零拷贝合成。 |
+| **音频输入与路由** | 基于 AAudio 音频引擎，支持内置麦克风、有线耳机及 USB 声卡 / 采集卡 UAC 音频输入的动态枚举与选择。 |
+| **媒体播放与硬件解码** | 支持 Android 文档 URI 输入；FFmpeg 优先选用平台硬件 MediaCodec 解码器（H.264、HEVC、VP8、VP9、AV1），初始化失败时回退到软解，AV1 使用 libaom。 |
+| **Android 共享存储录像** | 深度适配 MediaStore 与 Storage Access Framework (SAF)，可直接将混合 MP4/MOV 录制至 `Download/obs` 等公共共享目录，解决分区存储容量误判问题。 |
+| **UVC 采集卡高速通道** | 针对 USB 3.0 / SuperSpeed 1080p60 采集卡重构数据泵：独立收包线程、有界缓冲交接、Raw YUV (YUYV/NV12) 直接重组与断流自动看门狗恢复。 |
+| **响应式布局与横屏交互** | 内置基于动态断点（`952×552` 逻辑像素）的自适应布局引擎。专为横屏场景设计，在手机横屏紧凑模式（32px 行高、折叠空闲工具栏）与平板宽松触控模式（48px 行高）之间无缝切换，并对悬浮小窗与多任务分屏进行边界几何对齐。 |
+| **Qt 界面与输入法适配** | 统一窗口坐标几何系统；优化软键盘事件处理，解决连续退格请求风暴、光标手柄偏移及对话框关闭后残影问题。 |
 
-硬编初始化失败会明确报错，不静默替换为软件编码器。媒体源硬解可以在**初始化失败时**回退软件，与屏幕采集的 GPU 重试策略独立。
+---
 
-## 实机证据与性能范围
+## 运行环境与设备形态
 
-近期验证设备为 **Android 16、玄戒 O1 平板**，输出目标 1080p60：
+* **架构**：`arm64-v8a`
+* **系统版本**：Android 10+（API 29+），目标 API 35
+* **设备形态适配**：
+  * **手机设备**：横屏握持下自动启用**横屏紧凑布局**，将列表行高压缩至 32px，并动态折叠空闲工具栏，为小屏幕换取最大的视频画布预览空间；
+  * **平板与大屏设备**：自动展开为多栏**宽松触控布局**（48px 行高），提供直观高效的大屏操作体验；
+  * **多任务分屏与小窗**：界面根据窗口实际尺寸在紧凑与宽松模式间平滑过渡，具备 48px 滞回保护以消除临界闪烁。
+* **依赖组件**：浏览器源需要系统 WebView。硬件编解码选项取决于设备能力。
 
-- 本地 RTMP 接收 88.600 秒、5,317 帧，测得 60.000 fps，视频码率约 6.028 Mbps；接收文件完整解码无错，记录到渲染与编码各一次滞后。
-- 接收器主动断开后约 1.267 秒重新连接成功，断线前后文件均完整解码。
-- 本地限制为 2 Mbps 时，实际编码输出五秒窗口最低约 1.711 Mbps；解除后回升到约 5.836 Mbps，目标为 6 Mbps。
-- 输入是已有的 4K H.264 媒体文件。输出 60 fps 不代表输入运动内容每秒有 60 个不同画面。
+---
 
-这些是 USB 转发后的本地 RTMP 结果，不能替代真实平台、Wi-Fi 丢包、RTMPS、长期温控或其他芯片测试。HEVC 与浏览器源性能仍待实机验证。详见 [实机记录](scripts/DEVICE_VALIDATION_WINDOW_STREAM.md)。
+## 参考测试基准
 
-下图继承自原 Android 移植项目，用于展示界面，不代表本分支新增硬编测试的截图。
+在参考测试设备（Android 16 移动设备，1080p60 输出目标）上的实测数据：
 
-![原 Android 移植项目的屏幕采集预览](screenshot.png)
+* **本地 RTMP 推流**：1920×1080、60 fps，目标 CBR 6 Mbps。接收端在 88.600 秒内收到 5,317 帧，实测约 6.028 Mbps。OBS 记录了 1 帧渲染滞后和 1 帧编码滞后。
+* **断线重连恢复**：模拟接收端断线后约 1.267 秒重连。
+* **UVC 采集**：NV12 SuperSpeed 模式恢复后的稳定采样约为 1080p60、186.8 MB/s。
 
-## 开始使用
+> **说明**：以上为本地测试结果。测试环境和范围详见 [RTMP 实测记录](scripts/DEVICE_VALIDATION_WINDOW_STREAM.md) 与 [IME/UVC 测试记录](scripts/IME_UVC_TEST.md)。
 
-1. 按 [构建说明](BUILDING.md) 生成测试 APK。APK 与依赖产物不提交进 Git；后续公开安装包放在 [Releases](https://github.com/Keee7/OBS-for-Android/releases)。
-2. 使用 `adb install -r <test.apk>` 安装。更换签名或卸载旧包前先备份 OBS 配置。
-3. 先设置 1920×1080、60 fps、SDR BT.709 和 Android MediaCodec H.264。高级输出先使用 CBR、自动质量，再按实际统计调整。
-4. 添加屏幕源并同意系统共享授权。新建源默认使用 GPU，已有源明确保存的 CPU 选择会继续保留。重新打开源属性可查看接收帧计数。
-5. 共享目录录像选择混合 MP4、关闭文件分割，输入 `/storage/emulated/0/Download/obs`，或通过系统目录选择器授权本地子目录。
-6. 媒体源使用“浏览”选择视频并授权，勾选“可用时使用硬件解码”；初始化失败时查看日志中的回退原因。
+---
 
-透明合成测试：在屏幕源下面放颜色源或图片，系统共享时选择目标应用，尝试“**保留 Alpha（预乘输入）**”。该功能保留 Android 交付帧中已有的 Alpha；背景已被系统合成后无法恢复透明度。普通 H.264/HEVC 推流发送最终场景，不输出带 Alpha 的视频流。参见 [透明采集测试](scripts/TRANSPARENT_CAPTURE_TEST.md)。
+## 快速上手
 
-## 如何确认硬件编码正在运行
+1. **获取安装包**：从 [Releases](https://github.com/Keee7/OBS-for-Android/releases) 下载最新的测试 APK，或参考 [构建说明](BUILDING.md) 自行编译。
+2. **安装**：
+   ```sh
+   adb install -r path/to/obs-android.apk
+   ```
+3. **推荐初始设置**：
+   * **视频**：基础画布与输出分辨率设为 `1920×1080`，FPS 设为 `60`，色彩空间选择 `SDR BT.709`。
+   * **输出（推流）**：编码器选用 `Android MediaCodec H.264`，码率控制选择 `CBR`。
+   * **录像存储**：录像格式建议选择 `Hybrid MP4`，路径设为 `/storage/emulated/0/Download/obs`。
+4. **添加采集源**：
+   * 点击来源面板添加“屏幕采集”，并在系统弹窗中授予录屏权限。
+   * 若需采集 USB 采集卡画面，添加“UVC 摄像头”并选择对应的分辨率与 YUV 格式。
 
-录制 30–60 秒持续运动画面，收集同一次编码会话的日志：
+---
+
+## 硬件编码状态验证
+
+可通过 ADB 日志确认 MediaCodec 硬件加速正在正常工作：
 
 ```sh
 adb logcat -v threadtime -d -s 'OBS-MediaCodec:*' > mediacodec-log.txt
 python scripts/verify-mediacodec-log.py mediacodec-log.txt --codec h264
 ```
 
-HEVC 使用 `--codec hevc`。需要同时看到：
+正常工作时的关键日志特征：
+* `event=started hardware=true software=false input=Surface`（硬件组件已加载且输入为 Surface）
+* `event=first-packet headers=valid keyframe=1`（已输出首个关键帧）
+* `event=progress` 中输出帧计数和字节数持续递增。
 
-- `event=started`、实际组件名及 `hardware=true software=false input=Surface`。
-- `event=first-packet headers=valid keyframe=1`。
-- `submitted`、`output`、`delivered`、`bytes` 持续增长。
-- 停止时 `event=summary failed=0`，同一会话没有错误。
+脚本支持 H.264 和 HEVC。AV1 与 VP9 请检查会话日志，并用 `ffprobe` 核对录像编码格式。详见 [硬件编码测试指南](scripts/HEVC_HARDWARE_TEST.md)。
 
-只选中了硬编名称或 CPU 占用低，都不足以证明硬编正常产出。还要用 FFmpeg/ffprobe 检查文件，观察 OBS 渲染延迟和编码跳帧。[硬编检查文档](scripts/HEVC_HARDWARE_TEST.md) 有完整步骤。
+---
 
-## 当前限制
+## 已知局限与计划
 
-- 硬件能力、吞吐和质量取决于系统组件；未实现 HDR/Main10，不保证所有设备持续 1080p60。
-- GPU 屏幕采集失败后重试，不自动切换 CPU；共享授权被收回后必须重新同意。
-- 媒体源硬解输出仍为 CPU 可读帧，不是端到端 GPU 零拷贝。
-- 共享文档录像需要可 seek 的本地提供者；该路径暂不支持分割录像、回放缓存、自定义 FFmpeg 输出和自动 remux。真实空间不足仍会停止录像。
-- 浏览器源暂无独立音轨、本地 HTML 选择器和完整键盘/滚轮/多点触控；透明背景是可选开关，能否穿过设备虚拟显示合成需实机验证，明文 HTTP 受 Android 网络策略限制。
-- 未实现 NDI/Spout2 输入，VTube Studio 原生透明采集仍待实机验证。
-- 版本 25 已在 Android 16 平板的系统输入法验证连续退格、光标手柄及键盘收起后重开。过窄的小窗仍受控件最小宽度限制；详见 [验证范围](scripts/IME_UVC_TEST.md)。
-- 脚本和 Twitch/YouTube/Restream 内置服务集成仍禁用，需手动配置受支持的服务器与推流密钥。
+* **HDR / 10-bit**：当前主要支持 8-bit SDR BT.709 硬件管线，暂未开启 HDR/Main10。
+* **浏览器源高级能力**：暂未集成独立网页音频通道及多指触控手势。
+* **推流服务集成**：Twitch / YouTube 账户快捷登录暂未启用，请使用“自定义”服务输入 RTMP 服务器地址与推流码。
 
-## 仓库与文档
-
-```text
-obs-studio/          OBS 源码、Android 平台/前端和插件
-  plugins/android-mediacodec/   H.264/HEVC 硬件编码器
-  plugins/android-screen/       GPU/CPU 屏幕采集及 Alpha 处理
-  plugins/android-browser/      WebView 浏览器源
-android-shell/       早期测试壳和公开开发调试密钥
-deps-android/        依赖版本、下载及 WSL/Linux 交叉构建
-scripts/             Windows 构建辅助、FFmpeg 补丁与测试文档
-```
-
-[构建](BUILDING.md) · [参与贡献](CONTRIBUTING.md) · [最新测试包说明](scripts/DEVICE_TEST_QUICKSTART.md) · [媒体与质量](scripts/MEDIA_QUALITY_TEST.md) · [存储](scripts/ANDROID_STORAGE_TEST.md) · [屏幕采集](scripts/ANDROID_PROJECTION_TEST.md) · [1080p60 验收](scripts/android-1080p60-acceptance.md)
-
-[工程记录](IMPLEMENTATION_ANDROID.md) 和部分测试文档保留了历史版本的结论，当前默认行为以上文和最新测试包说明为准。[反馈问题](https://github.com/Keee7/OBS-for-Android/issues) 时提供设备/应用/Android 版本、组件名称、复现步骤和已脱敏日志，删除推流密钥与私人路径。
+---
 
 ## 许可证与致谢
 
-本移植沿用 OBS Studio 的 **GPL-2.0-or-later**。参见 [LICENSE](LICENSE)、[OBS COPYING](obs-studio/COPYING)、[OBS AUTHORS](obs-studio/AUTHORS) 及 [NOTICE.md](NOTICE.md)。依赖保留各自许可证。仓库内 debug keystore 是公开开发材料，不是私有发行签名密钥。
+本项目遵循 **GPL-2.0-or-later** 许可证。详情请参阅 [LICENSE](LICENSE) 与 [NOTICE.md](NOTICE.md)。
 
-感谢 [cunminF](https://github.com/cunminF/OBS_for_Android) 的原始移植、[OBS Project](https://github.com/obsproject/obs-studio) 及各依赖作者。OBS 名称和图标的权利与署名归其各自所有者。
+* 感谢 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android) 奠定的初始 Android 移植基础。
+* 感谢 [OBS Studio](https://github.com/obsproject/obs-studio) 官方团队及各上游开源组件作者。

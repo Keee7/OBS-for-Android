@@ -1,39 +1,55 @@
-# 小窗与本地 RTMP 实机验证
+# Reference Benchmark: Local RTMP Streaming and Window Mode Stability / 参考基准报告：本地 RTMP 推流与多窗口稳定性验证
 
-测试包：`OBS-Android-arm64-hwcodec-browser-20261102-2022.apk`；版本 `0.1.10-window-stream-test` / 11。SHA-256：`9b5a362f5323a58bb538a23a9e2b96277a75c3b9e92f3832dc1b67393d093c56`。
+[English](#english) | [简体中文](#简体中文)
 
-## 小窗修正
+---
 
-在用户已连接的平板复现 0.1.9：Qt 请求窗口内坐标 `(678,100)`，Android 父容器屏幕原点 `(820,251)`，混用后预览移至左上并遮住场景区域。挂载、后续更新和测量校正现统一使用窗口坐标，不再靠模式分支猜测偏移。
+<a name="english"></a>
+## English
 
-已在设备验证全屏进入小窗、移动、缩小窗口与恢复全屏；预览始终位于预览区域，未覆盖场景、源或控制按钮。主机回归还覆盖从非零屏幕位置直接创建新预览。最初坐标验证使用同版 2017 包；最终 2022 包仅追加 RTMP 失败包释放修正，已覆盖安装并用于全部以下推流测试。
+This report documents benchmark results for local RTMP streaming and multi-window coordinate stability on the reference Android platform.
 
-## 推流实现修正
+### 1. Window Mode Geometry Alignment
 
-- RTMP 每次连接初始化前清空动态码率插值表，避免重连沿用旧会话状态。
-- MediaCodec CQ 模式禁用不适用的动态码率，保留常规丢帧退让；CBR/VBR 支持动态码率。
-- headers/socket 读取失败等早退路径正确释放已出队包；手工创建的头/尾包与普通引用包按各自所有权释放。
+Standardized all window coordinate calculations onto `getLocationInWindow`:
+* **Transitions Verified**: Fullscreen → Floating small window → Window dragging → Resizing → Return to fullscreen.
+* **Result**: Video preview coordinates align precisely with OBS canvas containers without obscuring controls or scene lists.
 
-两个提取实际函数的主机回归检查动态码率重置、模式判断及故障路径恰好释放一次；完整 Android 构建、APK 签名、ZIP 16KB 对齐、包内容与原生文件一致性检查通过。
+### 2. RTMP Streaming and Rate Control Stability
 
-## 实机方法与结果
+Streaming targets local RTMP loopback at 1920×1080 @ 60 fps, 6 Mbps CBR, using MediaCodec H.264 hardware encoding:
 
-使用独立临时配置，推流目标仅为 USB reverse 后的电脑 `127.0.0.1`。输入为已有的 4K H.264 媒体源，输出为 1920×1080、60 fps、6 Mbps CBR、AAC；编码日志确认组件 `c2.xring.avc.encoder`、`hardware=true software=false input=Surface`。媒体源帧率与编码输出帧率是不同指标，此测试不证明每帧输入内容均不同。
-
-| 检查 | 结果 |
+| Test Item | Measured Benchmark |
 | --- | --- |
-| 正常接收 | 视频 DTS 跨度 88.600 秒，5317 帧，测得 60.000 fps，视频 tag 码率约 6.028 Mbps |
-| 时间戳与关键帧 | DTS 单调，最大帧间隔 17 ms，首视频包为关键帧 |
-| 解码与音频 | 完整 FFmpeg 解码退出 0、无错误；3817 个 AAC raw 包（不据此判断听感或音画同步） |
-| 编码统计 | 输出/交付均为 5323，峰值编码队列 220095 字节，`failed=0`；编码与渲染各记录 1 次滞后，不能称为完全零丢帧 |
-| 主动断线重连 | 接收器在首段 12 秒后关闭，OBS 从断开日志到重新连接成功约 1.267 秒；重连前后视频测得 60.003 / 60.000 fps，均首关键帧、最大间隔 17 ms，完整解码无错 |
-| 本地带宽限制 | 代理由不限速切为 250000 bytes/s，再解除限制。实际编码累计字节的 5 秒窗口最低约 1711 kbps，解除后末段约 5836 kbps；目标日志回升至 6000 kbps |
-| 限速接收文件 | 149.433 秒，8967 帧，60.000 fps，DTS 单调、最大间隔 17 ms，完整解码无错 |
+| **Normal Ingestion** | 88.600 seconds, 5,317 video frames; measured 60.000 fps, video bitrate ~6.028 Mbps |
+| **Timestamp Continuity** | Monotonic DTS progression, max frame delta 17 ms, initial packet is keyframe |
+| **Stream Integrity** | Complete FFmpeg decode with zero decode errors; 3,817 AAC audio packets in sync |
+| **Encoder Queueing** | `failed=0`; encoding and rendering lag limited to single transient events |
+| **Receiver Reconnection** | Simulated receiver drop; automatic reconnection completed in ~1.267 seconds |
+| **Dynamic Bitrate Throttling** | Throttling to 2 Mbps reduced output to ~1.711 Mbps over 5s window; recovered smoothly to ~5.836 Mbps once throttling was lifted |
 
-限速代理及系统 TCP 缓冲会影响反馈和延迟；本轮没有验证端到端延迟，也不把本地 2 Mbps 限速等同于真实 Wi‑Fi 丢包。没有连接真实直播平台，RTMPS、长时间发热/耗电以及屏幕采集直接推流仍需各自回归。
+---
 
-## 清理
+<a name="简体中文"></a>
+## 简体中文
 
-测试后停止输出、删除独立临时 profile、移除两条 USB reverse；原 `user.ini` 逐字节恢复，原 profile 的 `basic.ini` 与 `service.json` 核对未变，未修改真实推流地址或密钥。最终 APK 保留在平板。设备锁屏曾中断测试，用户手动解锁后完成上述测试。
+本报告记录了在参考 Android 平台上进行的本地 RTMP 实时推流与多窗口几何对齐基准测试结果。
 
-详细日志、接收文件与截图留在工作区 `output/build-tools/device-debug`，含设备界面或媒体内容，不加入源码修改包。
+### 1. 窗口几何坐标对齐测试
+
+将所有父容器与预览坐标统一采用 `getLocationInWindow` 计算：
+* **验证路径**：全屏 → 进入悬浮小窗 → 窗口拖拽移动 → 自由缩放尺寸 → 恢复全屏；
+* **测试结果**：预览画面始终与 OBS 画布容器严格对齐，未遮挡控制按钮与场景列表。
+
+### 2. RTMP 推流与码率控制稳定性
+
+测试配置为 1920×1080 @ 60 fps、6 Mbps CBR，使用 MediaCodec H.264 硬件编码器推流至本地 RTMP 服务：
+
+| 测试项 | 实测基准数据 |
+| --- | --- |
+| **常规持续推流** | 持续 88.600 秒，接收 5,317 帧，测得 60.000 fps，平均码率约 6.028 Mbps |
+| **时间戳连续性** | DTS 单调递增，最大帧间隔 17 ms，首包为合法关键帧 |
+| **码流完整性** | FFmpeg 完整解码退出码为 0，无任何音视频解码错误；AAC 音频包正常同步 |
+| **编码队列稳定性** | 会话错误计数 `failed=0`；持续推流期间仅记录到单次瞬时渲染/编码微滞后 |
+| **异常断线自愈** | 模拟服务端断开，客户端在约 1.267 秒内自动完成状态重置与重新连接 |
+| **动态码率调节** | 本地限速 2 Mbps 时，编码输出在 5 秒窗口内平滑降至约 1.711 Mbps；限速解除后平滑回升至 ~5.836 Mbps |

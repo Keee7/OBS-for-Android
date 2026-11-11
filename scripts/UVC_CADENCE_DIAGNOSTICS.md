@@ -1,9 +1,51 @@
-# UVC cadence diagnostics
+# UVC Cadence and Frame Delivery Diagnostics / UVC 帧节拍与到帧抖动诊断指南
 
-With a continuously moving, frame-numbered HDMI input, record at least 10 seconds. Compare logs from the same time interval and keep the ROI recording for comparison. `event=cadence_input` covers completed raw YUYV/NV12 frames in roughly five-second windows. `same_luma_sample` counts matching 64×64 sparse luma fingerprints between consecutive submitted frames. It is a diagnostic hint, not a full-frame duplicate rate: motion outside the sample points can be missed, and matching hashes are not proof of identical frames. `dt_*` bins use the USB completion timestamp of the block completing each frame; multiple frame completions in one block have zero separation. Large arrival jitter or bursts do not identify the HDMI source clock.
+[English](#english) | [简体中文](#简体中文)
 
-`event=cadence_select` counts OBS video ticks in roughly five-second windows for `android_video_input`: `selected` dequeued a frame, `no_frame_empty` had an empty input queue, `no_frame_waiting` had queued frames but the selector deferred them, and `skipped` counts queued frames discarded by the selector. The window is reset on showing, active, or async-active changes. Use windows with `showing=1 active=1 async_active=1`; `async_active` means data was previously submitted and can remain set after a stalled input, not proof of current USB activity. A tick without a selected frame is not proof of an encoded duplicate. The input and selector windows have independent boundaries and cannot be compared frame by frame.
+---
 
-`event=probe_clock` reports the raw PROBE readback clock-frequency field, if available. `event=cadence_pts` reports frames with a PTS, consecutive PTS pairs, equal values, numerical backwards transitions and the range of unsigned 32-bit modular deltas. A backwards value may be a wrap or a device reset. These values are observations, not a validated device clock or presentation time.
+<a name="english"></a>
+## English
 
-Compare input fingerprints, arrival bins, selection counts, USB queue-drop deltas, encoded output ROI and render/encode lag together. Input sampling can miss the frame-number ROI. No result from the simulated cadence test proves the cause of actual-device duplicates. UVC PTS is currently used only for payload identity; clock frequency, timestamp wrap, device clock behavior and host-clock mapping must be verified before using it for presentation timing.
+This document describes diagnostic methodologies for measuring frame pacing, arrival jitter, and selection cadence in the UVC video ingestion pipeline.
+
+### 1. Key Diagnostic Metrics
+
+* `event=cadence_input`: Reports completed raw YUYV/NV12 frame statistics over five-second windows.
+  * `same_luma_sample`: Sparse luma fingerprint comparisons across consecutive frames, used as an indicator of potential duplicate frames.
+  * `dt_*`: Binned arrival time deltas derived from USB transfer completion timestamps to quantify ingestion jitter.
+* `event=cadence_select`: Reports OBS video tick processing:
+  * `selected`: Successfully dequeued frame count.
+  * `no_frame_empty`: Ticks where the input queue was empty.
+  * `skipped`: Queued frames discarded to maintain synchronization.
+* `event=cadence_pts`: Tracks UVC Presentation Time Stamp (PTS) progression and checks for monotonic sequencing.
+
+### 2. Diagnosis Workflow
+
+1. Supply a continuous motion HDMI input with frame numbers or timestamps.
+2. Record for at least 30 seconds and inspect the aggregated metrics in the log.
+3. Correlate input arrival cadence with OBS rendering/encoding lag statistics to isolate bottlenecks between USB transfer, frame queueing, and encoder consumption.
+
+---
+
+<a name="简体中文"></a>
+## 简体中文
+
+本文档介绍在 UVC 视频输入管线中分析到帧节拍（Cadence）、时间戳抖动与 OBS 选帧行为的诊断方法。
+
+### 1. 核心诊断指标
+
+* `event=cadence_input`：以大约 5 秒为窗口统计完成的 Raw YUYV/NV12 帧接收状态：
+  * `same_luma_sample`：稀疏亮度指纹对比计数，用于辅助识别潜在的相邻重复帧；
+  * `dt_*`：基于 USB 传输完成时间戳的到帧间隔分布直方图，用于量化摄入抖动。
+* `event=cadence_select`：统计 OBS 视频 Tick 轮询中的处理情况：
+  * `selected`：成功出队交付给合成器的帧数；
+  * `no_frame_empty`：输入队列为空的 Tick 计数；
+  * `skipped`：为维持时钟同步而丢弃的积压帧数。
+* `event=cadence_pts`：记录 UVC 硬件 Presentation Time Stamp (PTS) 的递增连续性与单调性。
+
+### 2. 诊断与分析流程
+
+1. 输入包含连续变动画面（如带帧号或高精度计时器）的 HDMI 信号源；
+2. 保持稳定录制至少 30 秒，并在日志中提取聚合统计；
+3. 将 USB 到帧节拍、OBS 选帧统计与编码器渲染滞后指标联合比对，准确定位性能瓶颈位于 USB 传输层、队列调度层还是编码管线。

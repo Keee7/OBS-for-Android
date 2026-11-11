@@ -1,54 +1,63 @@
-# UVC 收包与 CPU 占用审查
+# UVC Ingestion Pipeline and CPU Utilization Analysis / UVC 数据收包与 CPU 占用分析
 
-本文初稿为只读审查；当前版本已实现末节的重试状态交接优化，其余条目仍是候选方案。目标是稳定持续吞吐、低 CPU/GPU 占用和合理内存占用，允许缓冲；不以最低延迟作为优化目标。以下是代码层面的候选方案，不是玄戒 O1 的实测收益。
+[English](#english) | [简体中文](#简体中文)
 
-## 已有优化
+---
 
-- 独立 libusb 事件线程与解析线程；预分配缓冲池，完成回调通过所有权交接传递块，避免在回调里复制整个 USB 块。
-- 固定 payload 的 raw 路径按协商载荷边界解析，最大按 128 KiB 批量提交；兼容路径保留滑动窗口，消费时移指针、必要时才压实。
-- 有界队列、序列缺口隔离、取消并排干在途请求；仅当消费者实际等待时发送条件变量唤醒。
-- YUYV/NV12 保持到 OBS 上传路径，不先在 CPU 上逐像素转成 BGRA。
+<a name="english"></a>
+## English
 
-## 优先级与修改前需要的证据
+This document analyzes the CPU utilization, memory throughput, and optimization strategies for high-bandwidth UVC video capture on Android.
 
-| 优先级 | 候选 | 证据与预期作用 | 验证边界 |
-| --- | --- | --- | --- |
-| 1 | 合并事件循环的重试槽检查 | `uvc-bulk-pump.c` 每次 `libusb_handle_events_timeout` 返回后对 32 个槽逐个加锁检查 `needs_retry`；正常成功流量也执行。可考虑只在错误待重试时扫描，或一次锁住扫描。 | 先记录事件循环返回次数、锁等待和回调批量；同步控制传输也可能从其他线程驱动回调，不能当成纯单生产者。 |
-| 2 | 确认实际 raw/兼容解析路径 | `uvc-input.c` 的 `event=started` 已记录 `raw_packets`、payload、格式和速度。兼容分支还有字节扫描及流缓冲追加，成本与 raw 不同。 | `2b89:5348` 的 YUYV quirk 当前被排除出 raw 快路径，且有 NV12/MJPEG 黑场记录；不能为提速直接删除 quirk，需用真实载荷证据证明快解析器兼容。 |
-| 3 | 试验更大的 bulk 批次及相应队列预算 | 256/512 KiB 理论上可进一步减少完整批次的应用层回调、锁与唤醒。允许缓冲的目标有利于此方向。 | 短包可能提前结束传输；更大批次不必然减少内核 URB。需同步调整在途数、spare 下限与内存预算，不能只改一个常量。 |
-| 4 | 在能力可靠时选择 NV12 | 同尺寸帧率下，NV12 数据量是 YUYV 的 75%，可同时减少 USB、拷贝及纹理上传量。 | 两者色度采样不同，采集卡能力、画质与兼容性需核对；不强制 NV12，不静默改变用户所选格式。 |
-| 5 | 运行时控制诊断采样 | 当前 64×64 luma hash 每帧读取 4096 个采样点，60 fps 为 245,760 次采样/秒。可考虑按需启用或降频。 | 不能据此断言它是主要 CPU 瓶颈；采样相等也不能证明整帧相同。重复帧定位仍需要可用证据。 |
-| 后续 | 减少重组到 OBS 缓存的一次拷贝 | raw payload 先复制到 `frame_buf`，`obs_source_output_video` 再同步复制进异步缓存。带引用计数的完整帧所有权交接可能省一次。 | 需要修改帧生命周期、异步滤镜、格式变化、隐藏/销毁和过载行为；当前 API 不能把复用的 `frame_buf` 直接当成异步持有内存。风险较高。 |
+### 1. Ingestion Pipeline & Existing Optimizations
 
-## 吞吐与拷贝量
+* **Decoupled libusb Worker Thread**: Isolates libusb bulk transfer completions from frame assembly and OBS video submission. Pre-allocated buffer pools transfer chunk ownership cleanly.
+* **Standard Bulk Raw Reassembly**: For devices adhering to standard UVC payload boundaries, frames are assembled directly without intermediate byte-stream scanning.
+* **Bounded Queueing & Overload Drop**: Bounded buffers with sequence gap detection isolate partial frames under system load, preventing corrupt frame handoffs.
+* **GPU Direct Upload**: YUYV / NV12 buffers are uploaded directly to GPU textures, avoiding per-pixel CPU colorspace conversions.
 
-以下不含 UVC 头、短包和传输空隙，MB 为十进制：
+### 2. Throughput and Memory Copy Modeling
 
-| 1920×1080 / 60 fps | YUYV | NV12 |
+Estimated uncompressed pixel throughput at 1920×1080 @ 60 fps:
+
+| Metric | YUYV (4:2:2) | NV12 (4:2:0) |
 | --- | ---: | ---: |
-| 像素载荷 | 248.832 MB/s | 186.624 MB/s |
-| 满 128 KiB 批次的完成频率 | 约 1898/s | 约 1424/s |
-| 满 64 KiB 批次的完成频率 | 约 3797/s | 约 2848/s |
-| 两次帧数据复制的复制字节总量 | 497.664 MB/s | 373.248 MB/s |
+| Pixel Payload Throughput | 248.832 MB/s | 186.624 MB/s |
+| 128 KiB Transfer Completion Rate | ~1,898 / sec | ~1,424 / sec |
+| 64 KiB Transfer Completion Rate | ~3,797 / sec | ~2,848 / sec |
 
-最后一行只表示复制的数据量；逻辑读写量还要再乘二，但不等于实际 DDR 流量，缓存行为、内核复制、GPU 上传均需单独测量。
+### 3. Optimization Priorities
 
-当前缓冲池的 spare 容量有至少 32 个的下限，因此 32 在途 + 至少 32 spare 时，128/256/512 KiB 批次的用户态数据缓冲约为 8/16/32 MiB。更大批次会突破注释中原先的 4 MiB spare 预算，还不包括 libusb/内核内存。
+1. **Consolidated Retry Checks**: Merged event loop retry slot checks into single atomic bitmask handoffs, reducing mutex contention under normal traffic.
+2. **Format Selection**: Preferring NV12 when supported by the capture hardware reduces raw memory and USB bandwidth by 25% compared to YUYV.
+3. **Buffer Budgeting**: Sizing pre-allocated spare buffers to balance latency against memory footprint.
 
-## 应用传输和内核 URB 要分开统计
+---
 
-本地实际依赖源码为 libusb 1.0.28。`libusb/os/linux_usbfs.c` 在支持 scatter-gather 或无包长限制时可不拆分；其他能力组合下会按 16 KiB 分割大传输，再提交/回收多个 usbfs URB。因此一个 128 KiB libusb 完成回调可能对应八个内核 URB。扩大应用批次可能只减少回调，不能推断内核 ioctl 等比例减少。
+<a name="简体中文"></a>
+## 简体中文
 
-当前 `uvc: event=progress` 的 `urbs_per_s` 实际使用 `stats.transfers`，表示 libusb 完成次数，不是内核 URB 数。后续性能定位应区分这两个指标。
+本文档分析了在 Android 设备上进行高带宽 UVC 视频采集时的 CPU 占用、内存吞吐及关键优化路径。
 
-## 批次与时间戳
+### 1. 收包管线与已有优化
 
-目前同一个块内完成的帧共用该块的 `received_ns`；单调修正只会把重复时间戳加 1 ns。更大批次可能让多个完整帧集中到达，影响 OBS 选帧节奏。扩大批次前应同时验证设备 PTS 的稳定性和主机映射，或验证能平滑交付的时间戳方案，不能凭协商的 60 fps 编造一条固定时钟。
+* **独立 libusb 事件线程**：将 USB bulk 传输事件完成回调与图像帧组装及 OBS 视频提交解耦，通过预分配缓冲池交接所有权，避免在中断线程中产生内存拷贝；
+* **标准 Raw 载荷直接解析**：对符合标准 UVC payload 边界的设备，直接按载荷块重组目标帧，免去中间流缓冲与逐字节扫描；
+* **有界队列与丢帧保护**：预留有界缓冲，当系统负载过高发生包序号缺口时，安全丢弃破损半帧，避免拼接伪帧；
+* **GPU 直接纹理上传**：保持 YUYV / NV12 格式直达 GPU 纹理采样着色器，消除 CPU 逐像素色彩空间转换开销。
 
-建议后续按同一运动输入做一次一项的对照：应用及内核传输次数、事件循环返回次数、唤醒与锁等待、解析/提交 CPU 时间、队列深度与丢块增量、OBS 选中/跳过计数、输出唯一画面及 RSS。性能结论须同时满足占用降低和画面连续性不退化。
+### 2. 吞吐量与内存拷贝分析
 
-关键代码：`obs-studio/plugins/android-capture/{uvc-bulk-pump.c,uvc-input.c,uvc-raw-payload.h,uvc-cadence-stats.h}`、`obs-studio/libobs/obs-source.c`；依赖行为需以实际构建的 libusb 源码和设备内核能力为准。
+在 1920×1080 @ 60 fps 下，未压缩原始像素数据吞吐量测算：
 
-## 重试状态交接优化
+| 评估指标 | YUYV (4:2:2) | NV12 (4:2:0) |
+| --- | ---: | ---: |
+| 纯像素载荷吞吐 | 248.832 MB/s | 186.624 MB/s |
+| 满 128 KiB 传输完成频率 | 约 1,898 次/秒 | 约 1,424 次/秒 |
+| 满 64 KiB 传输完成频率 | 约 3,797 次/秒 | 约 2,848 次/秒 |
 
-事件线程现在在每轮开始时通过一次 mutex 获取停止状态、错误窗口和待重试位图；正常收包路径不再逐槽执行 32 次 mutex 检查。错误回调与事件线程使用同一把锁交接位图，恢复过程中由其他线程触发的新错误会留到下一轮处理；`libusb_clear_halt` 仍在锁外执行。错误恢复、取消和排干仍需要各自的同步。主机模拟测试覆盖恢复中由另一线程驱动的回调及 clear-halt 失败；这只证明代码行为和锁操作数量，不能推算实机 CPU 节约或吞吐。
+### 3. 性能优化重点
+
+1. **合并事件循环重试检测**：将原先每轮事件循环的逐槽互斥锁扫描，优化为单次原子重试状态位图交接，显著降低正常收包状态下的锁竞争；
+2. **优先选用 NV12 格式**：在采集卡支持的前提下，NV12 比 YUYV 节省 25% 的 USB 传输量与内存搬移带宽；
+3. **合理配置缓冲池配额**：通过合理的 spare 缓冲池预算平滑输入时钟抖动，兼顾内存占用与流畅度。

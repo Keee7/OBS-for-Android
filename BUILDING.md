@@ -1,159 +1,217 @@
 # Building OBS for Android / 构建说明
 
-The default Android application ID is `com.obsproject.studio`. Windows builds can opt into `com.antutu.ABenchMark` with `-AntutuPackage`; Java/JNI classes always retain the `com.obsproject.studio` namespace. The current source version is `0.1.24-ime-uvc-test` (25), arm64-v8a, minSdk 29 / targetSdk 35. WSL/Linux remains the original port's build route and uses the default application ID.
+[English](#english) | [简体中文](#简体中文)
 
-各版本的实际构建和测试范围见 [测试记录](scripts/IME_UVC_TEST.md)。下面分别说明 Windows 工具布局和原项目的 WSL 构建路径；工具链和依赖源码不随仓库提供，需要自行安装/下载。
+---
 
-## Clone
+<a name="english"></a>
+## English
+
+This guide describes how to build OBS for Android on Ubuntu / WSL, via GitHub Actions CI, and on native Windows.
+
+* **Target Architecture**: `arm64-v8a`
+* **API Level**: Minimum Android 10 (API 29), compile SDK 36 and target SDK 35
+* **Default Package Name**: `com.obsproject.studio`
+
+### Build Routes
+
+| Route | Requirements | Output Artifact | Purpose |
+| --- | --- | --- | --- |
+| **GitHub Actions** | Hosted Ubuntu Runner | `obs-android-apk-<sha>` workflow artifact | Automated CI builds |
+| **Ubuntu / WSL Automated Script** | Ubuntu 24.04 (or WSL2) | APK located in `build-fe-arm64-v8a-ci/` | One-click toolchain setup & dependency compilation |
+| **WSL / Linux Existing Toolchain** | Configured NDK r30 & Qt 6.11.1 | `releases/OBS-Android-arm64-v8a-wsl-*.apk` | Local day-to-day incremental development |
+| **Native Windows** | Windows 10/11 + MSYS2 + PowerShell | `releases/OBS-Android-arm64-obs-*.apk` | Native Windows cross-compilation & packaging |
+
+### Toolchain Requirements
+
+* **Android SDK**: Build-Tools `36.0.0`, Platform `android-36`, Platform-Tools (ADB)
+* **Android NDK**: `r30` (30.0.16248370)
+* **Qt**: `6.11.1` (Android arm64 package + matching host Qt with `androiddeployqt`)
+* **Java**: JDK 17
+* **Build System**: CMake 3.31+ and Ninja
+* **Gradle**: 9.3.1
+* **Host Tools**: Python 3; MSYS2 (for compiling specific native dependencies on Windows)
+
+Dependency versions are tracked in [deps-android/versions.sh](deps-android/versions.sh).
+
+### Ubuntu / WSL Automated Build
+
+Run the automated bootstrap script on Ubuntu 24.04 or WSL2:
 
 ```sh
-git clone https://github.com/Keee7/OBS-for-Android.git
-cd OBS-for-Android
+sudo apt-get update
+sudo apt-get install -y 7zip ninja-build build-essential curl unzip zip ca-certificates \
+  patch pkg-config dpkg-dev autoconf automake libtool nasm yasm python3-venv openjdk-17-jdk \
+  libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev
+
+python3 -m venv "$HOME/.venvs/obs-android"
+source "$HOME/.venvs/obs-android/bin/activate"
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+bash scripts/ci-build-android.sh
+cat build-fe-arm64-v8a-ci/.final-apk-path
 ```
 
-`obs-studio/` is included as source, not a Git submodule. Do not download an unrelated desktop OBS binary to replace it.
+<a name="existing-toolchain"></a>
+### WSL / Linux with an existing toolchain
 
-## Toolchain
-
-| Component | Version used / requirement |
-| --- | --- |
-| Android ABI / native API | arm64-v8a / android-29 |
-| Android SDK | platform android-36 (Windows/WSL/CI); build-tools 36.0.0; platform-tools for ADB |
-| NDK | r30; Windows test environment: 30.0.16248370 |
-| Qt | 6.11.1; Android arm64 plus matching host Qt with `androiddeployqt`; version-bound Android runtime patches |
-| Java | JDK 17; Windows script expects directory `jdk-17.0.12` |
-| CMake / Ninja | CMake 3.31.6; Ninja |
-| Gradle | 9.3.1, matching the Qt 6.11.1 Android wrapper |
-| Windows native dependencies | MSYS2 Bash, make, patch, tar, pkg-config and LLVM tools |
-| Host verification | Python 3; FFmpeg/ffprobe for recording verification |
-
-Dependency versions and upstream URLs are in [deps-android/versions.sh](deps-android/versions.sh). It includes branch-based x264/rnnoise entries, so a later fresh download is not a byte-reproducible copy of the tested dependency set. Retain source archives/revisions with a distributed binary.
-
-## Windows
-
-### Tool and dependency layout
-
-[build-frontend-apk-windows.ps1](scripts/build-frontend-apk-windows.ps1) accepts `-ToolsRoot`; by default this is a `build-tools` directory next to the repository. Its expected layout is:
-
-```text
-build-tools/
-  android-sdk/                  platforms/android-36, build-tools/36.0.0, platform-tools
-  ndk/android-ndk-r30/           Complete Windows NDK, including source.properties
-  Qt/6.11.1/android_arm64_v8a/
-  Qt/6.11.1/msvc2022_64/          Host Qt, including bin/androiddeployqt.exe
-  jdk-17.0.12/
-  gradle/gradle-9.3.1/
-  cmake/cmake-3.31.6-windows-x86_64/
-  ninja/ninja.exe
-  android-deps/arm64-v8a/        Cross-compiled include/, lib/, CMake/pkg-config metadata
-```
-
-The build script does not install these tools or download a dependency prefix. That prefix must contain the dependencies required by the enabled plugins; see `deps-android/versions.sh` and the CMake finders. All binary libraries must target Android arm64, not Windows.
-
-### Preparing dependencies
-
-- [build-android-cmake-deps.py](scripts/build-android-cmake-deps.py) builds Jansson, libjpeg-turbo, FreeType, mbedTLS and curl. It expects the source directory layout listed in that script and copies SIMDe/uthash headers when present.
-- [build-deps-windows.sh](scripts/build-deps-windows.sh) builds x264, x265 3.6, libaom 3.10.0 and FFmpeg under MSYS2. It requires `WORK_ROOT` (absolute, no spaces), `SYSROOT` (complete NDK sysroot), `SOURCES_ROOT` (containing `x264/`, `x265_3.6/`, `libaom-3.10.0/` and `ffmpeg-8.0.3/`) and `OUTPUT_PREFIX`. `LLVM_BIN` must point to the NDK LLVM bin directory; if its path contains spaces, point it at a space-free junction to that directory. CMake, Ninja and pkg-config must be on PATH. FFmpeg links x265 under GPL; retain and distribute the corresponding sources and licenses.
-- USB/audio-filter dependencies also need to be present in the prefix; the Python helper is not an installer for the entire dependency set. The WSL route below covers the original dependency groups.
-
-Example for the Python helper (adapt paths to your installation):
-
-```powershell
-python scripts/build-android-cmake-deps.py --tools D:/build-tools --ndk D:/build-tools/ndk/android-ndk-r30
-```
-
-Both FFmpeg build routes apply this repository patch before compilation:
-
-- `scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch`
-
-An older, unpatched `libavcodec.a` will not contain the byte-buffer output-format/cropping fixes. Rebuild FFmpeg and the final APK after changing the patch. When updating an encoder-only AOM build, rebuild both AOM and FFmpeg so the APK includes the libaom AV1 decoder. On Windows, run the dependency script with both targets (aom ffmpeg).
-
-The Linux CMake dependency helper generates files under `.obs-android-build/`, preserving the upstream `build/` directory. In particular, AOM ships required source scripts in `build/cmake/`; deleting that directory makes AOM configuration fail and then prevents FFmpeg from finding libaom.
-
-### Build and package
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-frontend-apk-windows.ps1 -Action all -ToolsRoot D:/build-tools
-```
-
-To build an independent Antutu package on Windows, add `-AntutuPackage` to the command. The Windows script stages Android package sources under the build tree and reconfigures CMake on every invocation, including `-Action package`, so switching back to the default mode cannot reuse a cached Antutu application ID. It names outputs `...-antutu-...apk` or `...-obs-...apk` and runs the strict APK verifier with the selected expected package. Tracked manifest and Java sources remain on the default package.
-
-For incremental builds, run **both** steps:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-frontend-apk-windows.ps1 -Action build -ToolsRoot D:/build-tools
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-frontend-apk-windows.ps1 -Action package -ToolsRoot D:/build-tools
-```
-
-Packaging first builds current sources, stages the latest plugin libraries, deploys Java/resources, aligns the APK and signs/verifies it with the external release key. Set `OBS_ANDROID_SIGNING_CONFIG` or pass `-SigningConfigFile`; the default is `Documents/release key.txt` outside the repository. Missing credentials fail signing. Use `-DebugSigning` only when explicitly choosing the public development key. The signed APK appears under `releases/`; these files are ignored by Git. A native build alone is insufficient to guarantee the latest plugins are in the installable APK.
-
-### Inspect the APK
-
-```powershell
-python scripts/verify-android-apk.py releases/<test.apk> --tools-root D:/build-tools --native-dir D:/build-tools/build-obs-arm64
-```
-
-The verifier defaults to the package in the tracked source manifest. Pass `--expected-package com.antutu.ABenchMark` when checking an Antutu APK.
-
-This Windows verifier checks the source manifest version, required Java classes/callback, Alpha options, native architecture/symbols and library equality with the build tree. It does not perform a device/runtime test. The packaging script separately verifies the signature and 16 KB ZIP alignment.
-
-## WSL / Linux
-
-Install the Linux NDK, Qt Android plus matching host Qt, SDK, JDK 17, CMake, Ninja, Gradle and host build tools. WSL defaults to compile SDK 36, which Qt 6.11.1 requires. Native minSdk remains 29 and targetSdk remains 35. Set environment variables for your installation:
+Run the commands from the repository root. Point the variables at your installed Linux kits.
 
 ```sh
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
-export NDK_ROOT="$ANDROID_SDK_ROOT/ndk/<installed-r30-version>"
+export NDK_ROOT="$ANDROID_SDK_ROOT/ndk/30.0.16248370"
 export QT_DIR="$HOME/Qt/6.11.1"
 export QT_HOST_PATH="$QT_DIR/gcc_64"
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 export GRADLE_BIN="$HOME/toolchain/gradle-9.3.1/bin"
-"$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0"
-```
 
-The WSL frontend script also reads `~/.obs-android-env.sh` when present. Repository location is derived from the script path; `OBS_SOURCE_ROOT` may override it.
-
-The script passes the same compile SDK to CMake and `androiddeployqt`. Use Qt 6.11.1 and compile SDK 36 or newer. The Windows, WSL and CI packaging scripts apply the [IME and layout patches](scripts/qt-android-ime/README.md) to the staged Qt Android jar, then build with Gradle and check that the patched classes reached the APK. Use these scripts for distributable APKs; the intermediate CMake APK does not go through that staging step. The installed Qt kit stays unchanged. Windows uses `build-obs-arm64-qt6111` to keep the new Qt ABI separate from older artifacts.
-
-Download and build the dependency groups, then build the APK:
-
-```sh
 bash deps-android/fetch.sh
 NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a
 bash scripts/build-frontend-apk-wsl.sh
 ```
 
-`fetch.sh` uses curl's normal network configuration by default. If needed, set `OBS_PROXY` for GitHub downloads; no machine-specific proxy is required by the repository. Dependency output is `deps-android/prebuilt/arm64-v8a/`. Existing cached FFmpeg builds need rebuilding to apply the new patches:
+CMake, Ninja and the host tools must be on PATH. Install the `nlohmann_json` CMake package (3.11+) in the dependency prefix if it is missing. The automated build installs it for you. To refresh the AV1 software decoder in an older prefix, run `NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a aom ffmpeg --clean` before packaging.
 
-```sh
-NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a ffmpeg --clean
+### Native Windows Build
+
+#### 1. Tool and Dependency Layout
+The Windows build script [scripts/build-frontend-apk-windows.ps1](scripts/build-frontend-apk-windows.ps1) accepts `-ToolsRoot` (defaults to a `build-tools` directory adjacent to the repository):
+
+```text
+build-tools/
+  android-sdk/                  # Contains platforms/android-36 and build-tools/36.0.0
+  ndk/android-ndk-r30/           # Windows NDK r30
+  Qt/6.11.1/android_arm64_v8a/  # Qt Android ARM64
+  Qt/6.11.1/msvc2022_64/        # Host Qt with bin/androiddeployqt.exe
+  jdk-17.0.12/                  # JDK 17
+  gradle/gradle-9.3.1/          # Gradle
+  cmake/cmake-3.31.6-windows-x86_64/
+  ninja/                        # ninja.exe
+  android-deps-ffmpeg8/arm64-v8a/       # Precompiled ARM64 native headers and libraries
 ```
 
-## Regression and device checks
+The dependency prefix must include the full Android ARM64 dependency set and the `nlohmann_json` CMake package (3.11+). Use `-NativeDeps` to point at another prefix. If an older APK lacks the libaom AV1 decoder, rebuild both `aom` and `ffmpeg` with [the Windows dependency script](scripts/build-deps-windows.sh).
 
-Portable verifier unit tests:
-
-```sh
-python -m unittest discover -s scripts -p 'test_verify_*.py' -v
-```
-
-Windows checks with the expected adjacent tool layout:
+#### 2. Compiling and Packaging
+Execute the build script in PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-android-screen.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-android-uvc.ps1
-python scripts/test-android-display-rect.py
-python scripts/test-android-interop-shaders.py --egl-dir <directory-containing-ANGLE-DLLs>
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-frontend-apk-windows.ps1 -Action all -ToolsRoot D:/build-tools
 ```
 
-The screen test accepts `-ToolsRoot` and `-Clang`. Other host harnesses may need compiler/tool paths adjusted for your environment. The ANGLE test exercises actual host GLES shaders and equivalent Alpha blending, not the Android compositor or Xring driver.
+* `-Action configure`: Toolchain discovery and CMake configuration check.
+* `-Action build`: Native C/C++ compilation only.
+* `-Action package`: Incremental native build, asset staging, Qt IME patching, Gradle packaging, 16 KB alignment and signing.
+* `-Action all`: Executes the entire end-to-end pipeline. Output APK is placed in `releases/`.
 
-For device checks, use [the latest test-package notes](scripts/DEVICE_TEST_QUICKSTART.md), [hardware-encoder checks](scripts/HEVC_HARDWARE_TEST.md), [transparent capture](scripts/TRANSPARENT_CAPTURE_TEST.md) and [1080p60 acceptance](scripts/android-1080p60-acceptance.md). Do not treat a successful build or a host test as a substitute for on-device results.
+### Signing and Release Packaging
 
-## Signing and distribution
+The Windows script accepts `-DebugSigning` for local testing with the repository’s public development key. The WSL script uses that key when signing is needed. PR artifacts also use the public development key.
 
-The bundled `android-shell/debug.keystore` is the upstream project's **public development key** (alias `androiddebugkey`, password `android`). Current scripts produce debuggable test builds. For your own release process, keep a separate private signing key outside Git, configure signing accordingly, and review the debug manifest setting. Changing the key prevents ordinary in-place upgrades from differently signed builds.
+For release signing:
+1. Configure the `OBS_ANDROID_SIGNING_CONFIG` environment variable or pass `-SigningConfigFile`.
+2. The configuration file (JSON or key-value format) defines `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS`, `ANDROID_KEYSTORE_PASSWORD`, and `ANDROID_KEY_PASSWORD`.
+3. Keystore passwords are securely passed to `apksigner` via process environment variables and are never logged or committed.
 
-Preserve the source, dependency license notices and source/revision information corresponding to the binary you distribute. See [NOTICE.md](NOTICE.md).
+### Optional Windows application ID
 
-Android software HEVC (x265, 8-bit SDR) and AV1 (libaom) are registered only when present in the linked FFmpeg. Their throughput, especially 1080p60 sustained operation, depends on the device and thermal conditions and must be measured. Simple output uses fast presets; advanced output exposes encoder settings and thread counts.
+Pass `-AntutuPackage` to stage the alternate application ID `com.antutu.ABenchMark` for a Windows test build. Android installs it separately from `com.obsproject.studio`. Java and JNI classes retain the `com.obsproject.studio` namespace.
+
+---
+
+<a name="简体中文"></a>
+## 简体中文
+
+本文档指导如何在 Ubuntu / WSL、GitHub Actions CI 以及原生 Windows 环境下编译 OBS for Android。
+
+* **目标架构**：`arm64-v8a`
+* **API 等级**：最低支持 Android 10 (API 29)，编译 SDK 36，目标 SDK 35
+* **默认包名**：`com.obsproject.studio`
+
+### 构建方式概览
+
+| 构建途径 | 环境要求 | 输出产物 | 适用场景 |
+| --- | --- | --- | --- |
+| **GitHub Actions** | 托管 Ubuntu 运行器 | 工作流产物 `obs-android-apk-<sha>` | 持续集成与自动化流水线 |
+| **Ubuntu / WSL 自动化脚本** | Ubuntu 24.04 (或 WSL2) | `build-fe-arm64-v8a-ci/` 下的安装包 | 本地 Linux 一键全自动编译工具链与依赖 |
+| **WSL / Linux 本地现有工具链** | 已配置 NDK r30 与 Qt 6.11.1 | `releases/OBS-Android-arm64-v8a-wsl-*.apk` | 日常本地增量开发与调试 |
+| **Windows 原生环境** | Windows 10/11 + MSYS2 + PowerShell | `releases/OBS-Android-arm64-obs-*.apk` | 原生 Windows 交叉编译与自动化打包 |
+
+### 基础工具链要求
+
+* **Android SDK**：Build-Tools `36.0.0`，Platform `android-36`，Platform-Tools (ADB)
+* **Android NDK**：`r30` (30.0.16248370)
+* **Qt**：`6.11.1` (Android arm64 预编译包 + 对应宿主工具，包含 `androiddeployqt`)
+* **Java**：JDK 17
+* **构建系统**：CMake 3.31+ 与 Ninja
+* **Gradle**：9.3.1
+* **宿主依赖库**：Python 3，MSYS2 环境（用于 Windows 下编译部分 C/C++ 原生依赖）
+
+依赖版本的完整定义见 [deps-android/versions.sh](deps-android/versions.sh)。
+
+### Ubuntu / WSL 快速构建
+
+在 Ubuntu 24.04 或 WSL2 环境下运行自动化构建脚本：
+
+```sh
+sudo apt-get update
+sudo apt-get install -y 7zip ninja-build build-essential curl unzip zip ca-certificates \
+  patch pkg-config dpkg-dev autoconf automake libtool nasm yasm python3-venv openjdk-17-jdk \
+  libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev
+
+python3 -m venv "$HOME/.venvs/obs-android"
+source "$HOME/.venvs/obs-android/bin/activate"
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+bash scripts/ci-build-android.sh
+cat build-fe-arm64-v8a-ci/.final-apk-path
+```
+
+### WSL / Linux 已有工具链
+
+按 [已有工具链命令](#existing-toolchain) 设置 SDK、NDK、Qt、JDK 和 Gradle 路径。先构建 `deps-android/prebuilt/arm64-v8a/` 依赖前缀，再运行 WSL 打包脚本。若前缀缺少 `nlohmann_json` CMake 包，需先安装 3.11 或更新版本。自动化脚本会安装该依赖。旧前缀需要同时重编 AOM 和 FFmpeg 才能加入 AV1 软解。
+
+### Windows 环境原生构建
+
+#### 1. 工具与依赖目录结构
+Windows 构建脚本 [scripts/build-frontend-apk-windows.ps1](scripts/build-frontend-apk-windows.ps1) 接受 `-ToolsRoot` 参数（默认为同级或指定路径下的 `build-tools` 目录）：
+
+```text
+build-tools/
+  android-sdk/                  # 包含 platforms/android-36 与 build-tools/36.0.0
+  ndk/android-ndk-r30/           # Windows 版 NDK r30
+  Qt/6.11.1/android_arm64_v8a/  # Qt Android ARM64
+  Qt/6.11.1/msvc2022_64/        # Qt 宿主工具 (含 androiddeployqt.exe)
+  jdk-17.0.12/                  # JDK 17
+  gradle/gradle-9.3.1/          # Gradle
+  cmake/cmake-3.31.6-windows-x86_64/
+  ninja/                        # ninja.exe
+  android-deps-ffmpeg8/arm64-v8a/       # 预编译好的 ARM64 原生头文件与库
+```
+
+依赖前缀须包含完整的 Android ARM64 依赖与 `nlohmann_json` CMake 包（3.11 或更新版本）。可用 `-NativeDeps` 指定其他前缀。旧包缺少 libaom AV1 软解时，使用 [Windows 依赖脚本](scripts/build-deps-windows.sh) 同时重编 `aom` 与 `ffmpeg`。
+
+#### 2. 编译与打包
+在 PowerShell 中执行构建命令：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-frontend-apk-windows.ps1 -Action all -ToolsRoot D:/build-tools
+```
+
+* `-Action configure`：仅进行工具链探测与 CMake 配置检查；
+* `-Action build`：仅执行 C/C++ 原生模块编译；
+* `-Action package`：增量编译、资源暂存、Qt 补丁、Gradle 打包、16 KB 对齐与签名。
+* `-Action all`：一键执行完整流程。最终安装包输出至 `releases/` 目录。
+
+### 签名与发布配置
+
+Windows 测试包可用 `-DebugSigning` 选择仓库公开开发密钥。WSL 脚本在需要签名时使用该密钥，PR 构建也使用公开开发签名。
+
+若需进行正式发布签名：
+1. 配置环境变量 `OBS_ANDROID_SIGNING_CONFIG` 或通过参数 `-SigningConfigFile` 指定外部签名配置文件；
+2. 配置文件可为 JSON 或键值对格式，包含 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEY_ALIAS`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_PASSWORD`；
+3. 签名过程安全调用 `apksigner`，密钥信息不会记录在日志或提交至仓库。
+
+### Windows 可选应用 ID
+
+Windows 测试构建可通过 `-AntutuPackage` 将暂存的应用 ID 切换为 `com.antutu.ABenchMark`。Android 将其作为独立应用安装。Java/JNI 命名空间仍为 `com.obsproject.studio`。

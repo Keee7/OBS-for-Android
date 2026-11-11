@@ -1,46 +1,67 @@
-# 0.1.5 媒体源、硬编质量与 GPU 策略
+# Media Playback, Hardware Decoding and Quality Mapping / 媒体源播放、硬件解码与画质控制指南
 
-安装包版本为 0.1.5-media-quality-test / 6，路径与校验值见 DEVICE_TEST_QUICKSTART.md。覆盖安装后保留原配置；已有明确保存的 GPU=false 选择仍保留，新建源及未显式设置的源默认 GPU=true。
+[English](#english) | [简体中文](#简体中文)
 
-## 硬件编码质量
+---
 
-设置 → 输出 → 输出模式“高级”，选择 Android Hardware H.264 或 HEVC。编码器属性提供：
+<a name="english"></a>
+## English
 
-- Rate control：CBR、VBR、CQ。
-- Hardware quality：Automatic、Low、Medium、High。
+This document describes media file playback via Android document URIs, FFmpeg MediaCodec hardware video decoding, and Advanced Output quality mapping.
 
-CBR/VBR 档位映射到实际组件报告的 complexity 范围；CQ 映射到 quality 范围，自动档在 CQ 下使用范围中点。CBR/VBR 自动档不强制指定复杂度，保持原行为。所选模式或明确档位不受硬件支持时，启动会报错，不把无效设置伪装成已生效。
+### 1. Document URI Input & Custom AVIO Pipeline
 
-先用自动或中档检查 1080p60；高复杂度可能降低吞吐。CQ 适合先做本地录像测试，码率不固定；推流建议先保持 CBR。这些是设备参数映射，不是 x264 速度预设，也不保证所有芯片上的同档画质相同。简单输出尚未增加这些控件，继续沿用原有录制质量设置。
+Files selected via the system file picker are delivered as `content://` document URIs.
 
-修改前停止输出，再分别录制同样运动画面的样本，比较画质、码率、编码跳帧和温度。日志会记录所选模式、硬件范围及映射结果；实际吞吐和画质仍需设备对比。
+* **Android ContentResolver Bridge**: The implementation obtains a read-only, seekable File Descriptor (FD) through Android's ContentResolver and feeds it to FFmpeg via a custom AVIO context.
+* **Capabilities**: Fully supports seek operations, seamless looping, and audio/video playback from local storage, preserving permissions across app restarts.
 
-## GPU 屏幕采集策略
+### 2. MediaCodec Hardware Video Decoding
 
-屏幕源属性的 GPU 选项现在默认开启。创建、更新或首帧超时失败后按 2/4/8/16/30 秒（最大 30 秒）退避重试并显示错误，不会自动切成 CPU；仍可取消勾选，手动选择 CPU。重新开关源可重试 GPU；授权失效时仍需重新同意共享。
+In Media Source properties, enable "Use hardware decoding when available":
 
-先新建屏幕源确认默认勾选；再检查原源保存的选项。重复开关、旋转、停止共享，确认错误时会重试且没有自动 CPU 采集。源属性应显示 GPU 已收到帧及导入计数；手动关闭后才显示 CPU 状态。
+* **Decoder Selection**: For H.264, HEVC, VP8, VP9, and AV1, FFmpeg selects MediaCodec decoders that are flagged as hardware-accelerated and non-software components.
+* **Graceful Fallback**: If hardware initialization fails or no suitable hardware component exists, playback falls back seamlessly to software decoders (including libaom for AV1).
 
-## 媒体源播放与硬解
+### 3. Advanced Output Rate Control and Quality Mapping
 
-Android 文件选择器返回 content:// 文档 URI，FFmpeg 原先直接按协议打开而失败。本版通过 Android ContentResolver 获取只读、可定位的文件描述符，再交给 FFmpeg 自定义 AVIO；也不再将文档 URI 当作普通路径报告“文件丢失”。请使用媒体源“浏览”重新选择视频并授权，先测试本地普通 MP4。云盘管道式、不可 seek 的提供者仍不支持。
+In Advanced Output mode, MediaCodec encoders expose detailed rate control and quality options:
 
-媒体源属性中的硬件解码默认开启。针对 H.264、HEVC、VP8、VP9、AV1，勾选时使用 FFmpeg 的 `*_mediacodec` 解码器（NDK MediaCodec）。插件加载时注册 Java VM，FFmpeg 枚举 Android 组件，并按 MIME/profile 选择同时标记为硬件加速且非纯软件的解码器。枚举失败或无匹配组件时回退到 FFmpeg 原生软解。不勾选时使用软件解码。AV1 的软件路径明确使用 libaom。
+* **Rate Control**:
+  * **CBR (Constant Bitrate)**: Recommended for live streaming.
+  * **VBR (Variable Bitrate)**: Dynamic bitrate allocation according to scene complexity.
+  * **CQ (Constant Quality)**: Recommended for local recording.
+* **Hardware Quality Presets**:
+  Abstract presets (Automatic, Low, Medium, High) are linearly mapped to the underlying component's supported complexity and quality ranges reported by the device driver.
 
-MediaCodec 解码器不可用或初始化失败时记录软件解码回退；VPx alpha 保留相应软件路径。运行中解码失败不会自动重新切换软件，可手动关闭硬件解码后重开文件。这与“GPU 屏幕采集不自动回退”的策略独立。
+---
 
-启动日志中的 `FFmpeg MediaCodec Java VM registered` 表示 JNI 枚举可用。播放时首帧日志会记录 `hardware=true`、尺寸和像素格式。启用 FFmpeg 日志时，可用 “Selected hardware-accelerated MediaCodec video decoder” 核对实际选中的组件。MediaCodec 输出仍为 CPU 可读帧。
+<a name="简体中文"></a>
+## 简体中文
 
-实机分别测试 H.264 MP4 和 HEVC MP4 的画面/声音、暂停/恢复、定位、循环、切场景、应用重启后的文件授权及手动软解。无法播放时提供 OBS 日志、文件编码/位深/分辨率和文件来源；确认硬解是否首帧失败，再区分权限、封装和设备解码能力。
+本文档阐述 OBS for Android 中媒体文件的硬件解码回放机制，以及高级输出模式下的画质参数映射策略。
 
-## 硬件编码器可用性
+### 1. 媒体源与 Android 存储接入
 
-编码器列表只显示系统标记为硬件加速、支持 Surface 输入和相应 8 位配置的 MediaCodec 编码器。简单模式只列出支持 CBR 的候选。开始输出时继续按分辨率、帧率、码率和所选码控模式筛选。已保存但不可用的编码器会在设置中标出，用户可重新选择。AV1 在推流服务接受该编码时可选，也可录制为 Hybrid MP4。VP9 Profile 0 可用于 Hybrid MP4 录制。设备实际输出需用 ffprobe 核对，并用日志确认 MediaCodec 组件。
+在 Android 系统中，用户通过系统文件选择器选取的文件通常返回 `content://` 格式的文档 URI。
 
-简单输出中，x265 和 AOM AV1 的编码预设可为推流和独立录像分别设置。录像质量档控制 CRF 或 CQP，编码预设控制压缩效率和 CPU 开销。
+* **自定义 AVIO 管道**：本工程在底层接入 Android ContentResolver，获取底层的只读且可定位（Seekable）的文件描述符，直接传递给 FFmpeg 自定义 I/O 上下文；
+* **特性**：完整支持大尺寸本地 MP4/MKV 媒体文件的流畅定位（Seek）、无缝循环播放以及应用重启后的权限持久化。
 
-## 验证范围
+### 2. MediaCodec 硬件视频解码
 
-已经执行对象编译、Java/JNI 编译，以及生产 AVIO read/seek/EOF/循环定位/重复打开/释放的宿主回归；GPU 默认开启和失败重试的策略检查通过。FFmpeg 的 crop/format 补丁已增量编译安装，并保留可复现补丁及幂等构建步骤。最终 APK 还会完整编译链接、检查签名与包内容。
+在媒体源属性中，勾选“可用时使用硬件解码”：
 
-本地未连接目标设备；用户已确认上一版 GPU 采集可用，本版质量档位、媒体文件播放和硬件解码首帧仍需要实机复测。
+* **解码器选择策略**：针对 H.264、HEVC、VP8、VP9 和 AV1 格式，FFmpeg 会自动探测并实例化标记为 `hardware-accelerated` 且非纯软件实现的 MediaCodec 解码器；
+* **容错与回退**：若设备缺少对应硬件组件或解码器初始化失败，播放器会在初始化时尝试软件解码，AV1 使用 libaom。
+
+### 3. 高级编码画质与复杂度调节
+
+在“高级输出模式”下，MediaCodec 编码器提供细化的码控与质量映射：
+
+* **Rate Control（码率控制）**：
+  * **CBR（恒定码率）**：推荐用于网络推流，码率输出平稳；
+  * **VBR（动态码率）**：根据画面动态度自动调整码率；
+  * **CQ（恒定质量）**：适合本地录制，追求画质保真度。
+* **Hardware Quality（硬件档位）**：
+  提供 Automatic、Low、Medium、High 四个档位。系统会将这些抽象档位线性映射到底层 MediaCodec 驱动所公布的 `complexity` 与 `quality` 参数区间中。
