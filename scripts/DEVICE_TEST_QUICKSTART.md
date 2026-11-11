@@ -1,16 +1,16 @@
 # Android 测试包与实机记录
 
-测试包：`releases/OBS-Android-arm64-obs-hwcodec-browser-20261110-020745.apk`
+测试包：`releases/OBS-Android-arm64-antutu-hwcodec-browser-20261110-173132.apk`
 
-- 应用版本：`0.1.23-softcodec-image-test`，versionCode `24`。
-- APK 包名：`com.obsproject.studio`；arm64-v8a；最低 Android 10，目标 API 35。Windows 加 `-AntutuPackage` 可生成 `com.antutu.ABenchMark`；Java/JNI 类始终使用 `com.obsproject.studio` 命名空间。
-- 文件大小：120,778,782 字节。
-- SHA-256：`e80397d88c3f0150bc5d67e26bdb48e09e837b7c4d0213c0e81281413880833e`。
+- 应用版本：`0.1.24-ime-uvc-test`，versionCode `25`。
+- APK 包名：`com.antutu.ABenchMark`（Windows `-AntutuPackage` 本地测试包）；arm64-v8a；最低 Android 10，目标 API 35。仓库默认包名与 Java/JNI 命名空间仍为 `com.obsproject.studio`。
+- 文件大小：59,138,087 字节。
+- SHA-256：`f0077ee281e3f68a299bfed8162fa2f9876212f5f22e9717932f7b9f6fcc55bb`。
 - 使用仓库外 release 签名配置；安装前请先确认目标设备上没有同包名应用。
 
-本轮增加 H.265/AV1 软件编码、图像文档 URI 读取，以及默认关闭的输入法诊断；UVC 只读审查，未改生产代码。Windows 全量原生/Qt/Java 构建、release 签名、16 KiB 对齐与严格 APK 校验通过。未安装到设备；输入法问题仍未确认修复。详见 [本轮验证](SOFTWARE_IMAGE_IME_TEST.md)。以下保留历史版本记录。
+本轮修复重复键盘显示请求、光标手柄错位及残影、关闭编辑框卡死和全屏可用区域同步，并减少 UVC 收包线程的锁操作。Windows 构建、release 签名、16 KiB 对齐、严格 APK 校验和运行时补丁检查通过。已覆盖安装并完成实机退格、重开键盘、关闭编辑框和窗口布局对照，详见 [本轮验证](IME_UVC_TEST.md)。以下保留历史版本记录。
 
-## 本轮：采集回调的源/reader 生命周期（P1-6/P1-7）与保活重试
+## 历史：采集回调的源/reader 生命周期（P1-6/P1-7）与保活重试
 
 两处 use-after-free 的根因是两条独立的悬垂链，不是一条：
 

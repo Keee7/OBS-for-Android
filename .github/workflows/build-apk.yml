@@ -62,7 +62,7 @@ jobs:
       NDK_VERSION: r30
       QT_VERSION: 6.11.1
       CMAKE_VERSION: 3.31.6
-      GRADLE_VERSION: 8.14.3
+      GRADLE_VERSION: 9.3.1
       BUILD_TOOLS: 36.0.0
       PLATFORM: android-36
       # 两个落盘目录都只用 github 上下文（job 级 env 的可用上下文里没有 runner.*，
@@ -124,6 +124,17 @@ jobs:
           c++ -std=c++17 -Wall -Wextra -Werror scripts/android-layout-test/policy.cpp -o "$RUNNER_TEMP/android-layout-test"
           "$RUNNER_TEMP/android-layout-test"
 
+      - name: Check UVC transport and recovery on host
+        run: bash scripts/test-android-uvc.sh
+
+      - name: Check Android IME focus policy
+        run: |
+          mkdir -p "$RUNNER_TEMP/obs-ime-policy"
+          javac -d "$RUNNER_TEMP/obs-ime-policy" \
+            obs-studio/frontend/cmake/android/java/com/obsproject/studio/ObsImeFocus.java \
+            scripts/qt-android-ime/ObsImeFocusTest.java
+          java -ea -cp "$RUNNER_TEMP/obs-ime-policy" ObsImeFocusTest
+
       - name: Compute dependency cache key
         id: depkey
         run: |
@@ -146,7 +157,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.TOOLS_ROOT }}
-          key: obstools-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-cm${{ env.CMAKE_VERSION }}-bt${{ env.BUILD_TOOLS }}
+          key: obstools-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-cm${{ env.CMAKE_VERSION }}-gr${{ env.GRADLE_VERSION }}-bt${{ env.BUILD_TOOLS }}
+          restore-keys: |
+            obstools-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-cm${{ env.CMAKE_VERSION }}-bt${{ env.BUILD_TOOLS }}
 
       # 独立一步恢复密钥：这样"有没有密钥"的判断只在一处，构建步骤里不再套条件表达式。
       - name: Restore signing keystore from secrets

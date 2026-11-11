@@ -6,9 +6,9 @@ An Android port of OBS Studio with scenes, sources, recording and streaming. Thi
 
 Based on [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android), which ports [OBS Studio 32.2.1](https://github.com/obsproject/obs-studio) to Android. This is a community project, not an official OBS Project Android release. Original authors, license notices and commit history are preserved.
 
-**Current source version:** `0.1.23-softcodec-image-test` / versionCode `24`. The default application ID is `com.obsproject.studio`; Windows builds may opt into `com.antutu.ABenchMark` with `-AntutuPackage`. **arm64-v8a, Android 10+ (API 29), target API 35**. Java and JNI classes always use the `com.obsproject.studio` namespace. The Qt UI primarily targets landscape tablets. Local builds default to a private, external release signing configuration. Public debug signing requires an explicit option. See [the current changes and validation](scripts/SOFTWARE_IMAGE_IME_TEST.md).
+**Current source version:** `0.1.24-ime-uvc-test` / versionCode `25`. The default application ID is `com.obsproject.studio`; Windows builds may opt into `com.antutu.ABenchMark` with `-AntutuPackage`. **arm64-v8a, Android 10+ (API 29), target API 35**. Java and JNI classes always use the `com.obsproject.studio` namespace. The Qt UI primarily targets landscape tablets. Local builds default to a private, external release signing configuration. Public debug signing requires an explicit option. See [the current changes and device validation](scripts/IME_UVC_TEST.md).
 
-The performance goal is sustained throughput with low CPU/GPU and memory use. Reasonable buffering is acceptable; minimum latency is not the primary goal. The latest [UVC CPU review](scripts/UVC_CPU_REVIEW.md) proposes further work without changing the capture implementation or claiming measured savings.
+The performance goal is sustained throughput with low CPU/GPU and memory use. Reasonable buffering is acceptable; minimum latency is not the primary goal. UVC recovery now exchanges a pending-slot bitmap once per event-loop iteration, replacing 32 individual slot checks. Host regressions cover concurrent recovery callbacks; a measured CPU reduction has not been established. See the [UVC CPU review](scripts/UVC_CPU_REVIEW.md).
 
 ## Features and validation
 
@@ -29,7 +29,7 @@ The performance goal is sustained throughput with low CPU/GPU and memory use. Re
 | Shared-folder recording | MediaStore / SAF for local seekable destinations such as `Download/obs`; fixes failed path-space queries being reported as insufficient space. Use Hybrid MP4/MOV; folder/provider combinations require device testing. |
 | Floating-window preview | Unified Qt/Android window coordinates. Entering, moving, resizing and leaving floating-window mode checked on the test tablet. |
 | RTMP streaming | Reconnect state reset, CBR/VBR dynamic bitrate and packet cleanup on send failures. Local device tests covered normal streaming, forced disconnection and bandwidth limitation. |
-| 1080p60 YUV capture-card path | Independent USB pump, bounded buffer handoff, standard raw payload assembly and reduced copying. The existing optional low-latency setting is separate from the throughput/low-occupancy design goal. Host tests/build checks; capture-card device throughput not yet validated. [Test guide](scripts/UVC_1080P60_TEST.md). |
+| 1080p60 YUV capture-card path | Independent USB pump, bounded buffer handoff, standard raw payload assembly and reduced copying. The optional low-latency setting remains separate. After recovery, device tests measured about 60 fps and 186.8 MB/s with NV12 over SuperSpeed. CPU savings and duplicate frames on moving input were not quantified. [Device test notes](scripts/IME_UVC_TEST.md). |
 | UVC recovery | Exclusive USB loans, retained detached descriptors, valid-frame watchdog recovery and rate-limited USB software reset, with classified transport diagnostics. A software reset does not guarantee a physical power cycle. |
 | Camera and USB sources | Retains upstream Camera2, system audio, Nikon PTP and UVC. Published upstream device results have not all been repeated in this fork. |
 
@@ -87,7 +87,7 @@ A selected encoder name or low CPU usage alone is insufficient. Inspect the reco
 - Shared-document recording requires a local seekable provider. File splitting, replay buffer, custom FFmpeg output and automatic remux are not supported for that destination path. Real low-space conditions still stop recording.
 - Browser source has no separate audio track, local HTML picker or full keyboard/wheel/multitouch integration. Browser Alpha needs device validation; plain HTTP follows the app's network policy.
 - No implemented NDI/Spout2 input. VTube Studio transparency remains experimental.
-- Reopening of the Android keyboard on deletion and cursor misalignment remain under investigation. Version 24 adds default-off event/geometry diagnostics, not a verified fix; see [the diagnostic guide](scripts/SOFTWARE_IMAGE_IME_TEST.md).
+- Version 25 was tested on an Android 16 tablet for repeated backspace, cursor handle placement, and dismissing and reopening the system keyboard. Very narrow floating windows still encounter widget minimum widths. See [the validation scope](scripts/IME_UVC_TEST.md).
 - Scripting and built-in Twitch/YouTube/Restream integrations remain disabled. Configure a supported server URL/stream key manually.
 
 ## Source and documentation

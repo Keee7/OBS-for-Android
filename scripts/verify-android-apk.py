@@ -102,6 +102,8 @@ def main():
             if len(names) != len(set(names)):
                 errors.append('APK contains duplicate ZIP entry names')
             dex = [apk.read(n) for n in names if re.fullmatch(r'classes\d*\.dex', n)]
+            if not any(b'QT_ANDROID_NO_FULLSCREEN_KEYBOARD' in blob for blob in dex):
+                errors.append('Qt Android IME fullscreen control missing; package may contain an older Qt runtime')
             for name in CLASSES:
                 if not any(name in item for item in dex):
                     errors.append('missing Java class ' + name.decode())

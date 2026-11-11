@@ -62,6 +62,8 @@
 #include <QComboBox> // P-8 触摸：组合框弹层探针要认出按下落在的是不是 QComboBox
 #include <QContextMenuEvent> // 3-4 触摸：长按合成右键
 #include <QGestureEvent> // P-8 探针：认出 TapAndHold 手势
+#include <QInputMethod>
+#include <QJniObject>
 #include <QElapsedTimer>
 #include <QTimer>
 #include <android/log.h>
@@ -1433,6 +1435,12 @@ OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
 	 * ① 3-4 长按合成右键；② build 74 返回键当 Escape 用。 */
 	installEventFilter(new AndroidInputFilter(this));
 
+	// A Java QtWindow can host multiple QWidget editors. Mark every Qt focus
+	// change so the IME bridge never treats a different editor as a duplicate.
+	connect(this, &QGuiApplication::focusObjectChanged, this, [](QObject *) {
+		QJniObject::callStaticMethod<void>("com/obsproject/studio/ObsImeFocus", "focusChanged", "()V");
+	});
+
 	/* 3-3 模态遮挡的兜底重算（每秒一拍那套事件触发的补充，见函数上方的实测记录）。
 	 * 放构造里只起一次；它自己判断是否需要再启。 */
 	androidStartPreviewVisibilityWatchdog();
@@ -2141,6 +2149,15 @@ bool OBSApp::notify(QObject *receiver, QEvent *e)
 	/* 放最前面、且不引入新局部变量：下面那条 goto skip 链跨不过"跳过初始化"，Java 那边
 	 * 自己已经查过 isWidgetType()，不必借用这条链的前置判断。 */
 	androidResyncPreviewOnWindowToggle(receiver, e);
+	// QApplication handles this event before normal application event filters.
+	// Keep this opt-in probe content-free and observe before Qt handles it.
+	if (e->type() == QEvent::RequestSoftwareInputPanel &&
+	    qEnvironmentVariable("OBS_ANDROID_IME_DIAGNOSTICS") == QLatin1String("1")) {
+		__android_log_print(ANDROID_LOG_INFO, "OBS-IME", "request-panel receiver=%p focusWidget=%p focusObject=%p visible=%d",
+				    static_cast<void *>(receiver), static_cast<void *>(QApplication::focusWidget()),
+				    static_cast<void *>(QGuiApplication::focusObject()),
+				    int(QGuiApplication::inputMethod()->isVisible()));
+	}
 #endif
 
 	if (!receiver->isWidgetType()) {

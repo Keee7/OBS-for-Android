@@ -1,0 +1,144 @@
+--- QtInputDelegate.java
++++ QtInputDelegate.java
+@@ -4,6 +4,7 @@
+ package org.qtproject.qt.android;
+ 
+ import java.util.List;
++import com.obsproject.studio.ObsImeFocus;
+ import android.app.Activity;
+ import android.content.Context;
+ import android.graphics.Rect;
+@@ -49,7 +50,19 @@
+     static native void handleLocationChanged(int id, int x, int y);
+     // handle methods
+ 
+-    private QtEditText m_currentEditText = null;
++    private volatile QtEditText m_currentEditText = null;
++    private QtEditText m_handleOwner;
++    private final View.OnAttachStateChangeListener m_handleOwnerAttachment =
++            new View.OnAttachStateChangeListener() {
++                @Override
++                public void onViewAttachedToWindow(View view) {}
++
++                @Override
++                public void onViewDetachedFromWindow(View view) {
++                    if (view == m_handleOwner)
++                        dismissEditingHandles();
++                }
++            };
+     private InputMethodManager m_imm;
+ 
+     // We can't rely on a hardcoded value, because screens have different resolutions.
+@@ -143,13 +156,30 @@
+         }
+     }
+ 
++    // Remember only a show actually requested for the same Qt editor and hints.
++    private QtEditText m_lastShownEditText;
++    private long m_lastShownFocusGeneration = -1;
++    private int m_lastShownHints;
++    private int m_lastShownEnterKeyType;
++
+     private void showKeyboard(Activity activity,
+                               final int x, final int y, final int width, final int height,
+-                              final int inputHints, final int enterKeyType)
++                              final int inputHints, final int enterKeyType, final long focusGeneration)
+     {
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+             Window window = activity.getWindow();
+             View decorView = window.getDecorView();
++            WindowInsets insets = decorView.getRootWindowInsets();
++            if (ObsImeFocus.shouldSkip(insets != null && insets.isVisible(WindowInsets.Type.ime()),
++                    m_currentEditText != null && m_currentEditText.hasFocus(),
++                    m_currentEditText == m_lastShownEditText, focusGeneration,
++                    ObsImeFocus.generation(), m_lastShownFocusGeneration,
++                    inputHints == m_lastShownHints && enterKeyType == m_lastShownEnterKeyType))
++                return;
++            m_lastShownEditText = m_currentEditText;
++            m_lastShownFocusGeneration = focusGeneration;
++            m_lastShownHints = inputHints;
++            m_lastShownEnterKeyType = enterKeyType;
+             decorView.setWindowInsetsAnimationCallback(
+                 new WindowInsetsAnimation.Callback(
+                     WindowInsetsAnimation.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+@@ -207,6 +237,7 @@
+         if (m_imm == null)
+             return;
+ 
++        final long focusGeneration = ObsImeFocus.generation();
+         QtNative.runAction(() -> {
+             if (m_imm == null || m_currentEditText == null)
+                 return;
+@@ -218,7 +249,7 @@
+             m_currentEditText.setLayoutParams(new QtLayout.LayoutParams(width, height, x, y));
+             m_currentEditText.requestFocus();
+             m_currentEditText.postDelayed(() -> {
+-                showKeyboard(activity, x, y, width, height, inputHints, enterKeyType);
++                showKeyboard(activity, x, y, width, height, inputHints, enterKeyType, focusGeneration);
+                 if (m_currentEditText.m_optionsChanged) {
+                     m_imm.restartInput(m_currentEditText);
+                     m_currentEditText.m_optionsChanged = false;
+@@ -241,10 +272,35 @@
+     public void updateHandles(int mode, int editX, int editY, int editButtons,
+                               int x1, int y1, int x2, int y2, boolean rtl)
+     {
++        final long focusGeneration = ObsImeFocus.generation();
+         QtNative.runAction(() -> {
+-            if (m_currentEditText != null)
+-                m_currentEditText.updateHandles(mode, editX, editY, editButtons, x1, y1, x2, y2, rtl);
++            if (mode == QtEditText.CursorHandleNotShown) {
++                dismissEditingHandles();
++                return;
++            }
++            QtEditText editText = m_currentEditText;
++            if (focusGeneration != ObsImeFocus.generation() || editText == null
++                    || !editText.isAttachedToWindow())
++                return;
++            if (m_handleOwner != editText) {
++                dismissEditingHandles();
++                m_handleOwner = editText;
++                m_handleOwner.addOnAttachStateChangeListener(m_handleOwnerAttachment);
++            }
++            m_handleOwner.updateHandles(mode, editX, editY, editButtons, x1, y1, x2, y2, rtl);
+         });
++    }
++
++    private void dismissEditingHandles()
++    {
++        // A focus switch can change m_currentEditText before Qt sends Hidden.
++        // Dismiss the popup on the view which actually created it.
++        QtEditText owner = m_handleOwner;
++        if (owner == null)
++            return;
++        m_handleOwner = null;
++        owner.removeOnAttachStateChangeListener(m_handleOwnerAttachment);
++        owner.updateHandles(QtEditText.CursorHandleNotShown, 0, 0, 0, 0, 0, 0, 0, false);
+     }
+ 
+     @Override
+@@ -404,6 +460,7 @@
+         setKeyboardTransitionInProgress(visibility);
+ 
+         if (!visibility) {
++            dismissEditingHandles();
+             // Hiding the keyboard clears the immersive mode, so we need to set it again.
+             m_keyboardVisibilityListener.onKeyboardVisibilityChange();
+             if (m_currentEditText != null)
+@@ -414,7 +471,17 @@
+     void setFocusedView(QtEditText currentEditText)
+     {
+         setKeyboardTransitionInProgress(false);
++        QtEditText previous = m_currentEditText;
+         m_currentEditText = currentEditText;
++        if (previous != currentEditText) {
++            // updateFocusedEditText can also arrive from native Qt's thread.
++            QtNative.runAction(() -> {
++                if (m_handleOwner != m_currentEditText)
++                    dismissEditingHandles();
++                if (m_lastShownEditText != m_currentEditText)
++                    m_lastShownEditText = null;
++            });
++        }
+     }
+ 
+     private boolean updateSoftInputMode(Activity activity, int height)

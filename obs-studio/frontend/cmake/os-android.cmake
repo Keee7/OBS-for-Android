@@ -202,8 +202,8 @@ set_target_properties(
     # （设了 QT_ANDROID_PACKAGE_SOURCE_DIR 之后 androiddeployqt 用自带清单，不再拿模板覆盖）。
     # 这两行只是 androiddeployqt 的默认值，出包前必须与清单保持一致，否则 aapt2 报的版本
     # 和这里看到的是两个数 —— 三处版本号不一致就是这么来的。
-    QT_ANDROID_VERSION_NAME "0.1.23-softcodec-image-test"
-    QT_ANDROID_VERSION_CODE 24
+    QT_ANDROID_VERSION_NAME "0.1.24-ime-uvc-test"
+    QT_ANDROID_VERSION_CODE 25
     QT_ANDROID_COMPILE_SDK_VERSION "${OBS_ANDROID_COMPILE_SDK_VERSION}"
     QT_ANDROID_TARGET_SDK_VERSION 35
     QT_ANDROID_MIN_SDK_VERSION 29)

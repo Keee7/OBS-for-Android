@@ -10,6 +10,7 @@
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER, events = PTHREAD_MUTEX_INITIALIZER;
 static struct libusb_transfer *all[32];
 static unsigned count, submissions, fail_alloc_at, fail_submit_at, callbacks, cancellations;
+static int clear_inject, clear_error;
 static void nap(void)
 {
 	struct timespec ts = {0, 1000000};
@@ -86,11 +87,32 @@ int libusb_handle_events_timeout(libusb_context *ctx, struct timeval *tv)
 		nap();
 	return 0;
 }
+/* Model a synchronous control transfer on another thread driving a callback
+ * while the pump thread is inside clear_halt. */
+static void *control_events(void *arg)
+{
+	(void)arg;
+	pthread_mutex_lock(&lock);
+	struct libusb_transfer *x = all[1];
+	assert(x->active && !x->pending);
+	x->status = LIBUSB_TRANSFER_ERROR;
+	x->actual_length = 0;
+	x->pending = 1;
+	pthread_mutex_unlock(&lock);
+	struct timeval tv = {0, 0};
+	libusb_handle_events_timeout(0, &tv);
+	return 0;
+}
 int libusb_clear_halt(libusb_device_handle *h, unsigned char ep)
 {
 	(void)h;
 	(void)ep;
-	return 0;
+	if (clear_inject) {
+		pthread_t thread;
+		assert(!pthread_create(&thread, 0, control_events, 0));
+		assert(!pthread_join(thread, 0));
+	}
+	return clear_error;
 }
 static unsigned char *inject(unsigned i, enum libusb_transfer_status status, unsigned char byte)
 {
@@ -128,6 +150,7 @@ static void reset(void)
 {
 	count = submissions = callbacks = cancellations = 0;
 	fail_alloc_at = fail_submit_at = 9999;
+	clear_inject = clear_error = 0;
 }
 int main(void)
 {
@@ -172,6 +195,28 @@ int main(void)
 	uvc_bulk_pump_snapshot(p, &s);
 	assert(s.errors == 4 && s.timeouts == 1 && s.stalls == 1 && s.overflows == 1 && s.io_errors == 1);
 	uvc_bulk_pump_stop(p);
+
+	reset();
+	clear_inject = 1;
+	p = uvc_bulk_pump_start(&ctx, &dev, 0x81, &err);
+	assert(p);
+	inject(0, LIBUSB_TRANSFER_STALL, 0);
+	wait_count(34); /* Both the stalled slot and control-thread error retry. */
+	uvc_bulk_pump_snapshot(p, &s);
+	assert(s.errors == 2 && s.stalls == 1 && s.io_errors == 1);
+	uvc_bulk_pump_stop(p);
+	assert(cancellations == 32);
+
+	reset();
+	clear_error = LIBUSB_ERROR_IO;
+	p = uvc_bulk_pump_start(&ctx, &dev, 0x81, &err);
+	assert(p);
+	inject(0, LIBUSB_TRANSFER_STALL, 0);
+	for (unsigned i = 0; i < 3000 && !uvc_bulk_pump_error(p); i++)
+		nap();
+	assert(uvc_bulk_pump_error(p) == LIBUSB_ERROR_IO);
+	uvc_bulk_pump_stop(p);
+	assert(submissions == 32 && cancellations == 31);
 
 	reset();
 	p = uvc_bulk_pump_start(&ctx, &dev, 0x81, &err);
