@@ -422,6 +422,9 @@ package_apk() {
     [ -n "$apk" ] || { echo "FATAL: 没找到生成的 APK" >&2; exit 1; }
     python3 "$SCRIPT_DIR/qt-android-ime/verify-runtime-apk.py" "$apk"
     python3 "$SCRIPT_DIR/android-plugin-bundle.py" verify "$apk"
+    python3 "$SCRIPT_DIR/verify-android-apk.py" "$apk" \
+        --aapt "$SDK/build-tools/$BUILD_TOOLS/aapt" \
+        --readelf "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
     echo "$apk" > "$BUILD_DIR/.unsigned-apk-path"
     echo "  未签名 APK：$apk"
 }

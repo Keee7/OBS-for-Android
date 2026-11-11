@@ -340,6 +340,9 @@ extern "C" {
 #endif
 EXPORT void obs_android_set_storage_open(int (*open_document)(const char *, const char *));
 EXPORT int obs_android_storage_open(const char *uri, const char *mode);
+/* Android process VM, set by the frontend before loading modules. */
+EXPORT void obs_android_set_java_vm(void *vm);
+EXPORT void *obs_android_get_java_vm(void);
 EXPORT void obs_android_set_decoder_query(bool (*query)(const char *, char *, size_t));
 EXPORT bool obs_android_find_hardware_decoder(const char *mime, char *out, size_t size);
 #ifdef __cplusplus

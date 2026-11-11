@@ -14,7 +14,7 @@ from zipfile import BadZipFile, ZipFile
 REQUIRED = {
     'libobs_arm64-v8a.so': set(),
     'liblibobs.so': {'obs_android_set_browser_host', 'obs_android_browser_create',
-                     'obs_android_find_hardware_decoder', 'obs_android_set_decoder_query',
+                     'obs_android_get_java_vm', 'obs_android_set_java_vm',
                      'obs_source_draw_async_frame', 'obs_android_set_screen_gpu_host',
                      'obs_android_screen_gpu_create', 'obs_android_screen_gpu_update', 'obs_android_screen_gpu_destroy',
                      'obs_android_storage_open', 'obs_android_set_storage_open',
@@ -31,8 +31,8 @@ REQUIRED = {
 }
 IMPORTED = {
     'android-capture.so': {'obs_source_output_video', 'obs_source_set_async_unbuffered'},
-    'obs-ffmpeg.so': {'obs_android_find_hardware_decoder', 'obs_android_storage_open'},
-    'libobs_arm64-v8a.so': {'obs_android_set_storage_open'},
+    'obs-ffmpeg.so': {'obs_android_get_java_vm', 'obs_android_storage_open'},
+    'libobs_arm64-v8a.so': {'obs_android_set_java_vm', 'obs_android_set_storage_open'},
     'android-screen.so': {'obs_android_screen_capture_error', 'obs_source_draw_async_frame',
                           'obs_android_screen_gpu_create', 'obs_android_screen_gpu_update', 'obs_android_screen_gpu_destroy'},
     'android-mediacodec.so': {'gs_android_encoder_surface_create', 'gs_android_encoder_surface_submit'},
@@ -73,10 +73,12 @@ def main():
     parser.add_argument('--tools-root', type=Path, default=Path(__file__).resolve().parents[2] / 'build-tools')
     parser.add_argument('--native-dir', type=Path, help='optional build tree: compare packaged libraries to built files')
     parser.add_argument('--expected-package', help='expected application ID; defaults to the source manifest package')
+    parser.add_argument('--aapt', type=Path, help='path to the Android SDK aapt executable')
+    parser.add_argument('--readelf', type=Path, help='path to the NDK llvm-readelf executable')
     args = parser.parse_args()
     sdk = args.tools_root / 'android-sdk' / 'build-tools' / '36.0.0'
-    aapt = sdk / 'aapt.exe'
-    readelf = args.tools_root / 'ndk' / 'android-ndk-r30' / 'toolchains' / 'llvm' / 'prebuilt' / 'windows-x86_64' / 'bin' / 'llvm-readelf.exe'
+    aapt = args.aapt or sdk / 'aapt.exe'
+    readelf = args.readelf or args.tools_root / 'ndk' / 'android-ndk-r30' / 'toolchains' / 'llvm' / 'prebuilt' / 'windows-x86_64' / 'bin' / 'llvm-readelf.exe'
     errors = []
     try:
         print('APK SHA-256:', hashlib.sha256(args.apk.read_bytes()).hexdigest())
@@ -113,8 +115,13 @@ def main():
             for path in libs:
                 payload = apk.read(path)
                 short = path.rsplit('/', 1)[-1]
-                if short == 'obs-ffmpeg.so' and b'Select a specific Android MediaCodec component' not in payload:
-                    errors.append('FFmpeg named MediaCodec decoder patch missing from APK')
+                if short == 'obs-ffmpeg.so':
+                    if b'Select a specific Android MediaCodec component' in payload:
+                        errors.append('obs-ffmpeg.so contains the obsolete FFmpeg codec_name patch; rebuild FFmpeg')
+                    if b'Output buffer width=%d height=%d stride=%d slice-height=%d' not in payload:
+                        errors.append('FFmpeg MediaCodec crop and layout patch missing from APK')
+                    if b'FFmpeg MediaCodec Java VM registered' not in payload:
+                        errors.append('FFmpeg MediaCodec Java VM registration missing from APK')
                 if short == 'android-screen.so' and b'alpha_mode' not in payload:
                     errors.append('screen capture Alpha modes missing from APK')
                 if short == 'android-mediacodec.so' and (b'dropped_load=' not in payload or b'event=bitrate-update-rejected' not in payload):
@@ -152,7 +159,7 @@ def main():
                         if not candidates:
                             errors.append(path + ' has no authoritative compiler output')
                         else:
-                            strip = readelf.with_name('llvm-strip.exe')
+                            strip = readelf.with_name('llvm-strip' + readelf.suffix)
                             matched = False
                             for index, candidate in enumerate(candidates):
                                 if hashlib.sha256(candidate.read_bytes()).hexdigest() == digest:

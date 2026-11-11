@@ -4,6 +4,11 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 
+#ifdef __ANDROID__
+#include <obs-android.h>
+#include <libavcodec/jni.h>
+#endif
+
 #ifdef _WIN32
 #define INITGUID
 #include <dxgi.h>
@@ -348,6 +353,14 @@ static void register_encoder_if_available(struct obs_encoder_info *info, const c
 
 bool obs_module_load(void)
 {
+#ifdef __ANDROID__
+	/* Register with the libavcodec linked into this module. libobs links its own copy. */
+	void *vm = obs_android_get_java_vm();
+	if (vm && av_jni_set_java_vm(vm, NULL) == 0)
+		blog(LOG_INFO, "FFmpeg MediaCodec Java VM registered");
+	else
+		blog(LOG_WARNING, "FFmpeg MediaCodec Java VM unavailable; using NDK MIME selection");
+#endif
 	obs_register_source(&ffmpeg_source);
 	obs_register_output(&ffmpeg_output);
 	obs_register_output(&ffmpeg_muxer);

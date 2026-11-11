@@ -25,16 +25,16 @@ CBR/VBR 档位映射到实际组件报告的 complexity 范围；CQ 映射到 qu
 
 Android 文件选择器返回 content:// 文档 URI，FFmpeg 原先直接按协议打开而失败。本版通过 Android ContentResolver 获取只读、可定位的文件描述符，再交给 FFmpeg 自定义 AVIO；也不再将文档 URI 当作普通路径报告“文件丢失”。请使用媒体源“浏览”重新选择视频并授权，先测试本地普通 MP4。云盘管道式、不可 seek 的提供者仍不支持。
 
-媒体源属性中的硬件解码默认开启。针对 H.264、HEVC、VP8、VP9、AV1，在系统报告为硬件、非软件、非别名且不要求安全/隧道播放的组件中选择命名组件。FFmpeg 已加入 codec_name 补丁并强制 NDK MediaCodec 按该名字创建；不是仅按 MIME 让系统任意选择。
+媒体源属性中的硬件解码默认开启。针对 H.264、HEVC、VP8、VP9、AV1，勾选时使用 FFmpeg 的 `*_mediacodec` 解码器（NDK MediaCodec）。插件加载时注册 Java VM，FFmpeg 枚举 Android 组件并跳过标记为纯软件的组件，再按 MIME/profile 选择。枚举失败或没有匹配时由 NDK 按 MIME 选择默认组件。不勾选时使用 FFmpeg 原生软解。
 
-无可用硬件或初始化失败时明确记录软件解码回退；VPx alpha 保留相应软件路径。运行中解码失败不会自动重新切换软件，可手动关闭硬件解码后重开文件。这与“GPU 屏幕采集不自动回退”的策略独立。
+MediaCodec 解码器不可用或初始化失败时记录软件解码回退；VPx alpha 保留相应软件路径。运行中解码失败不会自动重新切换软件，可手动关闭硬件解码后重开文件。这与“GPU 屏幕采集不自动回退”的策略独立。
 
-OBS 日志中应出现 `MP: hardware MediaCodec decoder opened`，随后出现实际首帧的 `hardware=true`、组件名、尺寸和像素格式；只有打开日志不能证明已解出画面。硬解输出目前仍为 CPU 可读帧，经原媒体源通路显示，不宣称 GPU 端到端零拷贝。
+启动日志中的 `FFmpeg MediaCodec Java VM registered` 表示 JNI 枚举可用。播放日志中应出现 `MP: MediaCodec decoder opened`，随后出现首帧日志及其尺寸和像素格式；只有打开日志不能证明已解出画面。FFmpeg 自动选择的实际组件及其硬件状态未知，`component=unknown hardware=unknown` 不能证明使用了硬件解码，需要通过设备侧诊断单独确认。MediaCodec 输出目前仍为 CPU 可读帧，经原媒体源通路显示，不宣称 GPU 端到端零拷贝。
 
 实机分别测试 H.264 MP4 和 HEVC MP4 的画面/声音、暂停/恢复、定位、循环、切场景、应用重启后的文件授权及手动软解。无法播放时提供 OBS 日志、文件编码/位深/分辨率和文件来源；确认硬解是否首帧失败，再区分权限、封装和设备解码能力。
 
 ## 验证范围
 
-已经执行对象编译、Java/JNI 编译，以及生产 AVIO read/seek/EOF/循环定位/重复打开/释放的宿主回归；GPU 默认开启和失败重试的策略检查通过。FFmpeg codec_name 补丁已增量编译安装，并保留可复现补丁及幂等构建步骤。最终 APK 还会完整编译链接、检查签名与包内容。
+已经执行对象编译、Java/JNI 编译，以及生产 AVIO read/seek/EOF/循环定位/重复打开/释放的宿主回归；GPU 默认开启和失败重试的策略检查通过。FFmpeg 的 crop/format 补丁已增量编译安装，并保留可复现补丁及幂等构建步骤。最终 APK 还会完整编译链接、检查签名与包内容。
 
 本地未连接目标设备；用户已确认上一版 GPU 采集可用，本版质量档位、媒体文件播放和硬件解码首帧仍需要实机复测。

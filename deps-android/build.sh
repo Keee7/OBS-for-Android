@@ -103,14 +103,23 @@ for a in "$@"; do
 done
 [ -z "${TARGETS// /}" ] && for b in $DEP_BATCHES; do TARGETS="$TARGETS $(batch_deps "$b")"; done
 
-src_dir() { echo "$WORK/src/$ABI/$1"; }
+# A changed patch needs pristine sources and must invalidate the shared prefix's stamp.
+ffmpeg_patch="$HERE/../scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch"
+ffmpeg_patch_digest=$(sha256sum < "$ffmpeg_patch") || exit 1
+ffmpeg_source_id="ffmpeg-$(dep_version ffmpeg)-${ffmpeg_patch_digest%% *}"
+
+src_dir() {
+  local name=$1
+  if [ "$name" = ffmpeg ]; then name=$ffmpeg_source_id; fi
+  echo "$WORK/src/$ABI/$name"
+}
 
 _extract() {
   local dep=$1
   local fn
-  fn=$(ls "$HERE"/src/${dep}-*-* 2>/dev/null | head -1)
+  fn=$(ls "$HERE"/src/"$dep-$(dep_version "$dep")-"* 2>/dev/null | head -1)
   [ -n "$fn" ] || { echo "   ! 缺少源码包：src/$dep-*（先运行 fetch.sh）"; return 1; }
-  local d="$WORK/src/$ABI/$dep"
+  local d; d=$(src_dir "$dep")
   if [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then
     return 0
   fi
@@ -170,7 +179,8 @@ for dep in $TARGETS; do
     echo "[$dep] 无构建定义（函数 $fn 未定义），跳过"; FAILED="$FAILED $dep"; continue
   fi
   stamp="$STATE/$dep.done"
-  if [ "$CLEAN" = 0 ] && [ -f "$stamp" ]; then
+  if [ "$CLEAN" = 0 ] && [ -f "$stamp" ] &&
+     { [ "$dep" != ffmpeg ] || [ "$(cat "$stamp")" = "$ffmpeg_source_id" ]; }; then
     echo "[$dep] 已完成，跳过（--clean 可重做）"
     continue
   fi
@@ -189,7 +199,11 @@ for dep in $TARGETS; do
       continue
     fi
     dur=$(( $(date +%s) - start ))
-    touch "$stamp"
+    if [ "$dep" = ffmpeg ]; then
+      printf '%s\n' "$ffmpeg_source_id" > "$stamp"
+    else
+      touch "$stamp"
+    fi
     echo "[$dep] 成功（${dur}s）"
     BUILT=$((BUILT+1))
     export_to_windows

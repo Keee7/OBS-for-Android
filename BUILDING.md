@@ -66,7 +66,7 @@ Both FFmpeg build routes apply this repository patch before compilation:
 
 - `scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch`
 
-An older, unpatched `libavcodec.a` will not contain the named decoder selection and output-format/cropping fixes. Rebuild FFmpeg and the final APK after changing the patch.
+An older, unpatched `libavcodec.a` will not contain the byte-buffer output-format/cropping fixes. Rebuild FFmpeg and the final APK after changing the patch.
 
 The Linux CMake dependency helper generates files under `.obs-android-build/`, preserving the upstream `build/` directory. In particular, AOM ships required source scripts in `build/cmake/`; deleting that directory makes AOM configuration fail and then prevents FFmpeg from finding libaom.
 

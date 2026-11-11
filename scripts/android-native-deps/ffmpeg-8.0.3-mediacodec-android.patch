@@ -65,41 +65,6 @@ diff -ruN a/libavcodec/mediacodec_sw_buffer.c b/libavcodec/mediacodec_sw_buffer.
              memcpy(frame->data[i], src, height * s->stride);
          } else {
              int j, width;
-diff -ruN a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
---- a/libavcodec/mediacodecdec.c	2026-11-10 18:07:06.994550200 +0800
-+++ b/libavcodec/mediacodecdec.c	2026-11-10 18:08:18.965767200 +0800
-@@ -57,6 +57,7 @@
-     int amlogic_mpeg2_api23_workaround;
- 
-     int use_ndk_codec;
-+    char *codec_name;
-     // Ref. MediaFormat KEY_OPERATING_RATE
-     int operating_rate;
- } MediaCodecH264DecContext;
-@@ -450,6 +451,14 @@
- 
-     s->ctx->delay_flush = s->delay_flush;
-     s->ctx->use_ndk_codec = s->use_ndk_codec;
-+    if (s->codec_name && *s->codec_name) {
-+        s->ctx->codec_name = av_strdup(s->codec_name);
-+        if (!s->ctx->codec_name) {
-+            av_freep(&s->ctx);
-+            ret = AVERROR(ENOMEM);
-+            goto done;
-+        }
-+    }
- 
-     if ((ret = ff_mediacodec_dec_init(avctx, s->ctx, codec_mime, format)) < 0) {
-         s->ctx = NULL;
-@@ -594,6 +603,8 @@
- #define OFFSET(x) offsetof(MediaCodecH264DecContext, x)
- #define VD AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM
- static const AVOption ff_mediacodec_vdec_options[] = {
-+    { "codec_name", "Select a specific Android MediaCodec component",
-+                    OFFSET(codec_name), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, VD },
-     { "delay_flush", "Delay flush until hw output buffers are returned to the decoder",
-                      OFFSET(delay_flush), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
-     { "ndk_codec", "Use MediaCodec from NDK",
 diff -ruN a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
 --- a/libavcodec/mediacodecdec_common.c	2026-11-10 18:07:37.477286700 +0800
 +++ b/libavcodec/mediacodecdec_common.c	2026-11-10 18:08:34.921713300 +0800
@@ -135,13 +100,3 @@ diff -ruN a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.
  
      av_freep(&format);
      return ff_set_dimensions(avctx, width, height);
-@@ -775,7 +783,8 @@
-         av_log(avctx, AV_LOG_WARNING, "Unsupported or unknown profile\n");
-     }
- 
--    s->codec_name = ff_AMediaCodecList_getCodecNameByType(mime, profile, 0, avctx);
-+    if (!s->codec_name)
-+        s->codec_name = ff_AMediaCodecList_getCodecNameByType(mime, profile, 0, avctx);
-     if (!s->codec_name) {
-         // getCodecNameByType() can fail due to missing JVM, while NDK
-         // mediacodec can be used without JVM.

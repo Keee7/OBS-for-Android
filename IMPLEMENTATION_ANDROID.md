@@ -38,7 +38,7 @@
 最新 0.1.6-media-geometry-test / 7：FFmpeg MediaCodec YUV 裁剪拷贝修复（420 色度偏移、横向 crop 后整块复制问题）；OBS 媒体按实际帧几何、像素格式和色彩重建转换缓存；新增解码 buffer/stride/crop/visible 与首帧 coded/linesize/crop 诊断。主机旧 FFmpeg 负对照能检出裁剪错误，补丁通过；320×240 → 3840×2160 等转换状态回归通过。OBS 官方图标已加入应用及自适应图标资源。最终包 releases/OBS-Android-arm64-hwcodec-browser-20261102-0639.apk 完整构建、签名、16KB ZIP 对齐、原生/Java/图标入包检查通过；未在目标设备复现用户 4K 裁角问题，仍需实机复测。
 
 
-最新交付 0.1.5-media-quality-test / 6：高级 MediaCodec 属性新增 CBR/VBR/CQ 与设备范围映射的质量档；GPU 屏幕源默认开启，失败退避重试，禁止自动 CPU 回退。媒体源 content URI 使用授权 FD/自定义 AVIO，FFmpeg 增加 codec_name 可复现补丁并已重编安装，NDK MediaCodec 按 SDK 报告为硬件的组件名创建，提供真实首帧日志；初始化硬解失败可明确回退软件。播放、定位、EOF、循环定位及重开/资源释放的宿主测试通过；完整 APK 构建、签名、ZIP/ELF16KB、依赖闭包与补丁入包校验通过。最新包 releases/OBS-Android-arm64-hwcodec-browser-20261102-0620.apk。设备侧媒体播放和质量控制仍待复测，详见 scripts/MEDIA_QUALITY_TEST.md。
+最新交付 0.1.5-media-quality-test / 6：高级 MediaCodec 属性新增 CBR/VBR/CQ 与设备范围映射的质量档；GPU 屏幕源默认开启，失败退避重试，禁止自动 CPU 回退。媒体源 content URI 使用授权 FD/自定义 AVIO，媒体源硬件解码使用 FFmpeg 的 *_mediacodec 解码器（NDK MediaCodec，组件由系统选择），提供真实首帧日志；初始化硬解失败可明确回退软件。播放、定位、EOF、循环定位及重开/资源释放的宿主测试通过；完整 APK 构建、签名、ZIP/ELF16KB、依赖闭包与补丁入包校验通过。最新包 releases/OBS-Android-arm64-hwcodec-browser-20261102-0620.apk。设备侧媒体播放和质量控制仍待复测，详见 scripts/MEDIA_QUALITY_TEST.md。
 
 
 最新为 `releases/OBS-Android-arm64-hwcodec-browser-20261102-0542.apk`，`0.1.4-hevc-test` / 5。MediaCodec 新增 HEVC Main/Main 兼容 8-bit SDR、VPS/SPS/PPS 检查、命名硬件组件的按码率/尺寸/帧率/CBR 能力筛选，简单/高级输出接线。普通编码访问单元只复制一次；首帧参数集提取不再把大关键帧复制进 extra。增加 5 秒无输出及有界输入积压保护、32 MiB 输出队列字节上限、暂停恢复等待窗口和专用 `OBS-MediaCodec` 日志。日志/录像验证工具现支持 HEVC；选择 MediaCodec 不会静默使用软件编码器。
