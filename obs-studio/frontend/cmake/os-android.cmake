@@ -129,7 +129,12 @@ qt_add_resources(
 # 目标清单取全局属性 OBS_MODULES_ENABLED —— 顶层 CMakeLists.txt 里 add_subdirectory(plugins)
 # 在 add_subdirectory(frontend) 之前，故此刻已完整；模块名就是 .so 去后缀后的名字，
 # 与 libobs/obs-module.c 的 process_found_module 推出的 name 一致，data 目录按同名对上。
-get_property(_obs_plugin_modules GLOBAL PROPERTY OBS_MODULES_ENABLED)
+# 优先用 plugins/CMakeLists.txt 在过滤 core 清单之前保存的完整列表（可选插件不在
+# OBS_MODULES_ENABLED 里，但它们的 data/ 仍要打包）。
+get_property(_obs_plugin_modules GLOBAL PROPERTY OBS_ANDROID_ALL_MODULES)
+if(NOT _obs_plugin_modules)
+  get_property(_obs_plugin_modules GLOBAL PROPERTY OBS_MODULES_ENABLED)
+endif()
 set(_obs_plugin_data_dirs "")
 set(OBS_ANDROID_PLUGIN_MODULE_ENTRIES "")
 foreach(_m IN LISTS _obs_plugin_modules)

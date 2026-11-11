@@ -37,7 +37,7 @@ function(set_target_properties_obs target)
   # （libobs-opengl.so 与各插件是运行时 dlopen 的，链接期依赖抓不住它们）。
   # install 与 rundir 拷贝对 APK 交付物没有意义，跳过。
   get_target_property(_is_qt_android_app ${target} _qt_is_android_executable)
-  if(_is_qt_android_app)
+  if(_is_qt_android_app OR target STREQUAL obs-studio)
     get_property(obs_executables GLOBAL PROPERTY _OBS_EXECUTABLES)
     get_property(obs_modules GLOBAL PROPERTY OBS_MODULES_ENABLED)
     if(obs_executables OR obs_modules)

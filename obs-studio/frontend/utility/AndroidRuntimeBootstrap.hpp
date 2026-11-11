@@ -27,3 +27,7 @@
 #pragma once
 
 void PrepareAndroidRuntimePaths();
+
+// Prepare and select a complete bundle after Qt has registered assets: and
+// before the core and optional Android plugin loaders run.
+bool EnsureAndroidPluginBinaries();

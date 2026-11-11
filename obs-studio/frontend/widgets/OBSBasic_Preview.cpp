@@ -196,6 +196,8 @@ void OBSBasic::RenderMain(void *data, uint32_t, uint32_t)
 		window->ui->preview->DrawSpacingHelpers();
 	}
 
+	window->ui->preview->DrawSnapGuides();
+
 	/* --------------------------------------- */
 
 	gs_projection_pop();
@@ -272,6 +274,11 @@ void OBSBasic::TogglePreview()
 {
 	previewEnabled = !previewEnabled;
 	EnablePreviewDisplay(previewEnabled);
+}
+
+void OBSBasic::addSnapGuide(SnapGuide guide)
+{
+	ui->preview->addSnapGuide(guide);
 }
 
 void OBSBasic::EnablePreview()

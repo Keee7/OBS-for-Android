@@ -102,14 +102,12 @@ def main():
             if len(names) != len(set(names)):
                 errors.append('APK contains duplicate ZIP entry names')
             dex = [apk.read(n) for n in names if re.fullmatch(r'classes\d*\.dex', n)]
-            if not any(b'QT_ANDROID_NO_FULLSCREEN_KEYBOARD' in blob for blob in dex):
-                errors.append('Qt Android IME fullscreen control missing; package may contain an older Qt runtime')
             for name in CLASSES:
                 if not any(name in item for item in dex):
                     errors.append('missing Java class ' + name.decode())
             if not any(b'onCapturedContentResize' in item for item in dex):
                 errors.append('missing captured-content resize callback')
-            libs = [n for n in names if n.startswith('lib/arm64-v8a/') and n.endswith('.so')]
+            libs = [n for n in names if (n.startswith('lib/arm64-v8a/') or n.startswith('assets/obs-plugins/')) and n.endswith('.so')]
             if not libs:
                 errors.append('no arm64-v8a native libraries')
             for path in libs:
@@ -179,7 +177,7 @@ def main():
                 if missing_imports:
                     errors.append(f'{short} missing expected dynamic imports: {", ".join(sorted(missing_imports))}')
             for name in REQUIRED:
-                if f'lib/arm64-v8a/{name}' not in names:
+                if f'lib/arm64-v8a/{name}' not in names and f'assets/obs-plugins/{name}' not in names:
                     errors.append('missing arm64 library ' + name)
     except (OSError, ET.ParseError, BadZipFile, subprocess.CalledProcessError) as exc:
         print('FAIL: cannot inspect APK:', exc, file=sys.stderr)

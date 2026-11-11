@@ -91,13 +91,20 @@ echo "=== build exit=$BUILD_RC  失败任务数=$(grep -c '^FAILED:' "$LOG") ===
 grep -E "error:|fatal error|FAILED:" "$LOG" | head -30
 [ "$BUILD_RC" = 0 ] || { echo "FATAL: 整树构建失败，看 $LOG"; exit 1; }
 
-# ---- 插件暂存进包源目录（同 Windows 版的理由：否则新插件不进 APK） ----
-PKG_LIBS="$ROOT/obs-studio/frontend/cmake/android/libs/$ABI"
+# ---- 插件暂存进包源目录（assets/obs-plugins，运行时由 AndroidRuntimeBootstrap 解到 $OBS_ROOT_PATH/lib） ----
+PKG_ASSETS="$ROOT/obs-studio/frontend/cmake/android/assets/obs-plugins"
 PLUG_SRC=$(find "$BUILD_DIR/rundir" -type d -path '*/lib/obs-plugins' 2>/dev/null | head -1)
 if [ -n "$PLUG_SRC" ]; then
-  mkdir -p "$PKG_LIBS"
-  cp -f "$PLUG_SRC"/*.so "$PKG_LIBS"/
-  echo "=== 插件暂存 → frontend/cmake/android/libs/$ABI/: $(ls "$PKG_LIBS" | tr '\n' ' ') ==="
+  rm -rf "$PKG_ASSETS"
+  mkdir -p "$PKG_ASSETS"
+  cp -f "$PLUG_SRC"/*.so "$PKG_ASSETS"/
+  STRIP_BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+  for f in "$PKG_ASSETS"/*.so; do
+    [ -f "$f" ] || continue
+    if [ -x "$STRIP_BIN" ]; then "$STRIP_BIN" --strip-unneeded "$f" || true; fi
+  done
+  python3 "$SCRIPT_DIR/android-plugin-bundle.py" generate "$PKG_ASSETS" || exit 1
+  echo "=== 插件暂存 → frontend/cmake/android/assets/obs-plugins/: $(cd "$PKG_ASSETS" && ls -1 *.so | tr '\n' ' ') ==="
 else
   echo "WARNING: rundir 里没找到 obs-plugins 目录 —— APK 不会带 OBS 插件"
 fi
@@ -105,8 +112,13 @@ fi
 # ---- 强制重打包（同 Windows 版：清 androiddeployqt 产物 + gradle native 中间件） ----
 AB_DIR="$BUILD_DIR/frontend/android-build"
 if [ -d "$AB_DIR" ]; then
+  # 只清插件 .so（插件名不带 lib 前缀），保留 CMake 放好的应用库 libobs_<abi>.so
+  if [ -d "$AB_DIR/libs/$ABI" ]; then
+    find "$AB_DIR/libs/$ABI" -maxdepth 1 -type f -name '*.so' ! -name 'lib*' -delete
+  fi
   mkdir -p "$AB_DIR/libs/$ABI"
-  [ -n "$PLUG_SRC" ] && cp -f "$PLUG_SRC"/*.so "$AB_DIR/libs/$ABI"/
+  APP_LIB="$(ls "$BUILD_DIR/frontend"/libobs_*.so 2>/dev/null | head -1)"
+  [ -n "$APP_LIB" ] && cp -f "$APP_LIB" "$AB_DIR/libs/$ABI/"
   rm -f "$AB_DIR/obs-studio.apk"
   rm -rf "$AB_DIR/build/outputs/apk" \
          "$AB_DIR/build/intermediates/merged_jni_libs" \
@@ -155,7 +167,9 @@ fi
 APK=$(find "$BUILD_DIR" -path "*build/outputs/apk/release/*-unsigned.apk" 2>/dev/null | head -1)
 [ -n "$APK" ] || APK=$(find "$BUILD_DIR" -path "*build/outputs/apk/*.apk" ! -name '*-signed*.apk' 2>/dev/null | head -1)
 [ -n "$APK" ] || { echo "FATAL: 未找到生成的 APK"; exit 1; }
+
 python3 "$SCRIPT_DIR/qt-android-ime/verify-runtime-apk.py" "$APK" || exit 1
+python3 "$SCRIPT_DIR/android-plugin-bundle.py" verify "$APK" || exit 1
 
 APKSIGNER="$SDK/build-tools/36.0.0/apksigner"
 [ -f "$APKSIGNER" ] || APKSIGNER="$SDK/build-tools/34.0.0/apksigner"

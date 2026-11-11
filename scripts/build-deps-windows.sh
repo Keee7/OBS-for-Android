@@ -23,7 +23,7 @@ test -f "$SYSROOT/usr/lib/aarch64-linux-android/$API/libc.so" || { echo "Incompl
 test -f "$SOURCES_ROOT/x264/configure" || { echo 'Missing official x264 source' >&2; exit 1; }
 test -f "$SOURCES_ROOT/x265_3.6/source/CMakeLists.txt" || { echo 'Missing x265 3.6 source' >&2; exit 1; }
 test -f "$SOURCES_ROOT/libaom-3.10.0/CMakeLists.txt" || { echo 'Missing libaom 3.10.0 source' >&2; exit 1; }
-test -f "$SOURCES_ROOT/ffmpeg-7.1.3/configure" || { echo 'Missing official FFmpeg 7.1.3 source' >&2; exit 1; }
+test -f "$SOURCES_ROOT/ffmpeg-8.0.3/configure" || { echo 'Missing official FFmpeg 8.0.3 source' >&2; exit 1; }
 mkdir -p "$WORK_ROOT" "$WORK_ROOT/src" "$WORK_ROOT/bin" "$WORK_ROOT/prefix" "$OUTPUT_PREFIX"
 # Windows Clang receives a Windows-form sysroot. Keeping its path space-free is
 # necessary because both projects expand compiler flags as shell words.
@@ -57,14 +57,15 @@ prepare() {
   fi
 }
 prepare "$SOURCES_ROOT/x264" "$WORK_ROOT/src/x264"
-prepare "$SOURCES_ROOT/ffmpeg-7.1.3" "$WORK_ROOT/src/ffmpeg"
+ffmpeg_work="$WORK_ROOT/src/ffmpeg-8.0.3"
+prepare "$SOURCES_ROOT/ffmpeg-8.0.3" "$ffmpeg_work"
 # Idempotently apply our MediaCodec fixes to a pristine or existing source tree.
 patch_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-native-deps"
-for patch_file in "$patch_dir/ffmpeg-7.1.3-mediacodec-codec-name.patch" "$patch_dir/ffmpeg-7.1.3-mediacodec-crop.patch"; do
-  if patch -d "$WORK_ROOT/src/ffmpeg" -p1 -R --force --dry-run --silent < "$patch_file"; then
+for patch_file in "$patch_dir/ffmpeg-8.0.3-mediacodec-android.patch"; do
+  if patch -d "$ffmpeg_work" -p1 -R --force --dry-run --silent < "$patch_file"; then
     echo "Already applied: $patch_file"
-  elif patch -d "$WORK_ROOT/src/ffmpeg" -p1 --force --dry-run --silent < "$patch_file"; then
-    patch -d "$WORK_ROOT/src/ffmpeg" -p1 --force < "$patch_file"
+  elif patch -d "$ffmpeg_work" -p1 --force --dry-run --silent < "$patch_file"; then
+    patch -d "$ffmpeg_work" -p1 --force < "$patch_file"
   else
     echo "FFmpeg patch does not match this source tree: $patch_file" >&2
     exit 1
@@ -113,7 +114,7 @@ if [[ "$targets" == *' x264 '* ]]; then
    make install-lib-static)
 fi
 if [[ "$targets" == *' ffmpeg '* ]]; then
-  (cd "$WORK_ROOT/src/ffmpeg"
+  (cd "$ffmpeg_work"
    ./configure --prefix="$prefix" --enable-cross-compile --target-os=android --arch=aarch64 \
      --cc="$CC" --ar="$AR" --ranlib="$RANLIB" --strip="$STRIP" --enable-static --disable-shared \
      --disable-doc --disable-programs --disable-debug --disable-stripping --disable-autodetect \

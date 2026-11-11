@@ -55,6 +55,7 @@
 #include <settings/OBSBasicSettings.hpp>
 #include <utility/QuickTransition.hpp>
 #include <utility/SceneRenameDelegate.hpp>
+#include <utility/ScreenshotObj.hpp>
 #if defined(_WIN32) || defined(WHATSNEW_ENABLED)
 #include <utility/WhatsNewInfoThread.hpp>
 #endif
@@ -76,11 +77,8 @@
 #include <QWidgetAction>
 
 #include <mutex>
-#ifdef _WIN32
 #include <sstream>
-#endif
 #include <string>
-#include <unordered_set>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -125,142 +123,6 @@ extern void CheckExistingCookieId();
 
 namespace {
 std::once_flag saveOnceFlag;
-}
-
-static void AddExtraModulePaths()
-{
-	string plugins_path, plugins_data_path;
-	char *s;
-
-	s = getenv("OBS_PLUGINS_PATH");
-	if (s) {
-		plugins_path = s;
-	}
-
-	s = getenv("OBS_PLUGINS_DATA_PATH");
-	if (s) {
-		plugins_data_path = s;
-	}
-
-	if (!plugins_path.empty() && !plugins_data_path.empty()) {
-#if defined(__APPLE__)
-		plugins_path += "/%module%.plugin/Contents/MacOS";
-		plugins_data_path += "/%module%.plugin/Contents/Resources";
-		obs_add_module_path(plugins_path.c_str(), plugins_data_path.c_str());
-#else
-		string data_path_with_module_suffix;
-		data_path_with_module_suffix += plugins_data_path;
-		data_path_with_module_suffix += "/%module%";
-		obs_add_module_path(plugins_path.c_str(), data_path_with_module_suffix.c_str());
-#endif
-	}
-
-#ifdef __ANDROID__
-	/* B-6：Android 上插件 .so 由 androiddeployqt 打进 APK 的 lib/<abi>/，安装后解到
-	 * nativeLibraryDir（= applicationDirPath()）。W^X 只准从那里 dlopen，故 bin 指过去。
-	 * 本平台 get_plugin_info 恒 true，扫描会把同目录里的 Qt/libobs 等 .so 也试开一遍，
-	 * 它们没有 obs_module_load，obs_open_module 在登记成模块之前就返回、只打一行警告，不崩。
-	 *
-	 * P-1：data 不能跟着 bin 走同一个目录 —— PackageManager 只把 lib/<abi>/ 里以 .so
-	 * 结尾的文件解出来，插件的 .effect/locale 压根不在 nativeLibraryDir 里（旧写法
-	 * "<appdir>/%module%/data" 永远 stat 不到，obs_module_file() 恒返回 NULL，于是
-	 * obs-transitions 的 fade_transition.effect 建不出转场源）。数据改走"APK 里的 Qt 资源
-	 * → 启动时解到应用私有目录"那条路（见 AndroidRuntimeBootstrap.cpp 与
-	 * frontend/cmake/os-android.cmake 的 :/obsplugindata），路径布局与
-	 * libobs/obs-android.c 顶部注释、add_default_module_paths() 保持一致。 */
-	{
-		QByteArray bin = QCoreApplication::applicationDirPath().toUtf8();
-		QByteArray data = qgetenv("OBS_ROOT_PATH") + "/share/obs/obs-plugins/%module%";
-		if (!bin.isEmpty())
-			obs_add_module_path(bin.constData(), data.constData());
-	}
-#else
-	if (portable_mode) {
-		return;
-	}
-
-	char base_module_dir[512];
-#if defined(_WIN32)
-	int ret = GetProgramDataPath(base_module_dir, sizeof(base_module_dir), "obs-studio/plugins/%module%");
-#elif defined(__APPLE__)
-	int ret = GetAppConfigPath(base_module_dir, sizeof(base_module_dir), "obs-studio/plugins/%module%.plugin");
-#else
-	int ret = GetAppConfigPath(base_module_dir, sizeof(base_module_dir), "obs-studio/plugins/%module%");
-#endif
-
-	if (ret <= 0) {
-		return;
-	}
-
-	string path = base_module_dir;
-#if defined(__APPLE__)
-	/* User Application Support Search Path */
-	obs_add_module_path((path + "/Contents/MacOS").c_str(), (path + "/Contents/Resources").c_str());
-
-#ifndef __aarch64__
-	/* Legacy System Library Search Path */
-	char system_legacy_module_dir[PATH_MAX];
-	GetProgramDataPath(system_legacy_module_dir, sizeof(system_legacy_module_dir), "obs-studio/plugins/%module%");
-	std::string path_system_legacy = system_legacy_module_dir;
-	obs_add_module_path((path_system_legacy + "/bin").c_str(), (path_system_legacy + "/data").c_str());
-
-	/* Legacy User Application Support Search Path */
-	char user_legacy_module_dir[PATH_MAX];
-	GetAppConfigPath(user_legacy_module_dir, sizeof(user_legacy_module_dir), "obs-studio/plugins/%module%");
-	std::string path_user_legacy = user_legacy_module_dir;
-	obs_add_module_path((path_user_legacy + "/bin").c_str(), (path_user_legacy + "/data").c_str());
-#endif
-#else
-#if ARCH_BITS == 64
-	obs_add_module_path((path + "/bin/64bit").c_str(), (path + "/data").c_str());
-#else
-	obs_add_module_path((path + "/bin/32bit").c_str(), (path + "/data").c_str());
-#endif
-#endif
-#endif /* __ANDROID__ */
-}
-
-/* First-party modules considered to be potentially unsafe to load in Safe Mode
- * due to them allowing external code (e.g. scripts) to modify OBS's state. */
-static const unordered_set<string> unsafe_modules = {
-	"frontend-tools", // Scripting
-	"obs-websocket",  // Allows outside modifications
-};
-
-static void SetSafeModuleNames()
-{
-#ifndef SAFE_MODULES
-	return;
-#else
-	string module;
-	stringstream modules_(SAFE_MODULES);
-
-	while (getline(modules_, module, '|')) {
-		/* When only disallowing third-party plugins, still add
-		 * "unsafe" bundled modules to the safe list. */
-		if (disable_3p_plugins || !unsafe_modules.count(module)) {
-			obs_add_safe_module(module.c_str());
-		}
-	}
-#endif
-}
-
-static void SetCoreModuleNames()
-{
-#ifndef SAFE_MODULES
-	throw "SAFE_MODULES not defined";
-#else
-	std::string safeModules = SAFE_MODULES;
-	if (safeModules.empty()) {
-		throw "SAFE_MODULES is empty";
-	}
-	string module;
-	stringstream modules_(SAFE_MODULES);
-
-	while (getline(modules_, module, '|')) {
-		obs_add_core_module(module.c_str());
-	}
-#endif
 }
 
 extern void setupDockAction(QDockWidget *dock);
@@ -1227,22 +1089,12 @@ void OBSBasic::OBSInit()
 #if defined(_WIN32) && !defined(_DEBUG)
 	LoadLibraryW(L"Qt6Network");
 #endif
-	struct obs_module_failure_info mfi;
-
-	// Safe Mode disables third-party plugins so we don't need to add each path outside the OBS bundle/installation.
-	if (safe_mode || disable_3p_plugins) {
-		SetSafeModuleNames();
-	} else {
-		AddExtraModulePaths();
-	}
-
-	// Core modules are not allowed to be disabled by the user via plugin manager.
-	SetCoreModuleNames();
-
-	/* Modules can access frontend information (i.e. profile and scene collection data) during their initialization, and some modules (e.g. obs-websockets) are known to use the filesystem location of the current profile in their own code.
-
-     Thus the profile and scene collection discovery needs to happen before any access to that information (but after initializing global settings) to ensure legacy code gets valid path information.
-     */
+	// Modules can access frontend information (i.e., profile and scene collection data) during their initialization,
+	// and some modules (e.g., obs-websockets) are known to use the filesystem location of the current profile in their
+	// own code.
+	//
+	// Thus, the profile and scene collection discovery needs to happen before any access to that information happens,
+	// but after initializing global settings, to ensure legacy code gets valid path information.
 	RefreshSceneCollections(true);
 
 #ifdef __ANDROID__
@@ -1253,9 +1105,7 @@ void OBSBasic::OBSInit()
 	if (!OBSAndroidAudioInit())
 		blog(LOG_WARNING, "Android audio host registration failed");
 #endif
-	App()->loadAppModules(mfi);
-
-	BPtr<char *> failed_modules = mfi.failed_modules;
+	App()->loadAppModules();
 
 #ifdef BROWSER_AVAILABLE
 	cef = obs_browser_init_panel();
@@ -1616,22 +1466,7 @@ void OBSBasic::OBSInit()
 		activateWindow();
 	}
 
-	/* ------------------------------------------- */
-	/* display warning message for failed modules  */
-
-	if (mfi.count) {
-		QString failed_plugins;
-
-		char **plugin = mfi.failed_modules;
-		while (*plugin) {
-			failed_plugins += *plugin;
-			failed_plugins += "\n";
-			plugin++;
-		}
-
-		QString failed_msg = QTStr("PluginsFailedToLoad.Text").arg(failed_plugins);
-		OBSMessageBox::warning(this, QTStr("PluginsFailedToLoad.Title"), failed_msg);
-	}
+	App()->handlePluginLoadState();
 }
 
 void OBSBasic::OnFirstLoad()

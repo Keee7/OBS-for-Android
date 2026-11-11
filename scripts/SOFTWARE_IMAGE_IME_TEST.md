@@ -14,9 +14,9 @@ Windows Qt 6.9.3 全量 configure、native/Qt/Java 构建、签名（v3、单签
 
 ## H.265 与 AV1 软件编码
 
-- 增加 `ffmpeg_x265`（Software HEVC / x265）并接入已有 `ffmpeg_aom_av1`（AOM AV1）。依赖固定为 x265 3.6、libaom 3.10.0、FFmpeg 7.1.3；两个构建路径均显式开启库支持，运行时按实际编码器存在与否注册。
+- 增加 `ffmpeg_x265`（Software HEVC / x265）并接入已有 `ffmpeg_aom_av1`（AOM AV1）。依赖固定为 x265 3.6、libaom 3.10.0、FFmpeg 8.0.3；两个构建路径均显式开启库支持，运行时按实际编码器存在与否注册。
 - 简单输出可选择软件 HEVC/AV1；推流列表同时遵守服务支持的编码格式。高级输出提供码率控制、速度和线程选项。x265 的界面 CRF 内部沿用 OBS 的 `CQP` 设置键，实际传给 x265 的是 CRF，非固定 QP。
-- x265 默认为 ultrafast、8-bit SDR I420；AOM Android 默认为 realtime 算法、速度 8，启用行并行。FFmpeg 7.1.3 的 `cpu-used` 上限为 8，因此 Android 不显示 9/10，并检查速度设置是否成功，避免被拒绝后静默保留较慢的默认速度 1。默认自动线程可手工限制，避免软件编码占满 CPU。MediaCodec 仍适合低 CPU 占用推流；没有确认软编可持续达到 1080p60。
+- x265 默认为 ultrafast、8-bit SDR I420；AOM Android 默认为 realtime 算法、速度 8，启用行并行。FFmpeg 8.0.3 的 `cpu-used` 上限为 8，因此 Android 不显示 9/10，并检查速度设置是否成功，避免被拒绝后静默保留较慢的默认速度 1。默认自动线程可手工限制，避免软件编码占满 CPU。MediaCodec 仍适合低 CPU 占用推流；没有确认软编可持续达到 1080p60。
 - 自定义 FFmpeg 选项保留上游行为，部分无效项仅产生警告，尤其 x265 的内部 `x265-params`；本轮没有保证任意自定义字串都会生效，应以日志为准。内建 x265 档位和 AOM 速度/并行选项单独检查返回值。
 - 保留 x265 ARM64 汇编；修复上游自定义汇编命令缺 Android target，以及 NDK r30 下 pkg-config 私有链接项。静态 FFmpeg 携带 x265/AOM/C++ runtime 及 postproc 依赖。
 - 公共编码辅助函数在发送 EAGAIN 时先接收旧包，再重试同一输入帧；异常时明确失败，避免静默丢帧。复用帧前调用 `av_frame_make_writable`。OBS 的 PTS 已按 fps_den 递增，时间转换没有重复乘分子。

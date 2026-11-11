@@ -2,6 +2,7 @@ param(
     [ValidateSet('configure','build','package','all')][string]$Action = 'all',
     [string]$ToolsRoot = (Join-Path (Split-Path $PSScriptRoot -Parent | Split-Path -Parent) 'build-tools'),
     [int]$Jobs = 8,
+    [string]$NativeDeps,
     [ValidateSet('6.11.1')][string]$QtVersion = '6.11.1',
     [ValidatePattern('^\d+\.\d+\.\d+$')][string]$GradleVersion = '9.3.1',
     [ValidateRange(36, 99)][int]$CompileSdkVersion = 36,
@@ -12,14 +13,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $tools = [IO.Path]::GetFullPath($ToolsRoot)
-$build = Join-Path $tools ('build-obs-arm64-qt' + $QtVersion.Replace('.', ''))
+$build = Join-Path $tools ('build-obs33-arm64-qt' + $QtVersion.Replace('.', ''))
 $logs = Join-Path $tools 'build-logs'
 $cmake = Join-Path $tools 'cmake/cmake-3.31.6-windows-x86_64/bin/cmake.exe'
 $ninja = Join-Path $tools 'ninja/ninja.exe'
 $ndk = Join-Path $tools 'ndk/android-ndk-r30'
 $qt = Join-Path $tools "Qt/$QtVersion/android_arm64_v8a"
 $hostQt = Join-Path $tools "Qt/$QtVersion/msvc2022_64"
-$prefix = Join-Path $tools 'android-deps/arm64-v8a'
+$prefix = if ($NativeDeps) { [IO.Path]::GetFullPath($NativeDeps) } else { Join-Path $tools 'android-deps-ffmpeg8/arm64-v8a' }
 $sdk = Join-Path $tools 'android-sdk'
 $env:JAVA_HOME = Join-Path $tools 'jdk-17.0.12'
 $env:ANDROID_SDK_ROOT = $sdk
@@ -89,7 +90,7 @@ if ($Action -in @('configure','build','package','all')) {
         '-DCMAKE_POLICY_VERSION_MINIMUM=3.5', '-DENABLE_PLUGINS=ON', '-DENABLE_FRONTEND=ON',
         '-DENABLE_SCRIPTING=OFF', '-DENABLE_HEVC=ON', "-DANDROID_SDK_ROOT=$sdk", "-DCMAKE_INSTALL_PREFIX=$build/install")
     $argsConfigure += "-DOBS_ANDROID_COMPILE_SDK_VERSION=$CompileSdkVersion"
-    $argsConfigure += "-DOBS_ANDROID_PACKAGE_NAME=$packageId", "-DOBS_ANDROID_PACKAGE_SOURCE_DIR=$packageSource"
+    $argsConfigure += "-DOBS_ANDROID_PACKAGE_NAME=$packageId", "-DOBS_ANDROID_PACKAGE_SOURCE_DIR=$($packageSource.Replace('\','/'))"
     Invoke-BuildTool $cmake $argsConfigure 'configure.log'
 }
 if ($Action -in @('build','package','all')) {
@@ -101,9 +102,19 @@ if ($Action -in @('package','all')) {
     foreach ($required in @('android-mediacodec.so','android-browser.so')) {
         if ($required -notin $modules.Name) { throw "Built plugin missing: $required" }
     }
-    $packageSources = Join-Path $packageSource 'libs/arm64-v8a'
-    New-Item -ItemType Directory -Force -Path $packageSources | Out-Null
-    foreach ($module in $modules) { Copy-Item -LiteralPath $module.FullName -Destination $packageSources -Force }
+    # 插件走 assets：运行时由 AndroidRuntimeBootstrap 解到 $OBS_ROOT_PATH/lib。
+    # （APK 的 lib/<abi>/ 只解 lib*.so，我们的插件名不带 lib 前缀，解不出来。）
+    $packageAssets = Join-Path $packageSource 'assets/obs-plugins'
+    if (Test-Path -LiteralPath $packageAssets) { Remove-Item -LiteralPath $packageAssets -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $packageAssets | Out-Null
+    foreach ($module in $modules) { Copy-Item -LiteralPath $module.FullName -Destination $packageAssets -Force }
+    $stripExe = Join-Path $ndk 'toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip.exe'
+    if (Test-Path -LiteralPath $stripExe) {
+        foreach ($module in (Get-ChildItem -LiteralPath $packageAssets -File -Filter '*.so')) {
+            & $stripExe --strip-unneeded $module.FullName 2>$null | Out-Null
+        }
+    }
+    Invoke-BuildTool 'python' @("$PSScriptRoot/android-plugin-bundle.py", 'generate', $packageAssets) 'plugin-bundle.log'
     $androidBuild = Join-Path $build 'frontend/android-build'
     $deploy = Join-Path $hostQt 'bin/androiddeployqt.exe'
     $unsigned = Join-Path $androidBuild 'obs-studio-test.apk'
@@ -141,6 +152,7 @@ if ($Action -in @('package','all')) {
     Invoke-BuildTool 'python' @("$PSScriptRoot/verify-android-apk.py", $signed, '--tools-root', $tools,
         '--native-dir', $build, '--expected-package', $packageId) 'strict-apk-check.log'
     Invoke-BuildTool 'python' @("$PSScriptRoot/qt-android-ime/verify-runtime-apk.py", $signed) 'qt-runtime-apk-check.log'
+    Invoke-BuildTool 'python' @("$PSScriptRoot/android-plugin-bundle.py", 'verify', $signed) 'plugin-bundle-apk.log'
     Get-FileHash -Algorithm SHA256 -LiteralPath $signed
     Write-Host "Test APK: $signed"
 }

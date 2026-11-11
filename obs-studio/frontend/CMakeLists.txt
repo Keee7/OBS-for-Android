@@ -9,7 +9,7 @@ else()
   target_enable_feature(obs "User Interface")
 endif()
 
-find_package(FFmpeg REQUIRED COMPONENTS avcodec avutil avformat)
+find_package(FFmpeg 8.0 REQUIRED COMPONENTS avcodec avutil avformat)
 find_package(CURL REQUIRED)
 
 # nlohmann/json: vendored single-header copy under deps/nlohmann.
@@ -135,10 +135,6 @@ foreach(graphics_library IN ITEMS opengl metal d3d11)
     target_compile_definitions(obs-studio PRIVATE DL_${graphics_library_U}="")
   endif()
 endforeach()
-
-get_property(obs_module_list GLOBAL PROPERTY OBS_MODULES_ENABLED)
-list(JOIN obs_module_list "|" SAFE_MODULES)
-target_compile_definitions(obs-studio PRIVATE "SAFE_MODULES=\"${SAFE_MODULES}\"")
 
 get_target_property(target_sources obs-studio SOURCES)
 if(OS_ANDROID)

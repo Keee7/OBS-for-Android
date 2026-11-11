@@ -1,13 +1,25 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
-option(ENABLE_PLUGINS "Enable building OBS plugins" ON)
+if(NOT TARGET libobs)
+  message(FATAL_ERROR "OBS Core modules require 'libobs' target.")
+endif()
 
-if(NOT ENABLE_PLUGINS)
-  set_property(GLOBAL APPEND PROPERTY OBS_FEATURES_DISABLED "Plugin Support")
+option(ENABLE_CORE_MODULES "Enable building OBS Core Modules" ON)
+set_property(GLOBAL PROPERTY ENABLE_PLUGINS ${ENABLE_CORE_MODULES})
+
+# FIXME: Remove with OBS 34.0.0
+if(DEFINED ENABLE_PLUGINS)
+  message(DEPRECATION "The ENABLE_PLUGINS cache variable is deprecated, use 'ENABLE_CORE_MODULES' instead")
+  set(ENABLE_CORE_MODULES ${ENABLE_PLUGINS})
+endif()
+
+if(NOT ENABLE_CORE_MODULES)
+  set_property(GLOBAL APPEND PROPERTY OBS_FEATURES_DISABLED "Core Modules")
+  set_obs_core_modules()
   return()
 endif()
 
-set_property(GLOBAL APPEND PROPERTY OBS_FEATURES_ENABLED "Plugin Support")
+set_property(GLOBAL APPEND PROPERTY OBS_FEATURES_ENABLED "Core Modules")
 
 if(OS_ANDROID)
   # 移植期白名单：下面那批 add_obs_plugin() 大多没写 PLATFORMS 门禁，一旦
@@ -145,6 +157,23 @@ if(OS_ANDROID)
   #                       （P-5 已闭环），设置里那 7 个只有 ffmpeg muxer 才支持的封装格式
   #                       （mkv/flv/mov/mpegts/hls…）在 Android 上仍不可选 —— 归 P-6 前端清单。
   add_subdirectory(obs-ffmpeg)
+
+  # 可选采集插件不进 core 清单：core 模块会被 PluginManager 跳过（不进插件管理器）、
+  # 且不受用户 disabled 配置影响；而 android-* / nikon 这些是可选项，应该让用户看到并
+  # 能禁用。剔出后由 PluginModuleLoader_Android.cpp 以 PLUGIN 装载 → 出现在管理器里。
+  # 必须在 add_subdirectory() 之后做：target_install_resources() 是在那期间按"是否在
+  # OBS_MODULES_ENABLED 里"决定插件数据放 share/obs/obs-plugins/<模块> 的。
+  get_property(_android_noncore_modules GLOBAL PROPERTY OBS_MODULES_ENABLED)
+  # 完整清单另存一份：frontend/cmake/os-android.cmake 要用它收集**插件数据**资源
+  # （可选插件虽不进 core，但它们的 data/ 仍必须打进 APK）。
+  set_property(GLOBAL PROPERTY OBS_ANDROID_ALL_MODULES ${_android_noncore_modules})
+  list(REMOVE_ITEM _android_noncore_modules android-audio android-camera android-capture android-screen nikon-source)
+  set_property(GLOBAL PROPERTY OBS_MODULES_ENABLED ${_android_noncore_modules})
+  # OBS 33.0 起 obs-core-modules.c 由 set_obs_core_modules() 用 configure_file 生成到 libobs 的
+  # binary 目录，而 libobs/cmake/obs-core-modules.cmake:4 的 target_sources 引用的是相对名
+  # obs-core-modules.c —— 不生成就在 Generate 阶段报 "Cannot find source file: obs-core-modules.c"。
+  # 上游在文件末尾（:259）调用它，本分支提前 return 会跳过，因此这里补一次。
+  set_obs_core_modules()
   return()
 endif()
 
@@ -153,7 +182,7 @@ macro(check_obs_browser)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/obs-browser/CMakeLists.txt")
       message(FATAL_ERROR "Required submodule 'obs-browser' not available.")
     else()
-      add_subdirectory(obs-browser)
+      add_core_module(obs-browser)
     endif()
   else()
     add_custom_target(obs-browser)
@@ -165,81 +194,83 @@ macro(check_obs_websocket)
   if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/obs-websocket/CMakeLists.txt")
     message(FATAL_ERROR "Required submodule 'obs-websocket' not available.")
   else()
-    add_subdirectory(obs-websocket)
+    add_core_module(obs-websocket)
   endif()
 endmacro()
 
 # Add plugins in alphabetical order to retain order in IDE projects
-add_obs_plugin(
+add_core_module(
     aja
     PLATFORMS WINDOWS MACOS LINUX
     WITH_MESSAGE
 )
-add_obs_plugin(aja-output-ui PLATFORMS WINDOWS MACOS LINUX WITH_MESSAGE)
-add_obs_plugin(coreaudio-encoder PLATFORMS WINDOWS MACOS)
-add_obs_plugin(
+add_core_module(aja-output-ui PLATFORMS WINDOWS MACOS LINUX WITH_MESSAGE)
+add_core_module(coreaudio-encoder PLATFORMS WINDOWS MACOS)
+add_core_module(
     decklink
     PLATFORMS WINDOWS MACOS LINUX
     WITH_MESSAGE
 )
-add_obs_plugin(
+add_core_module(
     decklink-captions
     PLATFORMS WINDOWS MACOS LINUX
     WITH_MESSAGE
 )
-add_obs_plugin(
+add_core_module(
     decklink-output-ui
     PLATFORMS WINDOWS MACOS LINUX
     WITH_MESSAGE
 )
-add_obs_plugin(
+add_core_module(
     frontend-tools
     PLATFORMS WINDOWS MACOS LINUX
     WITH_MESSAGE
 )
-add_obs_plugin(image-source)
-add_obs_plugin(linux-alsa PLATFORMS LINUX FREEBSD OPENBSD)
-add_obs_plugin(linux-capture PLATFORMS LINUX FREEBSD OPENBSD)
-add_obs_plugin(linux-jack PLATFORMS LINUX FREEBSD OPENBSD)
-add_obs_plugin(linux-pipewire PLATFORMS LINUX FREEBSD OPENBSD)
-add_obs_plugin(linux-pulseaudio PLATFORMS LINUX FREEBSD OPENBSD)
-add_obs_plugin(linux-v4l2 PLATFORMS LINUX FREEBSD OPENBSD)
-add_obs_plugin(mac-avcapture PLATFORMS MACOS)
-add_obs_plugin(mac-capture PLATFORMS MACOS)
-add_obs_plugin(mac-syphon PLATFORMS MACOS)
-add_obs_plugin(mac-videotoolbox PLATFORMS MACOS)
-add_obs_plugin(mac-virtualcam PLATFORMS MACOS)
-add_obs_plugin(nv-filters PLATFORMS WINDOWS)
+add_core_module(image-source)
+add_core_module(linux-alsa PLATFORMS LINUX FREEBSD OPENBSD)
+add_core_module(linux-capture PLATFORMS LINUX FREEBSD OPENBSD)
+add_core_module(linux-jack PLATFORMS LINUX FREEBSD OPENBSD)
+add_core_module(linux-pipewire PLATFORMS LINUX FREEBSD OPENBSD)
+add_core_module(linux-pulseaudio PLATFORMS LINUX FREEBSD OPENBSD)
+add_core_module(linux-v4l2 PLATFORMS LINUX FREEBSD OPENBSD)
+add_core_module(mac-avcapture PLATFORMS MACOS)
+add_core_module(mac-capture PLATFORMS MACOS)
+add_core_module(mac-syphon PLATFORMS MACOS)
+add_core_module(mac-videotoolbox PLATFORMS MACOS)
+add_core_module(mac-virtualcam PLATFORMS MACOS)
+add_core_module(nv-filters PLATFORMS WINDOWS)
 
 check_obs_browser()
 
-add_obs_plugin(obs-ffmpeg)
-add_obs_plugin(obs-filters)
-add_obs_plugin(obs-libfdk)
-add_obs_plugin(obs-nvenc PLATFORMS WINDOWS LINUX)
-add_obs_plugin(obs-outputs)
-add_obs_plugin(
+add_core_module(obs-ffmpeg)
+add_core_module(obs-filters)
+add_core_module(obs-libfdk)
+add_core_module(obs-nvenc PLATFORMS WINDOWS LINUX)
+add_core_module(obs-outputs)
+add_core_module(
     obs-qsv11
     PLATFORMS WINDOWS LINUX
     ARCHITECTURES x64 x86_64
 )
-add_obs_plugin(obs-text PLATFORMS WINDOWS)
-add_obs_plugin(obs-transitions)
-add_obs_plugin(
+add_core_module(obs-text PLATFORMS WINDOWS)
+add_core_module(obs-transitions)
+add_core_module(
     obs-vst
     PLATFORMS WINDOWS MACOS LINUX
     WITH_MESSAGE
 )
-add_obs_plugin(obs-webrtc)
+add_core_module(obs-webrtc)
 
 check_obs_websocket()
 
-add_obs_plugin(obs-x264)
-add_obs_plugin(oss-audio PLATFORMS FREEBSD OPENBSD)
-add_obs_plugin(rtmp-services)
-add_obs_plugin(sndio PLATFORMS LINUX FREEBSD OPENBSD)
-add_obs_plugin(text-freetype2)
-add_obs_plugin(vlc-video WITH_MESSAGE)
-add_obs_plugin(win-capture PLATFORMS WINDOWS)
-add_obs_plugin(win-dshow PLATFORMS WINDOWS)
-add_obs_plugin(win-wasapi PLATFORMS WINDOWS)
+add_core_module(obs-x264)
+add_core_module(oss-audio PLATFORMS FREEBSD OPENBSD)
+add_core_module(rtmp-services)
+add_core_module(sndio PLATFORMS LINUX FREEBSD OPENBSD)
+add_core_module(text-freetype2)
+add_core_module(vlc-video WITH_MESSAGE)
+add_core_module(win-capture PLATFORMS WINDOWS)
+add_core_module(win-dshow PLATFORMS WINDOWS)
+add_core_module(win-wasapi PLATFORMS WINDOWS)
+
+set_obs_core_modules()

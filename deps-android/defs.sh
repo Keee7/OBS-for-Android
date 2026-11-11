@@ -194,9 +194,9 @@ build_aom() {
 build_ffmpeg() {
   local s; s=$(src_dir ffmpeg)
   # Both dependency build routes must use the decoder fixes shipped with OBS.
+  # 该补丁同时包含 codec_name 组件选择与 byte-buffer 输出的 crop/format 修正。
   local patch_file
-  for patch_file in "$HERE/../scripts/android-native-deps/ffmpeg-7.1.3-mediacodec-codec-name.patch" \
-                    "$HERE/../scripts/android-native-deps/ffmpeg-7.1.3-mediacodec-crop.patch"; do
+  for patch_file in "$HERE/../scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch"; do
     if patch -d "$s" -p1 -R --force --dry-run --silent < "$patch_file" > /dev/null 2>&1; then
       echo "Already applied: $(basename "$patch_file")"
     elif patch -d "$s" -p1 --force --dry-run --silent < "$patch_file" > /dev/null 2>&1; then
