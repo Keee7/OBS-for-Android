@@ -87,19 +87,33 @@ jobs:
           java-version: '17'
 
       - name: Install host build tools
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
           # 7-Zip：Ubuntu 24.04 上 **p7zip-full 已变成 transitional 包**，不再提供
           # /usr/bin/7z；提供二进制的是 7zip 包（7z/7za/7zr）。所以这里装 7zip。
           # autoconf/automake/libtool：deps-android 里 freetype/speexdsp/fdk-aac/rnnoise
           #   走 autoconf 系（defs.sh 的 _autoconf_dep 首行就是 autoreconf -fi），缺了会直接失败。
           # nasm/yasm：备 x86 汇编路径（本包是 arm64，一般用不到，但装了更稳）。
           # pkg-config/dpkg-dev：交叉 pkg-config 与 dpkg 架构查询。
-          sudo apt-get install -y --no-install-recommends \
-            7zip ninja-build build-essential curl unzip zip ca-certificates \
-            patch pkg-config dpkg-dev autoconf automake libtool nasm yasm ccache \
-            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev \
+          host_packages=(
+            7zip ninja-build build-essential curl unzip zip ca-certificates
+            patch pkg-config dpkg-dev autoconf automake libtool nasm yasm ccache
+            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev python3-pil
+          )
+          apt_network_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+          fetch_host_packages() {
+            sudo timeout -k 5s 90s apt-get "${apt_network_options[@]}" update --error-on=any &&
+              sudo timeout -k 5s 150s apt-get "${apt_network_options[@]}" install \
+                -y --no-install-recommends --download-only "${host_packages[@]}"
+          }
+          if ! fetch_host_packages; then
+            echo "::warning::Ubuntu mirror update or download failed. Retrying with archive.ubuntu.com."
+            sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors\.txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
+            fetch_host_packages
+          fi
+          # 下载完成后再运行 dpkg，避免下载超时中断包安装。
+          sudo apt-get install -y --no-install-recommends --no-download "${host_packages[@]}"
           # 确认解包器真的在（脚本也会自己找一遍；早点失败更好定位）
           for c in 7z 7zz 7za 7zr; do command -v "$c" >/dev/null 2>&1 && { echo "7-Zip: $c"; break; }; done
           # 确认 autoreconf 就位（依赖构建的硬前提）
