@@ -18,7 +18,7 @@ This guide describes how to build OBS for Android on Ubuntu / WSL, via GitHub Ac
 | Route | Requirements | Output Artifact | Purpose |
 | --- | --- | --- | --- |
 | **GitHub Actions** | Hosted Ubuntu Runner | `obs-android-apk-<sha>` workflow artifact | Automated CI builds |
-| **Ubuntu / WSL Automated Script** | Ubuntu 24.04 (or WSL2) | APK located in `build-fe-arm64-v8a-ci/` | One-click toolchain setup & dependency compilation |
+| **Ubuntu / WSL CI Build Script** | Ubuntu 24.04 (or WSL2) with the toolchain installed | APK located in `build-fe-arm64-v8a-ci/` | Build native dependencies and package the APK using the CI entry point |
 | **WSL / Linux Existing Toolchain** | Configured NDK r30 & Qt 6.11.1 | `releases/OBS-Android-arm64-v8a-wsl-*.apk` | Local day-to-day incremental development |
 | **Native Windows** | Windows 10/11 + MSYS2 + PowerShell | `releases/OBS-Android-arm64-obs-*.apk` | Native Windows cross-compilation & packaging |
 
@@ -34,9 +34,10 @@ This guide describes how to build OBS for Android on Ubuntu / WSL, via GitHub Ac
 
 Dependency versions are tracked in [deps-android/versions.sh](deps-android/versions.sh).
 
-### Ubuntu / WSL Automated Build
+<a name="ci-toolchain-setup"></a>
+### Ubuntu / WSL CI Build Script
 
-Run the automated bootstrap script on Ubuntu 24.04 or WSL2:
+On Ubuntu 24.04 or WSL2, first install the [Android SDK command-line tools](https://developer.android.com/tools/sdkmanager) under `$HOME/Android/Sdk/cmdline-tools/latest` and unpack [Gradle 9.3.1](https://gradle.org/releases/) under `$HOME/toolchain`. Adjust the paths below if installed elsewhere.
 
 ```sh
 sudo apt-get update
@@ -47,7 +48,23 @@ sudo apt-get install -y 7zip ninja-build build-essential curl unzip zip ca-certi
 python3 -m venv "$HOME/.venvs/obs-android"
 source "$HOME/.venvs/obs-android/bin/activate"
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
+export QT_ROOT="$HOME/Qt"
+export GRADLE_VERSION=9.3.1
+export PATH="$HOME/toolchain/gradle-9.3.1/bin:$PATH"
 
+python -m pip install 'cmake==3.31.6' aqtinstall
+SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+"$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses
+"$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" \
+  "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;30.0.16248370"
+aqt install-qt all_os android 6.11.1 android_arm64_v8a -O "$QT_ROOT"
+aqt install-qt linux desktop 6.11.1 linux_gcc_64 -O "$QT_ROOT"
+```
+
+From the repository root, run the build with the configured environment. The script builds the native dependencies and packages the APK.
+
+```sh
 bash scripts/ci-build-android.sh
 cat build-fe-arm64-v8a-ci/.final-apk-path
 ```
@@ -133,7 +150,7 @@ Pass `-AntutuPackage` to stage the alternate application ID `com.antutu.ABenchMa
 | 构建途径 | 环境要求 | 输出产物 | 适用场景 |
 | --- | --- | --- | --- |
 | **GitHub Actions** | 托管 Ubuntu 运行器 | 工作流产物 `obs-android-apk-<sha>` | 持续集成与自动化流水线 |
-| **Ubuntu / WSL 自动化脚本** | Ubuntu 24.04 (或 WSL2) | `build-fe-arm64-v8a-ci/` 下的安装包 | 本地 Linux 一键全自动编译工具链与依赖 |
+| **Ubuntu / WSL CI 构建脚本** | Ubuntu 24.04（或 WSL2），已安装工具链 | `build-fe-arm64-v8a-ci/` 下的安装包 | 使用 CI 构建入口编译依赖并打包 APK |
 | **WSL / Linux 本地现有工具链** | 已配置 NDK r30 与 Qt 6.11.1 | `releases/OBS-Android-arm64-v8a-wsl-*.apk` | 日常本地增量开发与调试 |
 | **Windows 原生环境** | Windows 10/11 + MSYS2 + PowerShell | `releases/OBS-Android-arm64-obs-*.apk` | 原生 Windows 交叉编译与自动化打包 |
 
@@ -151,18 +168,11 @@ Pass `-AntutuPackage` to stage the alternate application ID `com.antutu.ABenchMa
 
 ### Ubuntu / WSL 快速构建
 
-在 Ubuntu 24.04 或 WSL2 环境下运行自动化构建脚本：
+在 Ubuntu 24.04 或 WSL2 上，先按[工具链安装步骤](#ci-toolchain-setup)准备 JDK 17、CMake、Gradle 9.3.1、Android SDK（含 API 36、Build-Tools 36.0.0、ADB 和 NDK r30）以及 Qt 6.11.1 的宿主和 arm64 套件。按安装位置设置 `JAVA_HOME`、`ANDROID_SDK_ROOT`、`QT_ROOT` 和 `PATH`。
+
+在同一终端进入仓库根目录。脚本会编译原生依赖并打包 APK。
 
 ```sh
-sudo apt-get update
-sudo apt-get install -y 7zip ninja-build build-essential curl unzip zip ca-certificates \
-  patch pkg-config dpkg-dev autoconf automake libtool nasm yasm python3-venv openjdk-17-jdk \
-  libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev
-
-python3 -m venv "$HOME/.venvs/obs-android"
-source "$HOME/.venvs/obs-android/bin/activate"
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-
 bash scripts/ci-build-android.sh
 cat build-fe-arm64-v8a-ci/.final-apk-path
 ```

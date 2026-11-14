@@ -6,7 +6,7 @@
 | 文件 | 作用 |
 | --- | --- |
 | `.github/workflows/build-apk.yml` | GitHub Actions 工作流（触发、缓存、artifact、Release） |
-| `scripts/ci-build-android.sh` | 一站式构建脚本（工具链 → 依赖 → OBS → 打包 → 签名） |
+| `scripts/ci-build-android.sh` | 校验已安装的工具链，再编译依赖和 OBS、打包及签名 |
 | `scripts/generate-release-key.sh` | 生成签名密钥库，并打印要填进 Secrets 的内容 |
 
 ---
@@ -79,12 +79,14 @@ git push origin v0.1.19
 | 首次（缓存全空） | **40–60 分钟** |
 | 依赖 + 工具链都命中缓存 | **10–15 分钟** |
 
-缓存分两个，键里带版本与内容哈希，改了会自动失效重建：
+CI 复用 runner 上的 Android SDK、NDK 和 CMake，使用 JDK 17，并通过 `setup-gradle` 安装 Gradle 9.3.1。缓存如下。
 
 | 缓存 | 内容 | 失效条件 |
 | --- | --- | --- |
 | `obsdeps-…` | `deps-android/src` + `deps-android/prebuilt` | `versions.sh`/`defs.sh`/`build.sh`/FFmpeg 补丁 的内容变了 |
-| `obstools-…` | `.ci-tools`（NDK/Qt/SDK/Gradle/CMake，约 2 GB） | NDK/Qt/CMake/build-tools 版本变了 |
+| `obsqt-v2-…` | `~/Qt`（Qt 宿主和 Android arm64 套件） | Qt 版本变了 |
+| `obsccache-…` | `~/.ccache`（原生编译缓存） | 首选当前提交和构建次数，按 NDK 与 Qt 版本回退 |
+| `setup-gradle` | Gradle 用户目录中的缓存 | 由 `gradle/actions/setup-gradle` 管理，PR 只读 |
 
 > GitHub 的 Actions 缓存**约 7 天不用会被回收**，且仓库总量有配额。如果长时间没构建，
 > 下次会回落到"首次"耗时。想强制作废：改 `versions.sh` 或删缓存的 key 前缀。
@@ -93,22 +95,14 @@ git push origin v0.1.19
 
 ## 四、本地复现（和 CI 同样的路径）
 
-Linux（或 WSL）上：
+在 Linux 或 WSL 上，先按 [BUILDING.md 的工具链安装步骤](../../BUILDING.md#ci-toolchain-setup) 准备环境，再在仓库根目录运行。
 
 ```sh
 # 只跑 CMake configure，快速验证 CMake 改动 —— 几分钟
 bash scripts/ci-build-android.sh configure
 
-# 完整构建（会下载工具链 + 编译依赖，耗时同 CI）
+# 编译依赖和 OBS，然后打包 APK
 bash scripts/ci-build-android.sh
-```
-
-需要系统里有：`7z`、`ninja`、`autoconf`/`automake`/`libtool`、`build-essential`、
-`curl`、`unzip`、`patch`、`pkg-config`、JDK 17。Ubuntu 24.04 一条命令：
-
-```sh
-sudo apt-get install -y 7zip ninja-build build-essential curl unzip zip \
-  ca-certificates patch pkg-config dpkg-dev autoconf automake libtool
 ```
 
 本地想同时签名，就设好四个 `SIGN_*` 变量：
@@ -130,13 +124,14 @@ bash scripts/ci-build-android.sh
 | --- | --- | --- |
 | `NDK_VERSION` | `r30` | 与仓库 Windows 构建一致 |
 | `QT_VERSION` | `6.11.1` | 由 aqt 按版本解析官方仓库 |
-| `CMAKE_VERSION` | `3.31.6` | 必须 ≥ 3.28（obs-studio 的要求） |
-| `GRADLE_VERSION` | `8.14.3` | |
+| `ANDROID_SDK_ROOT` | 自动查找 | 指向已安装的 SDK，脚本也检查 `ANDROID_HOME` 和 runner 的 SDK 目录 |
+| `GRADLE_VERSION` | `system` | 校验 `PATH` 中的 Gradle，工作流指定 `9.3.1` |
+| `GRADLE_BIN` | `PATH` 中的 `gradle` | 可显式指定 Gradle 可执行文件的完整路径 |
 | `BUILD_TOOLS` | `36.0.0` | 也用于 zipalign / apksigner |
 | `PLATFORM` | `android-36` | Qt 6.11.1 的 Gradle 模板要 platform 36 |
 | `JOBS` | `nproc` | |
-| `TOOLS_ROOT` | `$HOME/android-ci-tools` | 工具链落盘（CI 缓存它） |
-| `DL_ROOT` | `$TOOLS_ROOT-dl` | 下载物落盘（**不**缓存） |
+| `QT_ROOT` | `$HOME/Qt` | Qt 安装根目录，包含版本子目录 |
+| `DL_ROOT` | 仓库同级的 `obs-dl` | 下载物落盘（**不**缓存） |
 
 ---
 
@@ -160,7 +155,7 @@ bash scripts/ci-build-android.sh
 | --- | --- |
 | `找不到 7-Zip 解包器` | Ubuntu 24.04 要装 `7zip`（`p7zip-full` 已变 transitional 包，不提供 `7z`） |
 | `autoreconf: not found` | 装 `autoconf automake libtool` |
-| `CMake 版本过低` | 脚本会自拉 3.31.6，别用系统那个；确认 `PATH` 里 `$TOOLS_ROOT/cmake-*/bin` 在前 |
+| `CMake 版本过低` | 安装 CMake 3.31.6，并确保在 `PATH` 中能找到它。脚本检查的最低版本为 3.28 |
 | `Unrecognized named-value: 'runner'` | job 级 `env` 里用了 `runner.*`。`runner` 上下文只在 step 级可用；job 级改用 `github.*` |
 | `Could not find ... nlohmann_json` | 前端 `CMakeLists.txt:73` 无条件要它，但它不在 `deps-android` 清单里。脚本的 `install_nlohmann_json()` 会装；若报错看该函数日志 |
 | `uic: error while loading shared libraries: libicui18n.so.73` / `AutoUic subprocess error` / exit 127 | **旧版 6.9.3 手工解包**漏了独立的 ICU 73 运行时包（Ubuntu 24.04 自带 74）。现在用 aqt 装完整 Qt 6.11.1 宿主包，不再缺 ICU；若换回 6.9.x 手工解包才需要重新处理 |
