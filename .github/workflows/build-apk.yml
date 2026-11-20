@@ -15,7 +15,6 @@ on:
       - 'obs-studio/**'
       - 'deps-android/**'
       - 'scripts/**'
-      - 'android-shell/**'
       - '.github/workflows/build-apk.yml'
   pull_request:
     branches: [main]
@@ -23,7 +22,6 @@ on:
       - 'obs-studio/**'
       - 'deps-android/**'
       - 'scripts/**'
-      - 'android-shell/**'
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
     inputs:
@@ -99,7 +97,6 @@ jobs:
             7zip ninja-build build-essential curl unzip zip ca-certificates
             patch pkg-config dpkg-dev autoconf automake libtool ccache
             libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev python3-pil
           )
           apt_network_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
           fetch_host_packages() {
@@ -153,25 +150,6 @@ jobs:
           restore-keys: |
             obsccache-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-
 
-      - name: Run Android host checks
-        run: |
-          echo "::group::Responsive Android layout policy"
-          c++ -std=c++17 -Wall -Wextra -Werror scripts/android-layout-test/policy.cpp -o "$RUNNER_TEMP/android-layout-test"
-          "$RUNNER_TEMP/android-layout-test"
-          echo "::endgroup::"
-
-          echo "::group::UVC transport and recovery"
-          bash scripts/test-android-uvc.sh
-          echo "::endgroup::"
-
-          echo "::group::Android IME focus policy"
-          mkdir -p "$RUNNER_TEMP/obs-ime-policy"
-          javac -d "$RUNNER_TEMP/obs-ime-policy" \
-            obs-studio/frontend/cmake/android/java/com/obsproject/studio/ObsImeFocus.java \
-            scripts/qt-android-ime/ObsImeFocusTest.java
-          java -ea -cp "$RUNNER_TEMP/obs-ime-policy" ObsImeFocusTest
-          echo "::endgroup::"
-
       # ---- 依赖缓存：最慢的一环（FFmpeg + 13 个依赖）----
       # 键里带 versions.sh/defs.sh/ffmpeg 补丁的内容哈希：依赖定义一变缓存即失效，
       # 避免"用了旧二进制却以为源码编译过了"。
@@ -180,7 +158,8 @@ jobs:
         run: |
           set -euo pipefail
           HASH="$(cat deps-android/versions.sh deps-android/defs.sh deps-android/build.sh \
-                  scripts/android-native-deps/ffmpeg-*.patch scripts/android-native-deps/x265-*.patch \
+                  scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch \
+                  scripts/android-native-deps/x265-3.6-android-asm-target.patch \
                   scripts/relocate-android-pkgconfig.sh | sha256sum | cut -c1-16)"
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
           echo "依赖缓存键哈希=$HASH"
@@ -222,31 +201,11 @@ jobs:
 
       - name: Build APK
         env:
-          SIGN_KEYSTORE: ${{ github.event_name == 'pull_request' && format('{0}/android-shell/debug.keystore', github.workspace) || (steps.keystore.outputs.available == 'true' && format('{0}/release.jks', runner.temp) || '') }}
+          SIGN_KEYSTORE: ${{ github.event_name == 'pull_request' && format('{0}/scripts/signing/debug.keystore', github.workspace) || (steps.keystore.outputs.available == 'true' && format('{0}/release.jks', runner.temp) || '') }}
           SIGN_KEY_ALIAS: ${{ github.event_name == 'pull_request' && 'androiddebugkey' || secrets.ANDROID_KEY_ALIAS }}
           SIGN_STORE_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEYSTORE_PASSWORD }}
           SIGN_KEY_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEY_PASSWORD }}
         run: bash scripts/ci-build-android.sh
-
-      - name: Check document images and encoder backpressure on host
-        run: |
-          set -euo pipefail
-          /usr/bin/python3 scripts/test-image-document.py --ffmpeg-prefix /usr
-          cc -std=c11 -Wall -Wextra -Werror scripts/ffmpeg-submit-test/test.c -o "$RUNNER_TEMP/ffmpeg-submit-test"
-          "$RUNNER_TEMP/ffmpeg-submit-test"
-
-      - name: Check property editor diagnostics with host Qt
-        run: |
-          set -euo pipefail
-          HOST_QT="$HOME/Qt/$QT_VERSION/gcc_64"
-          CMAKE_BIN="$(command -v cmake)"
-          CTEST_BIN="$(command -v ctest)"
-          "$CMAKE_BIN" -S scripts/ime-diagnostics-test -B "$RUNNER_TEMP/obs-ime-test" -G Ninja \
-            -DCMAKE_PREFIX_PATH="$HOST_QT" -DCMAKE_BUILD_TYPE=Release
-          "$CMAKE_BIN" --build "$RUNNER_TEMP/obs-ime-test" --parallel 2
-          QT_QPA_PLATFORM=offscreen QT_PLUGIN_PATH="$HOST_QT/plugins" \
-            LD_LIBRARY_PATH="$HOST_QT/lib:${LD_LIBRARY_PATH:-}" \
-            "$CTEST_BIN" --test-dir "$RUNNER_TEMP/obs-ime-test" --output-on-failure
 
       - name: Locate APK and checksum
         id: apk

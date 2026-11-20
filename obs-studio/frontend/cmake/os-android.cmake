@@ -167,8 +167,7 @@ message(STATUS "P-1 装载：android-plugin-modules.h 生成，插件数=${_obs_
 
 # 渲染后端不参与链接（obs_reset_video 时 os_dlopen("libobs-opengl")），所以只有列进
 # EXTRA_LIBS 才会被 androiddeployqt 打进 APK 的 lib/<abi>/。文件名本来就以 lib 开头，
-# 不需要插件那种改名（androiddeployqt 硬性要求 EXTRA_LIBS 的项以 "lib" 开头，实测记在
-# android-shell/CMakeLists.txt:51-53）。
+# androiddeployqt 要求 EXTRA_LIBS 的文件名以 "lib" 开头，渲染后端符合这个要求。
 set(_extra_libs "")
 if(TARGET OBS::libobs-opengl)
   add_dependencies(obs-studio OBS::libobs-opengl)

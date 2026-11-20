@@ -17,7 +17,8 @@ This repository is an Android port of [OBS Studio](https://github.com/obsproject
   * **FFmpeg**: Licensed under GPLv2+ (incorporating x264 and x265).
   * **x264 / x265**: Licensed under GPLv2.
   * **libaom**: Licensed under BSD-2-Clause and Alliance for Open Media Patent License 1.0.
-  * **mbedTLS / curl / FreeType / libjpeg-turbo / Jansson / libusb / libuvc / RNNoise / SpeexDSP**: Licensed under their respective upstream permissive licenses.
+  * **libusb**: LGPL-2.1-or-later. [Upstream license](https://github.com/libusb/libusb/blob/v1.0.28/COPYING)
+  * **mbedTLS / curl / FreeType / libjpeg-turbo / Jansson / RNNoise / SpeexDSP**: See the respective upstream licenses.
 
 ### Trademarks and Project Independence
 
@@ -39,7 +40,8 @@ This repository is an Android port of [OBS Studio](https://github.com/obsproject
   * **FFmpeg**：遵循 GPLv2+（包含 x264 与 x265 支持）；
   * **x264 / x265**：遵循 GPLv2；
   * **libaom**：遵循 BSD-2-Clause 与 AOM 专利许可证 1.0；
-  * **mbedTLS / curl / FreeType / libjpeg-turbo / Jansson / libusb / libuvc / RNNoise / SpeexDSP** 等：遵循各自上游的宽松开源许可证。
+  * **libusb**：LGPL-2.1-or-later。[上游许可证](https://github.com/libusb/libusb/blob/v1.0.28/COPYING)
+  * **mbedTLS / curl / FreeType / libjpeg-turbo / Jansson / RNNoise / SpeexDSP** 等组件的许可见各自的上游项目。
 
 ### 商标与独立性声明
 

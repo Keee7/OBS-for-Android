@@ -90,18 +90,6 @@ OBS Studio 的 Android 平台移植版本，支持场景编辑、多来源输入
 
 ---
 
-## 参考测试基准
-
-在参考测试设备（Android 16 移动设备，1080p60 输出目标）上的实测数据：
-
-* **本地 RTMP 推流**：1920×1080、60 fps，目标 CBR 6 Mbps。接收端在 88.600 秒内收到 5,317 帧，实测约 6.028 Mbps。OBS 记录了 1 帧渲染滞后和 1 帧编码滞后。
-* **断线重连恢复**：模拟接收端断线后约 1.267 秒重连。
-* **UVC 采集**：NV12 SuperSpeed 模式恢复后的稳定采样约为 1080p60、186.8 MB/s。
-
-> **说明**：以上为本地测试结果。测试环境和范围详见 [RTMP 实测记录](scripts/DEVICE_VALIDATION_WINDOW_STREAM.md) 与 [IME/UVC 测试记录](scripts/IME_UVC_TEST.md)。
-
----
-
 ## 快速上手
 
 1. **获取安装包**：从 [Releases](https://github.com/Keee7/OBS-for-Android/releases) 下载最新的测试 APK，或参考 [构建说明](BUILDING.md) 自行编译。
@@ -124,8 +112,7 @@ OBS Studio 的 Android 平台移植版本，支持场景编辑、多来源输入
 可通过 ADB 日志确认 MediaCodec 硬件加速正在正常工作：
 
 ```sh
-adb logcat -v threadtime -d -s 'OBS-MediaCodec:*' > mediacodec-log.txt
-python scripts/verify-mediacodec-log.py mediacodec-log.txt --codec h264
+adb logcat -v threadtime -d -s 'OBS-MediaCodec:*'
 ```
 
 正常工作时的关键日志特征：
@@ -133,7 +120,7 @@ python scripts/verify-mediacodec-log.py mediacodec-log.txt --codec h264
 * `event=first-packet headers=valid keyframe=1`（已输出首个关键帧）
 * `event=progress` 中输出帧计数和字节数持续递增。
 
-脚本支持 H.264 和 HEVC。AV1 与 VP9 请检查会话日志，并用 `ffprobe` 核对录像编码格式。详见 [硬件编码测试指南](scripts/HEVC_HARDWARE_TEST.md)。
+也可以用 `ffprobe` 核对保存的录像所使用的编码格式。
 
 ---
 

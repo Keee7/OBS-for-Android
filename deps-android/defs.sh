@@ -91,22 +91,12 @@ build_libusb() {
 }
 
 build_libjpeg_turbo() {
-  # libuvc 的 MJPEG 解码依赖 libjpeg；turbojpeg 以 native 模式提供 libjpeg.a + jpeglib.h
+  # UVC 采集源用 TurboJPEG 解码 MJPEG。
   _run_cmake "$(src_dir libjpeg-turbo)" \
     -DCMAKE_INSTALL_LIBDIR=lib \
     -DENABLE_SHARED=OFF -DENABLE_STATIC=ON \
     -DWITH_JAVA=OFF -DWITH_ICC_LIB=OFF \
     -DWITH_TURBOJPEG=ON
-}
-
-build_libuvc() {
-  # libuvc 依赖 libusb + libjpeg（两者须先构建）
-  # 0.0.7 用 CMAKE_BUILD_TARGET 选产物类型（不认 BUILD_SHARED_LIBS），
-  # 且 BUILD_EXAMPLE 默认 ON 会强制 find_package(OpenCV)，必须关掉
-  _run_cmake "$(src_dir libuvc)" \
-    -DCMAKE_BUILD_TARGET=Static \
-    -DBUILD_EXAMPLE=OFF \
-    -DBUILD_TEST=OFF
 }
 
 build_curl() {

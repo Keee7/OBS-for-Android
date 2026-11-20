@@ -185,7 +185,7 @@ if ! "$APKSIGNER" verify "$APK" >/dev/null 2>&1; then
   SIGNED="$(dirname "$APK")/$(basename "${APK%.apk}")-signed.apk"
   cp -f "$APK" "$SIGNED"
   "$APKSIGNER" sign \
-    --ks "$ROOT/android-shell/debug.keystore" \
+    --ks "$SCRIPT_DIR/signing/debug.keystore" \
     --ks-key-alias androiddebugkey --ks-pass pass:android --key-pass pass:android \
     --out "$SIGNED" "$SIGNED" || { echo "FATAL: apksigner 签名失败"; exit 1; }
   "$APKSIGNER" verify "$SIGNED" || { echo "FATAL: 签名校验未通过"; exit 1; }

@@ -90,18 +90,6 @@ Based on [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android) a
 
 ---
 
-## Reference Benchmarks
-
-Verified on reference hardware (Android 16 mobile device, 1080p60 target output):
-
-* **Local RTMP Streaming**: 1920×1080 at 60 fps with a 6 Mbps CBR target. The receiver logged 5,317 frames over 88.600 seconds at about 6.028 Mbps. OBS reported one frame of rendering lag and one frame of encoding lag.
-* **Network Reconnection**: The simulated receiver disconnection recovered in approximately 1.267 seconds.
-* **UVC Card Ingestion**: NV12 over SuperSpeed reached about 60 fps at 1080p after recovery, with about 186.8 MB/s measured throughput.
-
-> **Note**: These measurements cover local test conditions. See the [RTMP test record](scripts/DEVICE_VALIDATION_WINDOW_STREAM.md) and [IME/UVC test record](scripts/IME_UVC_TEST.md) for the setup and scope.
-
----
-
 ## Getting Started
 
 1. **Obtain the APK**: Download the latest build from [Releases](https://github.com/Keee7/OBS-for-Android/releases), or build from source following [BUILDING.md](BUILDING.md).
@@ -124,8 +112,7 @@ Verified on reference hardware (Android 16 mobile device, 1080p60 target output)
 Verify that hardware encoding is active via ADB:
 
 ```sh
-adb logcat -v threadtime -d -s 'OBS-MediaCodec:*' > mediacodec-log.txt
-python scripts/verify-mediacodec-log.py mediacodec-log.txt --codec h264
+adb logcat -v threadtime -d -s 'OBS-MediaCodec:*'
 ```
 
 Look for the following key indicators:
@@ -133,7 +120,7 @@ Look for the following key indicators:
 * `event=first-packet headers=valid keyframe=1`
 * Monotonically increasing frame and byte counters in `event=progress`.
 
-The log verifier supports H.264 and HEVC. For AV1 and VP9, inspect the session logs and confirm the recording codec with `ffprobe`. For details, see the [Hardware Encoder Guide](scripts/HEVC_HARDWARE_TEST.md).
+Use `ffprobe` on a saved recording to confirm the output codec.
 
 ---
 
