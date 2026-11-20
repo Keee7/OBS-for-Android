@@ -12,6 +12,5 @@ for name in uvc-bulk-pump uvc-raw-payload uvc-cadence-stats uvc-stream-buffer uv
   "$compiler" "${args[@]}" "$source_dir/tests/$name-test.c" -o "$output/$name-test"
   "$output/$name-test"
 done
-python3 "$repo/scripts/test-uvc-policy.py" --compiler "$compiler"
-python3 "$source_dir/tests/test-uvc-negotiation.py" --compiler "$compiler"
+python3 "$repo/scripts/test_android_host.py" uvc --compiler "$compiler"
 echo 'PASS: UVC host regressions (hardware throughput/CPU still require device measurements).'

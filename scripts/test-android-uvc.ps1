@@ -21,11 +21,6 @@ foreach ($case in @('uvc-bulk-pump','uvc-raw-payload','uvc-cadence-stats','uvc-s
     & "$out/$case-test.exe"
     if ($LASTEXITCODE -ne 0) { throw "$case regression failed" }
 }
-Push-Location $repo
-try {
-    python scripts/test-uvc-policy.py --compiler $Compiler
-    if ($LASTEXITCODE -ne 0) { throw 'UVC policy regression failed' }
-    python obs-studio/plugins/android-capture/tests/test-uvc-negotiation.py --compiler $Compiler
-    if ($LASTEXITCODE -ne 0) { throw 'UVC negotiation regression failed' }
-} finally { Pop-Location }
+python "$PSScriptRoot/test_android_host.py" uvc --compiler $Compiler
+if ($LASTEXITCODE -ne 0) { throw 'UVC policy or negotiation regression failed' }
 Write-Host 'PASS: UVC host regressions; USB host/device throughput and latency require hardware tests.'
