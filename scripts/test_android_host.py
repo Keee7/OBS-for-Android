@@ -28,18 +28,14 @@ def source_function(text, name):
     return text[start:end]
 
 
-def run_uvc_case(compiler, name, code):
-    with tempfile.TemporaryDirectory(prefix=f'{name}-') as directory:
-        work = Path(directory)
-        source = work / f'{name}.c'
-        binary = work / (f'{name}.exe' if os.name == 'nt' else name)
-        source.write_text(code, encoding='utf-8')
-        subprocess.run([compiler, '-std=c11', '-Wall', '-Wextra', '-Werror',
-                        str(source), '-o', str(binary)], check=True)
-        subprocess.run([str(binary)], check=True)
+def run_uvc_case(compiler, work, name, sources, flags=()):
+    binary = work / (f'{name}.exe' if os.name == 'nt' else name)
+    subprocess.run([compiler, '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    *flags, *sources, '-o', binary], check=True)
+    subprocess.run([binary], check=True)
 
 
-def test_uvc_policy(compiler, source):
+def test_uvc_policy(compiler, source, work):
     mode = source[source.index('enum uvc_mode_kind {'):source.index('struct uvc_source {')]
     prefix = r'''
 #include <assert.h>
@@ -128,10 +124,12 @@ int main(void) {
  return 0;
 }
 '''
-    run_uvc_case(compiler, 'uvc-policy', prefix + mode + structures + body + suffix)
+    test = work / 'uvc-policy.c'
+    test.write_text(prefix + mode + structures + body + suffix, encoding='utf-8')
+    run_uvc_case(compiler, work, 'uvc-policy', [test])
 
 
-def test_uvc_negotiation(compiler, source):
+def test_uvc_negotiation(compiler, source, work):
     start = source.index("static int probe_struct_len(")
     end = source.index("/* ---------------- 帧送出", start)
     production = source[start:end]
@@ -203,7 +201,26 @@ int main(void) {
  puts("uvc negotiation tests passed");return 0;
 }
 '''
-    run_uvc_case(compiler, 'uvc-negotiation', prefix + production + suffix)
+    test = work / 'uvc-negotiation.c'
+    test.write_text(prefix + production + suffix, encoding='utf-8')
+    run_uvc_case(compiler, work, 'uvc-negotiation', [test])
+
+
+def test_uvc(compiler):
+    plugin = UVC_SOURCE.parent
+    source = UVC_SOURCE.read_text(encoding='utf-8')
+    with tempfile.TemporaryDirectory(prefix='obs-uvc-test-') as directory:
+        work = Path(directory)
+        for name in ('uvc-bulk-pump', 'uvc-raw-payload', 'uvc-cadence-stats',
+                     'uvc-stream-buffer', 'uvc-recovery'):
+            sources = [plugin / 'tests' / f'{name}-test.c']
+            flags = ['-D_POSIX_C_SOURCE=200809L', '-I', plugin]
+            if name == 'uvc-bulk-pump':
+                flags += ['-pthread', '-I', plugin / 'tests/mock']
+                sources.append(plugin / 'uvc-bulk-pump.c')
+            run_uvc_case(compiler, work, name, sources, flags)
+        test_uvc_policy(compiler, source, work)
+        test_uvc_negotiation(compiler, source, work)
 
 
 IMAGE_PREFIX = r'''
@@ -394,7 +411,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     cases = parser.add_subparsers(dest='case', required=True)
 
-    uvc = cases.add_parser('uvc', help='UVC mode selection, raw-frame delivery and negotiation')
+    uvc = cases.add_parser('uvc', help='UVC transport, raw-frame delivery, recovery and negotiation')
     uvc.add_argument('--compiler', default=os.environ.get('CC', 'cc'))
 
     images = cases.add_parser('image-document', help='Android document I/O and decode with host FFmpeg and Pillow')
@@ -403,9 +420,7 @@ def main():
 
     args = parser.parse_args()
     if args.case == 'uvc':
-        source = UVC_SOURCE.read_text(encoding='utf-8')
-        test_uvc_policy(args.compiler, source)
-        test_uvc_negotiation(args.compiler, source)
+        test_uvc(args.compiler)
     else:
         test_image_document(args.compiler, args.ffmpeg_prefix)
 

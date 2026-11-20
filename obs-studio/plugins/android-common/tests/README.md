@@ -6,7 +6,7 @@ Host-side tests for headers shared by the Android capture plugins.
 
 `mock/` contains a **stub** `obs.h` / `util/platform.h` / `util/threading.h` so that
 `reader-ctx.h` can be compiled and exercised on a build host without linking libobs.
-It is only on the include path of `scripts/test-android-reader-ctx.ps1`, and that
+It is only on the include path of `scripts/test-android-host.ps1 -Suite ReaderCtx`, and that
 script passes `-I obs-studio/plugins/android-common/tests/mock` **before** any real
 libobs include directory, so the stub always wins inside the test.
 
@@ -39,7 +39,7 @@ test silently stops proving anything.
    the direct regression for the `c->source` use-after-free.
 4. `reader_ctx_set_owner(ctx, NULL)` makes `reader_ctx_owner()` return NULL.
 
-`scripts/test-android-reader-ctx.ps1` additionally asserts a **source-order**
+The `ReaderCtx` suite additionally asserts a **source-order**
 invariant that a unit test cannot catch: `reader_ctx_create()` must appear *after*
 `AImageReader_new()` inside `open_capture_locked()` / `open_capture()`. Creating the
 context before the reader leaves a fresh, un-retired context behind on any early

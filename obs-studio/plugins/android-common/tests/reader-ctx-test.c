@@ -9,7 +9,7 @@
  *
  * 另加一条 build 期的顺序约束检查：ctx 必须在 reader 建好之后才创建，
  * 否则 AImageReader_new 之前的失败路径会让 close 早退、ctx 卡在未 retire 状态。
- * 那条用源码扫描在 test-android-reader-ctx.ps1 里做。
+ * 该顺序由 scripts/test-android-host.ps1 的 ReaderCtx 套件检查。
  */
 #include "reader-ctx.h"
 
@@ -162,7 +162,7 @@ puts("PASS: owner detaches before free");
  * close 挪到 destroy。
  *
  * 这条断言防止后来者把 reader_ctx_destroy() 加回来。用源码扫描做（见
- * scripts/test-android-reader-ctx.ps1 的第二个断言），这里只钉住 retire 之后
+ * scripts/test-android-host.ps1 的 ReaderCtx 套件），这里只钉住 retire 之后
  * enter 仍然安全这一半 —— 即 ctx 必须活到进程结束。
  */
 static void test_ctx_survives_retire(void)

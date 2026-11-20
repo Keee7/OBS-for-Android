@@ -159,7 +159,7 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::UVC transport and recovery"
-          bash scripts/test-android-uvc.sh
+          python3 scripts/test_android_host.py uvc
           echo "::endgroup::"
 
           echo "::group::Android IME focus policy"
