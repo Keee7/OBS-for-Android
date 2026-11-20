@@ -90,12 +90,6 @@ Based on [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android) a
 
 ---
 
-## Reference Benchmarks
-
-The device testing guide records the 1080p60 RTMP, reconnection and USB capture results from the reference Android 16 device. [Device testing and benchmarks](scripts/DEVICE_TEST_QUICKSTART.md)
-
----
-
 ## Getting Started
 
 1. **Obtain the APK**: Download the latest build from [Releases](https://github.com/Keee7/OBS-for-Android/releases), or build from source following [BUILDING.md](BUILDING.md).
@@ -118,8 +112,7 @@ The device testing guide records the 1080p60 RTMP, reconnection and USB capture 
 Verify that hardware encoding is active via ADB:
 
 ```sh
-adb logcat -v threadtime -d -s 'OBS-MediaCodec:*' > mediacodec-log.txt
-python scripts/verify-mediacodec-log.py mediacodec-log.txt --codec h264
+adb logcat -v threadtime -d -s 'OBS-MediaCodec:*'
 ```
 
 Look for the following key indicators:
@@ -127,7 +120,7 @@ Look for the following key indicators:
 * `event=first-packet headers=valid keyframe=1`
 * Monotonically increasing frame and byte counters in `event=progress`.
 
-The log verifier supports H.264 and HEVC. For AV1 and VP9, inspect the session logs and confirm the recording codec with `ffprobe`. [Hardware encoding and 1080p60 testing](scripts/DEVICE_TEST_QUICKSTART.md#hardware-encoding)
+Use `ffprobe` on a saved recording to confirm the output codec.
 
 ---
 

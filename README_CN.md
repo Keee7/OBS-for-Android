@@ -90,12 +90,6 @@ OBS Studio 的 Android 平台移植版本，支持场景编辑、多来源输入
 
 ---
 
-## 参考测试基准
-
-真机测试指南记录了参考 Android 16 设备上的 1080p60 RTMP 推流、重连与 USB 采集结果。[真机测试与实测数据](scripts/DEVICE_TEST_QUICKSTART.md#简体中文)
-
----
-
 ## 快速上手
 
 1. **获取安装包**：从 [Releases](https://github.com/Keee7/OBS-for-Android/releases) 下载最新的测试 APK，或参考 [构建说明](BUILDING.md) 自行编译。
@@ -118,8 +112,7 @@ OBS Studio 的 Android 平台移植版本，支持场景编辑、多来源输入
 可通过 ADB 日志确认 MediaCodec 硬件加速正在正常工作：
 
 ```sh
-adb logcat -v threadtime -d -s 'OBS-MediaCodec:*' > mediacodec-log.txt
-python scripts/verify-mediacodec-log.py mediacodec-log.txt --codec h264
+adb logcat -v threadtime -d -s 'OBS-MediaCodec:*'
 ```
 
 正常工作时的关键日志特征：
@@ -127,7 +120,7 @@ python scripts/verify-mediacodec-log.py mediacodec-log.txt --codec h264
 * `event=first-packet headers=valid keyframe=1`（已输出首个关键帧）
 * `event=progress` 中输出帧计数和字节数持续递增。
 
-脚本支持 H.264 和 HEVC。AV1 与 VP9 请检查会话日志，并用 `ffprobe` 核对录像编码格式。[硬件编码和 1080p60 验证](scripts/DEVICE_TEST_QUICKSTART.md#hardware-encoding-cn)
+也可以用 `ffprobe` 核对保存的录像所使用的编码格式。
 
 ---
 

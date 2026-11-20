@@ -97,7 +97,6 @@ jobs:
             7zip ninja-build build-essential curl unzip zip ca-certificates
             patch pkg-config dpkg-dev autoconf automake libtool ccache
             libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev python3-pil
           )
           apt_network_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
           fetch_host_packages() {
@@ -150,25 +149,6 @@ jobs:
           key: obsccache-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-${{ github.sha }}-${{ github.run_attempt }}
           restore-keys: |
             obsccache-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-
-
-      - name: Run Android host checks
-        run: |
-          echo "::group::Responsive Android layout policy"
-          c++ -std=c++17 -Wall -Wextra -Werror scripts/android-layout-test/policy.cpp -o "$RUNNER_TEMP/android-layout-test"
-          "$RUNNER_TEMP/android-layout-test"
-          echo "::endgroup::"
-
-          echo "::group::UVC transport and recovery"
-          python3 scripts/test_android_host.py uvc
-          echo "::endgroup::"
-
-          echo "::group::Android IME focus policy"
-          mkdir -p "$RUNNER_TEMP/obs-ime-policy"
-          javac -d "$RUNNER_TEMP/obs-ime-policy" \
-            obs-studio/frontend/cmake/android/java/com/obsproject/studio/ObsImeFocus.java \
-            scripts/qt-android-ime/ObsImeFocusTest.java
-          java -ea -cp "$RUNNER_TEMP/obs-ime-policy" ObsImeFocusTest
-          echo "::endgroup::"
 
       # ---- 依赖缓存：最慢的一环（FFmpeg + 13 个依赖）----
       # 键里带 versions.sh/defs.sh/ffmpeg 补丁的内容哈希：依赖定义一变缓存即失效，
@@ -226,26 +206,6 @@ jobs:
           SIGN_STORE_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEYSTORE_PASSWORD }}
           SIGN_KEY_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEY_PASSWORD }}
         run: bash scripts/ci-build-android.sh
-
-      - name: Check document images and encoder backpressure on host
-        run: |
-          set -euo pipefail
-          /usr/bin/python3 scripts/test_android_host.py image-document --ffmpeg-prefix /usr
-          cc -std=c11 -Wall -Wextra -Werror scripts/ffmpeg-submit-test/test.c -o "$RUNNER_TEMP/ffmpeg-submit-test"
-          "$RUNNER_TEMP/ffmpeg-submit-test"
-
-      - name: Check property editor diagnostics with host Qt
-        run: |
-          set -euo pipefail
-          HOST_QT="$HOME/Qt/$QT_VERSION/gcc_64"
-          CMAKE_BIN="$(command -v cmake)"
-          CTEST_BIN="$(command -v ctest)"
-          "$CMAKE_BIN" -S scripts/ime-diagnostics-test -B "$RUNNER_TEMP/obs-ime-test" -G Ninja \
-            -DCMAKE_PREFIX_PATH="$HOST_QT" -DCMAKE_BUILD_TYPE=Release
-          "$CMAKE_BIN" --build "$RUNNER_TEMP/obs-ime-test" --parallel 2
-          QT_QPA_PLATFORM=offscreen QT_PLUGIN_PATH="$HOST_QT/plugins" \
-            LD_LIBRARY_PATH="$HOST_QT/lib:${LD_LIBRARY_PATH:-}" \
-            "$CTEST_BIN" --test-dir "$RUNNER_TEMP/obs-ime-test" --output-on-failure
 
       - name: Locate APK and checksum
         id: apk

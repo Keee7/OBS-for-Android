@@ -137,7 +137,7 @@ bash scripts/ci-build-android.sh
 
 ## 五、已知限制
 
-- CI 运行宿主回归检查并构建 APK。设备兼容性和性能需要真机验证。[真机测试指南](../../scripts/DEVICE_TEST_QUICKSTART.md#简体中文)
+- CI 构建 APK 并校验包名、版本、原生库和插件。已签名的 APK 还会校验签名和 16 KB 对齐。
 - **只有 arm64-v8a**。与本仓其余构建路径一致（x86_64 需要改 ABI 与依赖构建参数）。
 - **Qt 由 `aqt install-qt` 安装**（`all_os/android` + `linux/desktop`），不需要 Qt 账号。
   升版本只改 `QT_VERSION`，不再需要找 7z 时间戳或手工拼 URL。
