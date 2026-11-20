@@ -143,7 +143,7 @@ if ($Action -in @('package','all')) {
     $signed = Join-Path $releases ('OBS-Android-arm64-' + $modeName + '-hwcodec-browser-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.apk')
     Invoke-BuildTool "$sdk/build-tools/36.0.0/zipalign.exe" @('-f', '-P', '16', '4', $apk.FullName, $aligned) 'zipalign.log'
     if ($DebugSigning) {
-        Invoke-BuildTool "$sdk/build-tools/36.0.0/apksigner.bat" @('sign','--ks',"$repo/android-shell/debug.keystore",
+        Invoke-BuildTool "$sdk/build-tools/36.0.0/apksigner.bat" @('sign','--ks',"$PSScriptRoot/signing/debug.keystore",
             '--ks-key-alias','androiddebugkey','--ks-pass','pass:android','--key-pass','pass:android','--out',$signed,$aligned) 'sign.log'
     } else {
         if (!$SigningConfigFile) { $SigningConfigFile = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'release key.txt' }

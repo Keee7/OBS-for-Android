@@ -43,7 +43,7 @@ bash scripts/generate-release-key.sh ~/obs-release.jks
 2. **不要提交进仓库。** `.gitignore` 已排除 `*.jks` / `*.keystore` / `*.p12` / `*.pfx`，
    但被 Git 记住过的密钥很难真正清除 —— 别依赖这条规则，直接放在仓库外。
 3. **这把是"自签名"密钥**，不是任何官方身份。它只证明"后续版本都出自同一把密钥"，
-   不证明包本身可信。仓库里的 `android-shell/debug.keystore` 是上游的公开开发密钥，
+   不证明包本身可信。仓库里的 `scripts/signing/debug.keystore` 是公开开发密钥，
    **不要**拿它当 release 密钥。
 
 ---
@@ -137,8 +137,7 @@ bash scripts/ci-build-android.sh
 
 ## 五、已知限制
 
-- **CI 只跑构建**。它证明"能编译、能出包、签名有效"，**不**证明设备上能跑。
-  真机验证仍需按 `scripts/DEVICE_TEST_QUICKSTART.md` 等文档手动进行。
+- CI 运行宿主回归检查并构建 APK。设备兼容性和性能需要真机验证。[真机测试指南](../../scripts/DEVICE_TEST_QUICKSTART.md#简体中文)
 - **只有 arm64-v8a**。与本仓其余构建路径一致（x86_64 需要改 ABI 与依赖构建参数）。
 - **Qt 由 `aqt install-qt` 安装**（`all_os/android` + `linux/desktop`），不需要 Qt 账号。
   升版本只改 `QT_VERSION`，不再需要找 7z 时间戳或手工拼 URL。

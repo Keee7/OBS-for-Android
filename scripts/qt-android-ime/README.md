@@ -32,6 +32,8 @@ python scripts/qt-android-ime/patch-qt-android-jar.py \
 
 The patched jar replaces the staged `libs/Qt6Android.jar` before invoking Gradle during packaging. The installed Qt SDK jar remains untouched.
 
+Set `OBS_ANDROID_IME_DIAGNOSTICS=1` or start OBS with `--android-ime-diagnostics` to log focus and cursor geometry without recording typed text.
+
 ---
 
 <a name="简体中文"></a>
@@ -61,3 +63,5 @@ python scripts/qt-android-ime/patch-qt-android-jar.py \
 ```
 
 构建脚本在执行 Gradle 打包前，会自动生成已修补的 Jar 包并替换暂存目录下的 `libs/Qt6Android.jar`，本机安装的原生 Qt SDK 目录不会被修改。
+
+设置 `OBS_ANDROID_IME_DIAGNOSTICS=1` 或用 `--android-ime-diagnostics` 启动 OBS，可记录焦点和光标位置，日志不含输入的文字。

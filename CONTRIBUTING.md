@@ -23,9 +23,9 @@ When reporting a bug, please provide the following details to help us triage eff
 
 * **Base Branch**: Please base pull requests on `main` and keep changes modular and focused.
 * **Licensing**: All new code must comply with **GPL-2.0-or-later**. Preserve upstream copyright notices and licenses. Do not introduce dependencies incompatible with GPLv2+.
-* **Verification Protocol**:
-  * **Host Regression Tests**: For changes to shaders, math, layout policies, or state machines, provide corresponding offline unit tests (e.g., test scripts in `scripts/`).
-  * **Device Validation**: For hardware codec, display projection, or USB changes, provide reproduction and verification evidence on real Android devices.
+* Add focused host regression tests for changes to shaders, math, layout policies or state machines.
+* Run `python scripts/test_android_tools.py` after changing signing or diagnostic tools.
+* Include real-device results for hardware codec, screen capture or USB changes. [Device testing guide](scripts/DEVICE_TEST_QUICKSTART.md)
 * **Clean Commits**: Do not commit generated build artifacts (APKs, `.so` binaries, intermediate build caches) or private keystores.
 
 ---
@@ -49,7 +49,7 @@ When reporting a bug, please provide the following details to help us triage eff
 
 * **基线与分支**：所有 Pull Request 建议基于 `main` 分支提出，保持提交专注且原子化。
 * **开源合规与许可**：新增代码必须遵循 **GPL-2.0-or-later** 许可证，保留原项目与第三方组件的版权声明。不得引入与 GPLv2 不兼容的第三方依赖。
-* **分层验证原则**：
-  * **主机测试**：涉及着色器、算法、布局策略或状态机逻辑修改时，请补充对应的离线单元测试（如 `scripts/` 下的 Python / C++ 测试工具）；
-  * **真机测试**：涉及编解码器、屏幕采集或 USB 驱动层改动时，请说明在真实设备上的验证情况与实测表现。
+* 涉及着色器、算法、布局策略或状态机的改动，请补充对应的宿主回归测试。
+* 修改签名或诊断工具后，运行 `python scripts/test_android_tools.py`。
+* 涉及硬件编解码、屏幕采集或 USB 的改动，请附上真机验证结果。[真机测试指南](scripts/DEVICE_TEST_QUICKSTART.md#简体中文)
 * **干净提交**：请勿将编译产物（APK、中间依赖库 `.so`、构建缓存）或私人签名证书提交至 Git 仓库。

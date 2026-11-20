@@ -24,7 +24,6 @@ dep_version() {
     ffmpeg)   echo 8.0.3 ;;
     libusb)   echo 1.0.28 ;;
     libjpeg-turbo) echo 3.1.0 ;;
-    libuvc)   echo 0.0.7 ;;
     speexdsp) echo 1.2.1 ;;
     rnnoise)  echo master ;;
     freetype) echo 2.13.3 ;;
@@ -47,7 +46,6 @@ dep_url() {
     aom)      echo "https://storage.googleapis.com/aom-releases/libaom-${v}.tar.gz" ;;
     libusb)   echo "https://github.com/libusb/libusb/archive/refs/tags/v${v}.tar.gz" ;;
     libjpeg-turbo) echo "https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/${v}.tar.gz" ;;
-    libuvc)   echo "https://github.com/libuvc/libuvc/archive/refs/tags/v${v}.tar.gz" ;;
     speexdsp) echo "https://github.com/xiph/speexdsp/archive/refs/tags/SpeexDSP-${v}.tar.gz" ;;
     rnnoise)  echo "https://github.com/xiph/rnnoise/archive/refs/heads/${v}.tar.gz" ;;
     freetype) echo "https://downloads.sourceforge.net/project/freetype/freetype2/${v}/freetype-${v}.tar.gz" ;;
@@ -61,7 +59,7 @@ dep_url() {
 dep_batch() {
   case "$1" in
     simde|uthash|jansson|x264|x265|aom|ffmpeg) echo core ;;
-    libusb|libuvc|libjpeg-turbo)     echo usb ;;
+    libusb|libjpeg-turbo)            echo usb ;;
     speexdsp|rnnoise|freetype)       echo filters ;;
     mbedtls|curl)                   echo output ;;
     *)                               echo unknown ;;
@@ -72,7 +70,7 @@ dep_batch() {
 batch_deps() {
   case "$1" in
     core)    echo "simde uthash jansson x264 x265 aom ffmpeg" ;;
-    usb)     echo "libusb libjpeg-turbo libuvc" ;;
+    usb)     echo "libusb libjpeg-turbo" ;;
     filters) echo "speexdsp rnnoise freetype" ;;
     output)  echo "mbedtls curl" ;;
     *)       echo "" ;;

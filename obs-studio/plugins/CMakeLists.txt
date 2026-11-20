@@ -30,7 +30,7 @@ if(OS_ANDROID)
   #   obs-encode-sink  —— 只有 obs_output 才会去 obs_encoder_start()（该符号不在
   #                       libobs 的 .dynsym 里），所以编码验证需要一个视频专用 sink
   #   android-audio    —— 阶段 2 第 1 项：AAudio 采集源（内置麦克风/有线耳机）
-  #   android-capture  —— 阶段 2 第 2 项：libuvc/libusb 的 UVC 摄像头采集源
+  #   android-capture  —— 基于 libusb 的 UVC 摄像头采集源
   #   android-camera   —— P-17：内置摄像头采集源（Camera2 NDK，纯 native 取流，不需要 Java 侧
   #                       相机代码；只有"CAMERA 权限问得到吗"这一格走 libobs 的相机总线，
   #                       注册方是前端 OBSAndroidPermissions.cpp）。依赖实测（b93 arm64，尺子见

@@ -15,7 +15,6 @@ on:
       - 'obs-studio/**'
       - 'deps-android/**'
       - 'scripts/**'
-      - 'android-shell/**'
       - '.github/workflows/build-apk.yml'
   pull_request:
     branches: [main]
@@ -23,7 +22,6 @@ on:
       - 'obs-studio/**'
       - 'deps-android/**'
       - 'scripts/**'
-      - 'android-shell/**'
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
     inputs:
@@ -180,7 +178,8 @@ jobs:
         run: |
           set -euo pipefail
           HASH="$(cat deps-android/versions.sh deps-android/defs.sh deps-android/build.sh \
-                  scripts/android-native-deps/ffmpeg-*.patch scripts/android-native-deps/x265-*.patch \
+                  scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch \
+                  scripts/android-native-deps/x265-3.6-android-asm-target.patch \
                   scripts/relocate-android-pkgconfig.sh | sha256sum | cut -c1-16)"
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
           echo "依赖缓存键哈希=$HASH"
@@ -222,7 +221,7 @@ jobs:
 
       - name: Build APK
         env:
-          SIGN_KEYSTORE: ${{ github.event_name == 'pull_request' && format('{0}/android-shell/debug.keystore', github.workspace) || (steps.keystore.outputs.available == 'true' && format('{0}/release.jks', runner.temp) || '') }}
+          SIGN_KEYSTORE: ${{ github.event_name == 'pull_request' && format('{0}/scripts/signing/debug.keystore', github.workspace) || (steps.keystore.outputs.available == 'true' && format('{0}/release.jks', runner.temp) || '') }}
           SIGN_KEY_ALIAS: ${{ github.event_name == 'pull_request' && 'androiddebugkey' || secrets.ANDROID_KEY_ALIAS }}
           SIGN_STORE_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEYSTORE_PASSWORD }}
           SIGN_KEY_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEY_PASSWORD }}
