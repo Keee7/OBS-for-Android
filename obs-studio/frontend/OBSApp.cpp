@@ -64,6 +64,7 @@
 #include <QJniObject>
 #include <QElapsedTimer>
 #include <QTimer>
+#include <QWindow>
 #include <android/log.h>
 // P-1 装载轨迹：APK 不是 debuggable，blog() 只进日志文件不进 logcat，实测看不看得到全靠这条。
 #define P1LOG(...) __android_log_print(ANDROID_LOG_INFO, "P1-LOAD", __VA_ARGS__)
@@ -1138,6 +1139,34 @@ static void enableFlickScroll(QWidget *w)
 			     w->metaObject()->className(), int(areas.size()), grabbed, itemViews);
 }
 
+static void fitComboBoxPopup(QWidget *popup, const QComboBox *combo)
+{
+	QRect available = combo->screen()->availableGeometry();
+	const QWindow *host = combo->window()->windowHandle();
+	if (host) {
+		// Dialogs can open popups outside their own bounds, but the activity
+		// may be narrower than the display in split-screen or floating mode.
+		while (host->transientParent()) {
+			host = host->transientParent();
+		}
+		available = available.intersected(host->geometry().marginsRemoved(host->safeAreaMargins()));
+	}
+	const QMargins padding(8, 8, 8, 8);
+	available = available.marginsRemoved(padding);
+	if (available.isEmpty() || available.contains(popup->geometry())) {
+		return;
+	}
+
+	QRect geometry = popup->geometry();
+	geometry.setSize(geometry.size().boundedTo(available.size()));
+	geometry.moveLeft(qBound(available.left(), geometry.left(), available.right() - geometry.width() + 1));
+	geometry.moveTop(qBound(available.top(), geometry.top(), available.bottom() - geometry.height() + 1));
+	popup->setGeometry(geometry);
+
+	QAbstractItemView *view = combo->view();
+	view->scrollTo(view->currentIndex());
+}
+
 class AndroidInputFilter : public QObject {
 public:
 	explicit AndroidInputFilter(QObject *parent = nullptr) : QObject(parent)
@@ -1225,14 +1254,20 @@ protected:
 				int(flags.testFlag(Qt::Dialog)), int(pw->isVisible()),
 				int(qApp->activePopupWidget() == pw));
 
-			/* 顶层窗口显示后做两件事，都延后一拍等布局跑完：
-			 * ① 压进屏幕可用区（B 方案，见 clampTopLevelToScreen）
-			 * ② 给里面的滚动区开单指滑动（见 enableFlickScroll） */
-			if (ev->type() == QEvent::Show)
+			/* 等 Qt 完成布局后，约束下拉框的弹层位置，或调整普通对话框并启用滚动。 */
+			if (ev->type() == QEvent::Show) {
 				QTimer::singleShot(0, pw, [pw] {
+					if (pw->windowType() == Qt::Popup) {
+						const auto *combo = qobject_cast<const QComboBox *>(pw->parentWidget());
+						if (combo && pw->isVisible() && combo->view()->window() == pw) {
+							fitComboBoxPopup(pw, combo);
+						}
+						return;
+					}
 					clampTopLevelToScreen(pw);
 					enableFlickScroll(pw);
 				});
+			}
 			break;
 		}
 		case QEvent::Gesture: {

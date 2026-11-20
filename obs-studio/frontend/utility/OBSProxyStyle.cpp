@@ -7,6 +7,12 @@ int OBSProxyStyle::styleHint(StyleHint hint, const QStyleOption *option, const Q
 	if (hint == SH_ComboBox_AllowWheelScrolling) {
 		return 0;
 	}
+#ifdef __ANDROID__
+	// List popups honor maxVisibleItems and keep longer lists scrollable.
+	if (hint == SH_ComboBox_Popup) {
+		return 0;
+	}
+#endif
 #ifdef __APPLE__
 	if (hint == SH_ComboBox_UseNativePopup) {
 		return 1;
