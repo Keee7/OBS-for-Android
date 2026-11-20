@@ -10,6 +10,7 @@
 This directory contains targeted patches for Qt Android runtime Java components based on official Qt 6.11.1 sources:
 * `QtInputDelegate.java`: [Qt 6.11.1 upstream source](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java)
 * `QtRootLayout.java`: [Qt 6.11.1 upstream source](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java)
+* `QtWindowInsetsController.java`: [Qt 6.11.1 upstream source](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtWindowInsetsController.java)
 
 Original SPDX license headers (LGPL-3.0-only / GPL-2.0-only / GPL-3.0-only) are retained.
 
@@ -20,6 +21,8 @@ Original SPDX license headers (LGPL-3.0-only / GPL-2.0-only / GPL-3.0-only) are 
    * Tracks edit-view popup ownership and automatically dismisses cursor handles when views detach or dialogs close.
 2. **`QtRootLayout` Geometry Synchronization**:
    * Registers a Qt application-state listener and synchronizes current attached root dimensions to Qt once native integration is fully initialized, resolving startup layout mismatch issues in split-screen and floating window modes.
+3. **`QtWindowInsetsController` Phone Landscape Status Bar**:
+   * Hides the status bar on landscape phones outside Android multi-window mode. The navigation bar stays visible and a swipe down from the top temporarily reveals the status bar.
 
 ### Usage Example
 
@@ -41,7 +44,8 @@ Set `OBS_ANDROID_IME_DIAGNOSTICS=1` or start OBS with `--android-ime-diagnostics
 
 本目录包含针对 Qt 6.11.1 Android 运行时 Java 组件的专用补丁：
 * `QtInputDelegate.java`：基于 [Qt 6.11.1 官方源码](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java)；
-* `QtRootLayout.java`：基于 [Qt 6.11.1 官方源码](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java)。
+* `QtRootLayout.java`：基于 [Qt 6.11.1 官方源码](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java)；
+* `QtWindowInsetsController.java`：基于 [Qt 6.11.1 官方源码](https://github.com/qt/qtbase/blob/v6.11.1/src/android/jar/src/org/qtproject/qt/android/QtWindowInsetsController.java)。
 
 完整保留上游 SPDX 开源许可证声明（LGPL-3.0 / GPL-2.0 / GPL-3.0）。
 
@@ -52,6 +56,8 @@ Set `OBS_ANDROID_IME_DIAGNOSTICS=1` or start OBS with `--android-ime-diagnostics
    * 准确跟踪手柄所有权视图，在失焦、对话框关闭或视图解绑时自动清理光标手柄，杜绝残影。
 2. **`QtRootLayout` 根布局尺寸同步**：
    * 注册应用状态监听器，在原生初始化完成后主动读取当前实际附加的非零根布局尺寸并上报给 Qt，解决系统分屏与小窗冷启动时的初始几何错位问题。
+3. **`QtWindowInsetsController` 手机横屏状态栏**
+   * 手机横屏且未进入分屏或小窗时隐藏状态栏，保留底部导航栏。从屏幕顶部下滑可临时呼出状态栏。
 
 ### 打包应用流程
 

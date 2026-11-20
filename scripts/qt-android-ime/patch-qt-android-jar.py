@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Produce an isolated Qt 6.11.1 Android jar with the OBS IME fix.
+"""Produce an isolated Qt 6.11.1 Android jar with OBS runtime fixes.
 
 The input Qt installation is read only. Run after androiddeployqt has staged
 its jar and before Gradle builds the APK; replace only that staged copy.
@@ -15,13 +15,15 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name('QtInputDelegate.java')
 ROOT_LAYOUT = Path(__file__).with_name('QtRootLayout.java')
+WINDOW_INSETS = Path(__file__).with_name('QtWindowInsetsController.java')
 FOCUS = ROOT / 'obs-studio/frontend/cmake/android/java/com/obsproject/studio/ObsImeFocus.java'
 PREFIX = 'org/qtproject/qt/android/QtInputDelegate'
 ORIGINAL_CLASS_HASHES = {
     PREFIX + '.class': '72a86e3de3ac323b3f82e83e570390d83454f6dbc50ff0bc0b9a1422f0e4166a',
     'org/qtproject/qt/android/QtRootLayout.class': '8716ce20ca6321d57de99824e91103539f41bcaa1363e208f53aff4a26e5c3e5',
+    'org/qtproject/qt/android/QtWindowInsetsController.class': '3a089d1aa514370adb030577a2e3a87bc6339c24d870d4ad8c92e833c28ad59d',
 }
-CLASS_PREFIXES = (PREFIX, 'org/qtproject/qt/android/QtRootLayout')
+CLASS_PREFIXES = tuple(name.removesuffix('.class') for name in ORIGINAL_CLASS_HASHES)
 
 
 def main():
@@ -47,12 +49,12 @@ def main():
             classes.mkdir()
             subprocess.run([str(args.javac), '-encoding', 'UTF-8', '-source', '17', '-target', '17',
                             '-classpath', os.pathsep.join((str(args.jar.resolve()), str(args.android_jar.resolve()))),
-                            '-d', str(classes), str(SOURCE), str(ROOT_LAYOUT), str(FOCUS)], check=True)
+                            '-d', str(classes), str(SOURCE), str(ROOT_LAYOUT), str(WINDOW_INSETS), str(FOCUS)], check=True)
             replacements = {p.relative_to(classes).as_posix(): p.read_bytes()
                             for p in classes.rglob('*.class')
                             if p.relative_to(classes).as_posix().startswith(CLASS_PREFIXES)}
             if not set(ORIGINAL_CLASS_HASHES).issubset(replacements):
-                raise RuntimeError('javac did not produce both patched Qt classes')
+                raise RuntimeError('javac did not produce all patched Qt classes')
             output = tmp / 'Qt6Android.jar'
             with zipfile.ZipFile(output, 'w') as patched:
                 for entry in jar.infolist():

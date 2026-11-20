@@ -73,6 +73,7 @@ class QtRootLayout extends QtLayout implements QtNative.AppStateDetailsListener
         // called a bit late (QTBUG-94459).
         QtNative.runAction(() -> {
             QtDisplayManager.handleOrientationChange(activity);
+            QtWindowInsetsController.restoreFullScreenVisibility(activity);
         });
     }
 }

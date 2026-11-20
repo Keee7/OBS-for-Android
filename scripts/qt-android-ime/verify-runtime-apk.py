@@ -9,8 +9,8 @@ parser.add_argument('apk')
 args = parser.parse_args()
 with ZipFile(args.apk) as apk:
     dex = [apk.read(name) for name in apk.namelist() if re.fullmatch(r'classes\d*\.dex', name)]
-for marker in (b'm_lastShownFocusGeneration', b'dismissEditingHandles', b'reportReadySize',
+for marker in (b'm_lastShownFocusGeneration', b'dismissEditingHandles', b'reportReadySize', b'hideLandscapeStatusBar',
                b'Lcom/obsproject/studio/ObsImeFocus;'):
     if not any(marker in blob for blob in dex):
         parser.exit(1, 'FAIL: Android Qt runtime patch missing: ' + marker.decode() + '\n')
-print('PASS: IME and root-layout Qt runtime patches are present in APK Dex.')
+print('PASS: IME, root layout, and status bar Qt patches are present in APK Dex.')
