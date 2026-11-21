@@ -87,9 +87,9 @@ void obsAndroidShowLocalPath(QWidget *parent, const QString &title, const QStrin
 	obsAndroidDisplayLog("3-4 openUrl 替代：%s → %s | 剪贴板回读=%s", title.toUtf8().constData(),
 			     path.toUtf8().constData(), copied ? "一致" : "不一致");
 
-	OBSMessageBox::information(parent, title,
-				   QString("%1\n\n请使用手机的文件管理器查看此位置。%2")
-					   .arg(path, copied ? "\n\n路径已复制到剪贴板，可粘贴到其他应用。" : ""));
+	const QString body = copied ? QTStr("Android.PathDialog.CopiedText").arg(path)
+				    : QTStr("Android.PathDialog.Text").arg(path);
+	OBSMessageBox::information(parent, title, body);
 }
 
 void obsAndroidExportLog(QWidget *parent, const char *name)

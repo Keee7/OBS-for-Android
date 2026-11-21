@@ -100,27 +100,106 @@ vector<string> GetPreferredLocales()
 	const QStringList ui_languages = QLocale::system().uiLanguages();
 	const auto obs_locales = GetLocaleNames();
 
-	auto ui_to_obs = [&obs_locales](const QString &ui) {
-		const string language = ui.toStdString();
-		string lang_match;
-
+	auto find_obs_locale = [&obs_locales](const QString &candidate) -> string {
 		for (const auto &locale_pair : obs_locales) {
-			const string &locale = locale_pair.first;
-
-			if (locale == language.substr(0, locale.size())) {
-				return locale;
+			if (QString::fromStdString(locale_pair.first).compare(candidate, Qt::CaseInsensitive) == 0) {
+				return locale_pair.first;
 			}
+		}
+		return {};
+	};
 
-			if (lang_match.size()) {
-				continue;
-			}
+	auto ui_to_obs = [&obs_locales, &find_obs_locale](const QString &ui) -> string {
+		QString normalized = ui;
+		normalized.replace('_', '-');
+		const QStringList parts = normalized.split('-', Qt::SkipEmptyParts);
+		if (parts.isEmpty()) {
+			return {};
+		}
 
-			if (locale.substr(0, 2) == language.substr(0, 2)) {
-				lang_match = locale;
+		QString lang = parts[0].toLower();
+		if (lang == "in")
+			lang = "id";
+		else if (lang == "iw")
+			lang = "he";
+		else if (lang == "ji")
+			lang = "yi";
+		else if (lang == "no")
+			lang = "nb";
+
+		QString script;
+		QString region;
+		for (int i = 1; i < parts.size(); ++i) {
+			const QString &p = parts[i];
+			if (script.isEmpty() && p.size() == 4 && p[0].isLetter()) {
+				script = p[0].toUpper() + p.mid(1).toLower();
+			} else if (region.isEmpty() &&
+				   ((p.size() == 2 && p[0].isLetter() && p[1].isLetter()) ||
+				    (p.size() == 3 && p[0].isDigit()))) {
+				region = p.toUpper();
 			}
 		}
 
-		return lang_match;
+		if (lang == "zh") {
+			if (script == "Hant") {
+				if (const string m = find_obs_locale("zh-TW"); !m.empty())
+					return m;
+			} else if (script == "Hans") {
+				if (const string m = find_obs_locale("zh-CN"); !m.empty())
+					return m;
+			} else if (region == "TW" || region == "HK" || region == "MO") {
+				if (const string m = find_obs_locale("zh-TW"); !m.empty())
+					return m;
+			}
+			if (const string m = find_obs_locale("zh-CN"); !m.empty())
+				return m;
+		} else if (lang == "sr") {
+			if (script == "Latn") {
+				if (const string m = find_obs_locale("sr-CS"); !m.empty())
+					return m;
+			} else if (script == "Cyrl") {
+				if (const string m = find_obs_locale("sr-SP"); !m.empty())
+					return m;
+			} else if (region == "CS" || region == "ME") {
+				if (const string m = find_obs_locale("sr-CS"); !m.empty())
+					return m;
+			}
+			if (const string m = find_obs_locale("sr-SP"); !m.empty())
+				return m;
+		} else if (lang == "en") {
+			if (!region.isEmpty()) {
+				if (const string m = find_obs_locale("en-" + region); !m.empty())
+					return m;
+			}
+			if (const string m = find_obs_locale("en-US"); !m.empty())
+				return m;
+		} else if (lang == "pt") {
+			if (region == "PT") {
+				if (const string m = find_obs_locale("pt-PT"); !m.empty())
+					return m;
+			}
+			if (const string m = find_obs_locale("pt-BR"); !m.empty())
+				return m;
+		}
+
+		if (!region.isEmpty()) {
+			if (const string m = find_obs_locale(lang + "-" + region); !m.empty())
+				return m;
+		}
+
+		if (const string m = find_obs_locale(lang); !m.empty())
+			return m;
+
+		for (const auto &locale_pair : obs_locales) {
+			const QString loc = QString::fromStdString(locale_pair.first);
+			const int dash = loc.indexOf('-');
+			const QString loc_lang = (dash > 0 ? loc.left(dash) : loc).toLower();
+			if (loc_lang == lang) {
+				return locale_pair.first;
+			}
+		}
+
+		return {};
 	};
 
 	vector<string> result;

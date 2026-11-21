@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">OBS-uitvoer actief houden</string>
+    <string name="obs_keepalive_channel_description">Houdt OBS actief op de voorgrond tijdens streamen of opnemen.</string>
+    <string name="obs_keepalive_notification_title">OBS Studio is actief</string>
+    <string name="obs_keepalive_notification_text">Status: %1$s — blijft actief op de achtergrond</string>
+    <string name="obs_keepalive_state_streaming_recording">Streamen en opnemen</string>
+    <string name="obs_keepalive_state_streaming">Streamen</string>
+    <string name="obs_keepalive_state_recording">Opnemen</string>
+    <string name="obs_keepalive_state_screen_capture">Schermopname</string>
+    <string name="obs_keepalive_state_running">Actief</string>
+    <string name="obs_keepalive_state_idle">Inactief</string>
+</resources>

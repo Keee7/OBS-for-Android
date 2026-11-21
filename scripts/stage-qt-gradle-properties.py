@@ -94,6 +94,23 @@ def _uses_integer_compile_sdk(build_gradle: Path) -> bool:
     return False
 
 
+def _keep_app_locales(build_gradle: Path) -> None:
+    if not build_gradle.is_file():
+        return
+    locales = {path.parent.name.removeprefix("values-")
+               for path in (build_gradle.parent / "res").glob("values-*/strings.xml")}
+    if not locales:
+        return
+    locales.add("en")
+    source = build_gradle.read_text(encoding="utf-8")
+    # Qt 6.11.1's template filters out all Android resources outside English.
+    config = "resourceConfigurations.addAll(" + json.dumps(sorted(locales)) + ") // OBS app locales"
+    filter_line = r'''(?m)^([ \t]*)(?:resConfig[ \t]+(["'])en\2|resourceConfigurations\.addAll\([^\n]+\) // OBS app locales)[ \t]*$'''
+    updated = re.sub(filter_line, lambda match: match[1] + config, source)
+    if updated != source:
+        build_gradle.write_text(updated, encoding="utf-8", newline="\n")
+
+
 def _resolve_abi_value(raw_val: object, abi: str, default: str = "") -> str:
     if isinstance(raw_val, dict):
         v = raw_val.get(abi)
@@ -160,6 +177,7 @@ def main() -> int:
     ndk_version = _read_ndk_revision(ndk_dir)
 
     build_gradle = output_dir / "build.gradle"
+    _keep_app_locales(build_gradle)
     platform = args.android_platform
     if _uses_integer_compile_sdk(build_gradle) and "-" in platform and platform.rsplit("-", 1)[-1].isdigit():
         compile_sdk = platform.rsplit("-", 1)[-1]

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">Penjaga Output OBS</string>
+    <string name="obs_keepalive_channel_description">Menjaga OBS tetap aktif di latar depan saat streaming atau merekam.</string>
+    <string name="obs_keepalive_notification_title">OBS Studio sedang berjalan</string>
+    <string name="obs_keepalive_notification_text">Status: %1$s — tetap berjalan di latar belakang</string>
+    <string name="obs_keepalive_state_streaming_recording">Streaming &amp; Merekam</string>
+    <string name="obs_keepalive_state_streaming">Streaming</string>
+    <string name="obs_keepalive_state_recording">Merekam</string>
+    <string name="obs_keepalive_state_screen_capture">Tangkapan Layar</string>
+    <string name="obs_keepalive_state_running">Aktif</string>
+    <string name="obs_keepalive_state_idle">Siaga</string>
+</resources>

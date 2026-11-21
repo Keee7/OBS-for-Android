@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">OBS 輸出保活</string>
+    <string name="obs_keepalive_channel_description">在 OBS 串流或錄影期間維持前景運作。</string>
+    <string name="obs_keepalive_notification_title">OBS Studio 正在運作</string>
+    <string name="obs_keepalive_notification_text">狀態：%1$s —— 切換至背景也不會停止</string>
+    <string name="obs_keepalive_state_streaming_recording">串流與錄影中</string>
+    <string name="obs_keepalive_state_streaming">串流中</string>
+    <string name="obs_keepalive_state_recording">錄影中</string>
+    <string name="obs_keepalive_state_screen_capture">螢幕擷取中</string>
+    <string name="obs_keepalive_state_running">運作中</string>
+    <string name="obs_keepalive_state_idle">閒置</string>
+</resources>

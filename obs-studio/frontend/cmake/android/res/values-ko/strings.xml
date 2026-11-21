@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">OBS 출력 유지</string>
+    <string name="obs_keepalive_channel_description">방송 또는 녹화 중 OBS를 포그라운드에서 계속 실행합니다.</string>
+    <string name="obs_keepalive_notification_title">OBS Studio 실행 중</string>
+    <string name="obs_keepalive_notification_text">상태: %1$s — 백그라운드에서도 중단되지 않습니다</string>
+    <string name="obs_keepalive_state_streaming_recording">방송 및 녹화 중</string>
+    <string name="obs_keepalive_state_streaming">방송 중</string>
+    <string name="obs_keepalive_state_recording">녹화 중</string>
+    <string name="obs_keepalive_state_screen_capture">화면 캡처 중</string>
+    <string name="obs_keepalive_state_running">활성</string>
+    <string name="obs_keepalive_state_idle">유휴</string>
+</resources>

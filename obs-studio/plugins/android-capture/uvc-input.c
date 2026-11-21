@@ -43,11 +43,12 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #include <obs-module.h>
+#include "../android-common/android-locale.h"
+#include <util/dstr.h>
 #include <util/platform.h>
 #include <util/threading.h>
 
@@ -303,14 +304,33 @@ static uint32_t raw_frame_bytes(const struct uvc_mode *m)
 	return bytes > UINT32_MAX ? UINT32_MAX : (uint32_t)bytes;
 }
 
-static void set_status(struct uvc_source *s, const char *fmt, ...)
+static void set_status_key(struct uvc_source *s, const char *key, const char *const *args, size_t nargs)
 {
-	va_list args;
-	va_start(args, fmt);
+	struct dstr msg;
+	obs_android_format_locale(&msg, obs_module_text(key), args, nargs);
 	pthread_mutex_lock(&s->mtx);
-	vsnprintf(s->status, sizeof(s->status), fmt, args);
+	obs_android_copy_utf8(s->status, sizeof(s->status), msg.array ? msg.array : "");
 	pthread_mutex_unlock(&s->mtx);
-	va_end(args);
+	dstr_free(&msg);
+}
+
+static void set_status_int(struct uvc_source *s, const char *key, int value)
+{
+	char number[16];
+	snprintf(number, sizeof(number), "%d", value);
+	const char *args[] = {number};
+	set_status_key(s, key, args, 1);
+}
+
+static void set_capture_status(struct uvc_source *s, const char *key, const char *format, unsigned width,
+			       unsigned height, double fps)
+{
+	char w[16], h[16], rate[24];
+	snprintf(w, sizeof(w), "%u", width);
+	snprintf(h, sizeof(h), "%u", height);
+	snprintf(rate, sizeof(rate), "%.2f", fps);
+	const char *args[] = {format, w, h, rate};
+	set_status_key(s, key, args, 4);
 }
 
 /* 可中断的睡眠：退避期间也要对 deactivate/destroy 及时响应 */
@@ -1184,7 +1204,7 @@ static bool handle_err_header(struct uvc_source *s, struct uvc_stream *st)
 
 	if (dur >= 10000000000ULL) {
 		blog(LOG_ERROR, "uvc: BMH ERR 持续超 10 秒，拆会话重开");
-		set_status(s, "设备持续报错（BMH ERR），重开会话…");
+		set_status_key(s, "Status.StreamErrorRestart", NULL, 0);
 		return true;
 	}
 	return false;
@@ -1262,8 +1282,7 @@ static void deliver_raw_frame(struct uvc_source *s, const struct uvc_mode *m, st
 					     (now - delivery->fps_window_start));
 		delivery->fps_window_start = now;
 		delivery->fps_window_frames = 0;
-		set_status(s, "采集中：%s %ux%u @ %.2f fps", mode_kind_name(m->kind), (unsigned)s->cur_w,
-			   (unsigned)s->cur_h, s->cur_fps_x100 / 100.0);
+		set_capture_status(s, "Status.CapturingFps", mode_kind_name(m->kind), (unsigned)s->cur_w, (unsigned)s->cur_h, s->cur_fps_x100 / 100.0);
 	}
 	if (s->frames_out == 1 || s->frames_out % 300 == 0)
 		blog(LOG_INFO, "uvc: 第 %llu 帧 %ux%u %s（载荷 %u 字节，累计丢弃 %llu）",
@@ -1296,12 +1315,12 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 
 	/* ---- 1. 总线清单里找选中的设备 / 授权 ---- */
 	if (!s->usb_device[0]) {
-		set_status(s, "未选择设备（在属性页里选一台 USB 摄像头）");
+		set_status_key(s, "Status.NoDeviceSelected", NULL, 0);
 		return false;
 	}
 	const int ndev = obs_android_usb_enum_devices(devs, 8);
 	if (ndev < 0) {
-		set_status(s, "USB 总线未接通（宿主 App 没注册 obs_android_set_usb_host）");
+		set_status_key(s, "Status.BusNotReady", NULL, 0);
 		return false;
 	}
 
@@ -1325,7 +1344,8 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		}
 	}
 	if (sel < 0) {
-		set_status(s, "设备 '%s' 不在 USB 清单里（已拔出？）", s->usb_device);
+		const char *args[] = {s->usb_device};
+		set_status_key(s, "Status.DeviceMissing", args, 1);
 		return false;
 	}
 	/* 记下这台设备的 vid:pid（label 第一个空格前的 token），拔插换号后靠它认回来 */
@@ -1356,7 +1376,8 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		     s->usb_id, d.eff_w, d.eff_h, d.eff_fps);
 	}
 	if (!devs[sel].has_permission) {
-		set_status(s, "设备 '%s' 未授权", open_name);
+		const char *args[] = {open_name};
+		set_status_key(s, "Status.Unauthorized", args, 1);
 		if (!*perm_requested) {
 			const int pr = obs_android_usb_request_permission(open_name);
 			blog(LOG_INFO, "uvc: 设备未授权，已发起授权请求（返回 %d：%s）", pr,
@@ -1372,24 +1393,30 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	/* ---- 2. 借 fd，包 libusb（nikon-source 真机验证的唯一可行模式） ---- */
 	d.bridge_fd = obs_android_usb_open(open_name);
 	if (d.bridge_fd < 0) {
-		set_status(s, "打开设备失败（fd=%d）—— 设备被拔或授权刚被收回", d.bridge_fd);
+		set_status_int(s, "Status.OpenFailed", d.bridge_fd);
 		return false;
 	}
-	set_status(s, "正在初始化 USB/UVC 会话…");
+	set_status_key(s, "Status.Initializing", NULL, 0);
 
 	/* 必须关设备发现：默认初始化要建 NETLINK_KOBJECT_UEVENT socket，Android 的 SELinux
 	 * 不让应用建，libusb_init 直接 -1（真机实测，旧 libuvc 实现就死在这） */
 	const struct libusb_init_option opts[] = {{LIBUSB_OPTION_NO_DEVICE_DISCOVERY, {0}}};
 	int r = libusb_init_context(&d.ctx, opts, 1);
 	if (r != 0) {
+		char rb[16];
+		snprintf(rb, sizeof(rb), "%d", r);
+		const char *args[] = {rb};
 		blog(LOG_ERROR, "uvc: libusb_init_context 失败 %d", r);
-		set_status(s, "libusb 初始化失败 %d", r);
+		set_status_key(s, "Status.LibusbInitFailed", args, 1);
 		goto out;
 	}
 	r = libusb_wrap_sys_device(d.ctx, (intptr_t)d.bridge_fd, &d.h);
 	if (r != 0 || !d.h) {
+		char rb[16];
+		snprintf(rb, sizeof(rb), "%d", r);
+		const char *args[] = {rb};
 		blog(LOG_ERROR, "uvc: libusb_wrap_sys_device(fd=%d) 失败 %d", d.bridge_fd, r);
-		set_status(s, "包装 USB fd 失败（%d）", r);
+		set_status_key(s, "Status.WrapFdFailed", args, 1);
 		d.h = NULL;
 		goto out;
 	}
@@ -1409,22 +1436,22 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 
 	/* ---- 3. 描述符扫描 + 模式选择 ---- */
 	if (!uvc_scan_device(&d)) {
-		set_status(s, "设备不是受支持的 UVC 设备（无 bulk 流接口）");
+		set_status_key(s, "Status.UnsupportedDevice", NULL, 0);
 		goto out;
 	}
 	d.chosen = choose_mode(&d, s);
 	if (d.chosen < 0) {
 		if (raw_low_latency(s))
-			set_status(s, "设备不支持所选 YUV 格式/尺寸/帧率，请检查参数；关闭低延迟模式可恢复兼容协商");
+			set_status_key(s, "Status.UnsupportedYuvMode", NULL, 0);
 		else
-			set_status(s, "设备没报任何可用模式");
+			set_status_key(s, "Status.NoModes", NULL, 0);
 		goto out;
 	}
 	if (raw_low_latency(s) && d.usb_speed > LIBUSB_SPEED_UNKNOWN && d.usb_speed <= LIBUSB_SPEED_HIGH) {
 		const struct uvc_mode *m = &d.modes[d.chosen];
 		const uint32_t iv = pick_interval(m, s->fps);
 		if ((uint64_t)raw_frame_bytes(m) * 10000000ULL > 60000000ULL * iv) {
-			set_status(s, "当前 USB 链路未达到 SuperSpeed，无法承载所选未压缩 YUV；请检查线缆/转接器");
+			set_status_key(s, "Status.UsbTooSlow", NULL, 0);
 			goto out;
 		}
 	}
@@ -1458,7 +1485,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		     "uvc: claim VS 接口 %d 失败 %d（-6=BUSY：内核 uvcvideo 还占着；"
 		     "-5=NOT_FOUND：设备掉了）",
 		     d.vs_iface, r);
-		set_status(s, "占用 USB 接口失败（%d）—— 内核 uvcvideo 驱动可能占着设备", r);
+		set_status_int(s, "Status.ClaimFailed", r);
 		goto out;
 	}
 	progress = true; /* 能 claim 上就算赢了一半（内核驱动 detach 成功） */
@@ -1480,7 +1507,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	/* ---- 5. probe/commit 协商 ---- */
 	r = uvc_negotiate(&d, s);
 	if (r != 0) {
-		set_status(s, "UVC 协商失败（%d）", r);
+		set_status_int(s, "Status.NegotiateFailed", r);
 		if (r == LIBUSB_ERROR_IO || r == LIBUSB_ERROR_TIMEOUT || r == LIBUSB_ERROR_PIPE)
 			reset_before_reopen(&d, s, &pump);
 		goto out;
@@ -1502,7 +1529,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		frame_cap = raw_frame_bytes(mode); /* 未压缩帧长是死的 */
 	}
 	if (!frame_cap || frame_cap > MAX_FRAME_BYTES) {
-		set_status(s, "设备帧尺寸超过支持的缓冲范围");
+		set_status_key(s, "Status.FrameTooLarge", NULL, 0);
 		goto out;
 	}
 	st.frame_cap = frame_cap;
@@ -1515,7 +1542,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 
 	if (!st.frame_buf || !st.input.data) {
 		blog(LOG_ERROR, "uvc: 缓冲分配失败（帧 %zu / 流 %zu 字节）", st.frame_cap, st.input.capacity);
-		set_status(s, "内存不足，缓冲分配失败");
+		set_status_key(s, "Status.OutOfMemoryBuffer", NULL, 0);
 		goto out;
 	}
 
@@ -1523,7 +1550,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		tj = tjInitDecompress();
 		if (!tj) {
 			blog(LOG_ERROR, "uvc: tjInitDecompress 失败：%s", tjGetErrorStr());
-			set_status(s, "JPEG 解码器初始化失败");
+			set_status_key(s, "Status.JpegInitFailed", NULL, 0);
 			goto out;
 		}
 	}
@@ -1532,7 +1559,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	int pump_error = 0;
 	pump = start_input_pump(&d, s, &pump_error);
 	if (!pump) {
-		set_status(s, "USB 接收线程启动失败（%d）", pump_error);
+		set_status_int(s, "Status.PumpStartFailed", pump_error);
 		blog(LOG_ERROR, "uvc: bulk pump startup failed: %d", pump_error);
 		goto out;
 	}
@@ -1547,7 +1574,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	     d.payload_size, obs_source_async_unbuffered(s->source));
 
 	streaming = true;
-	set_status(s, "采集中：%s %ux%u", mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h);
+	set_capture_status(s, "Status.Capturing", mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h, 0);
 	blog(LOG_INFO, "uvc: 进入 bulk 流循环（端点 0x%02X，%d 个读并发，transfer=%u 字节，帧缓冲 %zu 字节）", d.ep_in,
 	     XFER_IN_FLIGHT, raw_packets ? d.payload_size : (unsigned)BULK_CHUNK_SIZE,
 	     st.frame_cap);
@@ -1577,7 +1604,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			     (unsigned long long)stats.errors, (unsigned long long)stats.dropped_blocks,
 			     (unsigned long long)stats.timeouts, (unsigned long long)stats.stalls,
 			     (unsigned long long)stats.overflows, (unsigned long long)stats.io_errors);
-			set_status(s, "USB 接收错误（%d），等待重连…", fatal);
+			set_status_int(s, "Status.PumpError", fatal);
 			if (fatal == LIBUSB_ERROR_IO)
 				reset_before_reopen(&d, s, &pump);
 			break;
@@ -1632,7 +1659,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			     (unsigned long long)stats.errors, (unsigned long long)stats.dropped_blocks,
 			     (unsigned long long)stats.timeouts, (unsigned long long)stats.stalls,
 			     (unsigned long long)stats.overflows, (unsigned long long)stats.io_errors);
-			set_status(s, "USB 接收停止（%d）", e);
+			set_status_int(s, "Status.PumpStopped", e);
 			if (e == LIBUSB_ERROR_IO)
 				reset_before_reopen(&d, s, &pump);
 			break;
@@ -1712,7 +1739,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			stream_reset_parse(&st);
 			if (!uvc_stream_buffer_append(&st.input, block.data, block.size)) {
 				uvc_bulk_pump_release(pump, &block);
-				set_status(s, "USB 数据块超过解析缓冲");
+				set_status_key(s, "Status.InputTooLarge", NULL, 0);
 				break;
 			}
 		}
@@ -2055,8 +2082,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 					(uint32_t)(fps_window_frames * 100000000000ULL / (now - fps_window_start));
 				fps_window_start = now;
 				fps_window_frames = 0;
-				set_status(s, "采集中：%s %ux%u @ %.2f fps", mode_kind_name(mode->kind),
-					   (unsigned)s->cur_w, (unsigned)s->cur_h, s->cur_fps_x100 / 100.0);
+				set_capture_status(s, "Status.CapturingFps", mode_kind_name(mode->kind), (unsigned)s->cur_w, (unsigned)s->cur_h, s->cur_fps_x100 / 100.0);
 			}
 			if (s->frames_out == 1 || s->frames_out % 300 == 0)
 				blog(LOG_INFO, "uvc: 第 %llu 帧 %ux%u %s（载荷 %u 字节，累计丢弃 %llu）",
@@ -2161,7 +2187,10 @@ static void *uvc_thread_main(void *arg)
 			retry_ms = RETRY_BACKOFF_MIN_MS;
 		} else if (++dead_rounds >= DEAD_ROUND_LIMIT) {
 			retry_ms = DEAD_ROUND_BACKOFF_MS;
-			set_status(s, "设备无响应（已连续 %u 轮送不出帧），正在自动重连…", dead_rounds);
+			char rounds[16];
+			snprintf(rounds, sizeof(rounds), "%u", dead_rounds);
+			const char *args[] = {rounds};
+			set_status_key(s, "Status.Unresponsive", args, 1);
 			blog(LOG_WARNING, "uvc: 连续 %u 轮送不出帧，自动重连退避 %llu ms",
 			     dead_rounds, (unsigned long long)retry_ms);
 		} else {
@@ -2213,7 +2242,7 @@ static void uvc_stop_thread(struct uvc_source *s)
 static const char *uvc_getname(void *unused)
 {
 	UNUSED_PARAMETER(unused);
-	return "UVC 摄像头（Android USB）";
+	return obs_module_text("UvcInput");
 }
 
 static void uvc_get_defaults(obs_data_t *settings)
@@ -2350,59 +2379,63 @@ static obs_properties_t *uvc_properties(void *data)
 	obs_properties_t *props = obs_properties_create();
 
 	/* 设备清单是打开属性页那一刻的快照（插拔后要重开对话框） */
-	obs_property_t *dev_list = obs_properties_add_list(props, "usb_device", "USB 摄像头", OBS_COMBO_TYPE_LIST,
-							   OBS_COMBO_FORMAT_STRING);
+	obs_property_t *dev_list = obs_properties_add_list(props, "usb_device", obs_module_text("UsbDevice"),
+							   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 
 	struct obs_android_usb_device devs[8];
 	const int n = obs_android_usb_enum_devices(devs, 8);
 	if (n < 0) {
-		obs_property_list_add_string(dev_list, "（USB 总线未接通：宿主 App 没注册 obs_android_set_usb_host）",
-					     "");
+		obs_property_list_add_string(dev_list, obs_module_text("UsbDevice.BusNotReady"), "");
 		blog(LOG_WARNING, "uvc: 属性页打不开设备清单 —— USB 总线未注册");
 	} else if (n == 0) {
-		obs_property_list_add_string(dev_list, "（当前没有 USB 摄像头，插上后重新打开本属性页）", "");
+		obs_property_list_add_string(dev_list, obs_module_text("UsbDevice.None"), "");
 	} else {
 		for (int i = 0; i < n; i++) {
-			char text[OBS_ANDROID_USB_LABEL_LEN + OBS_ANDROID_USB_NAME_LEN + 16];
+			char text[OBS_ANDROID_USB_LABEL_LEN + OBS_ANDROID_USB_NAME_LEN + 64];
 			snprintf(text, sizeof(text), "%s [%s]%s", devs[i].label, devs[i].name,
-				 devs[i].has_permission ? "" : "（未授权）");
+				 devs[i].has_permission ? "" : obs_module_text("UsbDevice.UnauthorizedSuffix"));
 			obs_property_list_add_string(dev_list, text, devs[i].name);
 		}
-		obs_property_list_add_string(dev_list, "（不使用 USB 摄像头）", "");
+		obs_property_list_add_string(dev_list, obs_module_text("UsbDevice.Disabled"), "");
 		blog(LOG_INFO, "uvc: 属性页列出 %d 个 USB 设备", n);
 	}
 
-	obs_properties_add_button2(props, "request_perm", "申请 USB 授权", on_request_permission, s);
+	obs_properties_add_button2(props, "request_perm", obs_module_text("RequestPerm"), on_request_permission, s);
 
-	obs_properties_add_int(props, "width", "采集宽度", 16, 7680, 2);
-	obs_properties_add_int(props, "height", "采集高度", 16, 4320, 2);
-	obs_properties_add_int(props, "fps", "采集帧率", 1, 240, 1);
+	obs_properties_add_int(props, "width", obs_module_text("Width"), 16, 7680, 2);
+	obs_properties_add_int(props, "height", obs_module_text("Height"), 16, 4320, 2);
+	obs_properties_add_int(props, "fps", obs_module_text("Fps"), 1, 240, 1);
 
-	obs_property_t *p = obs_properties_add_list(props, "video_format", "设备出流格式", OBS_COMBO_TYPE_LIST,
-						    OBS_COMBO_FORMAT_STRING);
-	obs_property_list_add_string(p, "MJPEG（采集卡内编，1080p 首选）", "mjpeg");
-	obs_property_list_add_string(p, "YUYV（未压缩，画质稳但吃 USB 带宽）", "yuyv");
-	obs_property_list_add_string(p, "NV12（未压缩半平面）", "nv12");
-	obs_property_list_add_string(p, "（自动：优先 MJPEG 1080p）", "");
+	obs_property_t *p = obs_properties_add_list(props, "video_format", obs_module_text("VideoFormat"),
+						    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(p, obs_module_text("VideoFormat.Mjpeg"), "mjpeg");
+	obs_property_list_add_string(p, obs_module_text("VideoFormat.Yuyv"), "yuyv");
+	obs_property_list_add_string(p, obs_module_text("VideoFormat.Nv12"), "nv12");
+	obs_property_list_add_string(p, obs_module_text("VideoFormat.Auto"), "");
 
-	obs_property_t *latency = obs_properties_add_bool(props, "yuv_low_latency", "YUV 直通采集（保持所选格式和帧率）");
+	obs_property_t *latency = obs_properties_add_bool(props, "yuv_low_latency", obs_module_text("YuvPassthrough"));
 	obs_property_set_long_description(
 		latency,
-		"仅对 YUYV/NV12 生效：保持所选格式、尺寸和帧率，不自动切 MJPEG/降分辨率。关闭可恢复兼容协商。");
+		obs_module_text("YuvPassthrough.Description"));
 
-	obs_property_t *unbuffered = obs_properties_add_bool(props, "yuv_unbuffered", "最低延迟（优先最新帧）");
+	obs_property_t *unbuffered = obs_properties_add_bool(props, "yuv_unbuffered", obs_module_text("YuvUnbuffered"));
 	obs_property_set_long_description(unbuffered,
-		"仅对 YUV 直通采集生效。默认关闭以平滑采集与输出的时钟抖动；开启后丢弃排队的中间帧，可能增加重复帧和卡顿。");
+		obs_module_text("YuvUnbuffered.Description"));
 
 	if (s) {
-		char state[512];
+		struct dstr state = {0};
 		pthread_mutex_lock(&s->mtx);
-		snprintf(state, sizeof(state), "%s", s->status);
+		if (s->status[0])
+			dstr_copy(&state, s->status);
 		pthread_mutex_unlock(&s->mtx);
-		if (!state[0])
-			snprintf(state, sizeof(state), "空闲（源未激活或尚未开始采集）。已送出 %llu 帧",
-				 (unsigned long long)s->frames_out);
-		obs_properties_add_text(props, "cap_state", state, OBS_TEXT_INFO);
+		if (dstr_is_empty(&state)) {
+			char frames[24];
+			snprintf(frames, sizeof(frames), "%llu", (unsigned long long)s->frames_out);
+			const char *args[] = {frames};
+			obs_android_format_locale(&state, obs_module_text("State.Idle"), args, 1);
+		}
+		obs_properties_add_text(props, "cap_state", state.array ? state.array : "", OBS_TEXT_INFO);
+		dstr_free(&state);
 	}
 
 	return props;
@@ -2425,6 +2458,7 @@ struct obs_source_info uvc_input_info = {
 };
 
 OBS_DECLARE_MODULE()
+OBS_MODULE_USE_DEFAULT_LOCALE("android-capture", "en-US")
 
 bool obs_module_load(void)
 {

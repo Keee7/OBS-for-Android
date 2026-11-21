@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">OBS 输出保活</string>
+    <string name="obs_keepalive_channel_description">OBS 推流/录制期间常驻，用来保持进程在前台运行。</string>
+    <string name="obs_keepalive_notification_title">OBS Studio 正在运行</string>
+    <string name="obs_keepalive_notification_text">状态：%1$s —— 切后台也不会停止</string>
+    <string name="obs_keepalive_state_streaming_recording">推流与录制中</string>
+    <string name="obs_keepalive_state_streaming">推流中</string>
+    <string name="obs_keepalive_state_recording">录制中</string>
+    <string name="obs_keepalive_state_screen_capture">屏幕采集中</string>
+    <string name="obs_keepalive_state_running">运行中</string>
+    <string name="obs_keepalive_state_idle">空闲</string>
+</resources>

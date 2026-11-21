@@ -92,7 +92,7 @@
     <application
         android:name="org.qtproject.qt.android.bindings.QtApplication"
         android:hardwareAccelerated="true"
-        android:label="OBS Studio (Android)"
+        android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:requestLegacyExternalStorage="true"
@@ -111,7 +111,7 @@
             android:foregroundServiceType="specialUse|mediaProjection|camera|microphone">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="OBS Studio 推流/录制期间的编码与上传保活" />
+                android:value="OBS Studio foreground service for encoding and streaming/recording" />
         </service>
 
         <!-- P-18-a：屏幕采集同意的透明代理 Activity（见 ObsProjectionHost.java 头注释：MediaProjection
@@ -134,7 +134,7 @@
             android:name="org.qtproject.qt.android.bindings.QtActivity"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
             android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"
-            android:label="OBS Studio (Android)"
+            android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
             android:launchMode="singleTop"

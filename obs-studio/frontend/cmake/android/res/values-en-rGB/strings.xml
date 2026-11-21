@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">OBS Output Keep-Alive</string>
+    <string name="obs_keepalive_channel_description">Keeps OBS active in the foreground while streaming or recording.</string>
+    <string name="obs_keepalive_notification_title">OBS Studio is running</string>
+    <string name="obs_keepalive_notification_text">Status: %1$s — running in foreground</string>
+    <string name="obs_keepalive_state_streaming_recording">Streaming &amp; Recording</string>
+    <string name="obs_keepalive_state_streaming">Streaming</string>
+    <string name="obs_keepalive_state_recording">Recording</string>
+    <string name="obs_keepalive_state_screen_capture">Screen Capture</string>
+    <string name="obs_keepalive_state_running">Active</string>
+    <string name="obs_keepalive_state_idle">Idle</string>
+</resources>

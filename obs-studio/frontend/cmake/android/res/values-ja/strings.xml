@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">OBS 出力キープアライブ</string>
+    <string name="obs_keepalive_channel_description">配信・録画中に OBS をフォアグラウンドで維持します。</string>
+    <string name="obs_keepalive_notification_title">OBS Studio が動作中</string>
+    <string name="obs_keepalive_notification_text">状態: %1$s — バックグラウンドでも停止しません</string>
+    <string name="obs_keepalive_state_streaming_recording">配信・録画中</string>
+    <string name="obs_keepalive_state_streaming">配信中</string>
+    <string name="obs_keepalive_state_recording">録画中</string>
+    <string name="obs_keepalive_state_screen_capture">画面キャプチャ中</string>
+    <string name="obs_keepalive_state_running">動作中</string>
+    <string name="obs_keepalive_state_idle">待機中</string>
+</resources>

@@ -52,11 +52,11 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #include <obs-module.h>
+#include <util/dstr.h>
 #include <util/darray.h>
 #include <util/platform.h>
 #include <util/threading.h> /* os_atomic_*（拆除协议那两个计数）、os_event_*（泵的停止标志） */
@@ -68,6 +68,7 @@
 #include "capture-alpha.h"
 
 /* 回调上下文：源用弱引用、reader 用"退役 + 在册回调归零"。与相机源共用同一份实现。 */
+#include "../android-common/android-locale.h"
 #include "../android-common/reader-ctx.h"
 
 /* 缓冲数。与相机同一笔账：头里两处把这变成硬前提 —— maxImages 至少 2 才谈得上
@@ -140,15 +141,13 @@ struct screen_source {
 	char last_error[1024];
 };
 
-static void set_error(struct screen_source *c, const char *fmt, ...)
+static void set_error_key(struct screen_source *c, const char *key, const char *const *args, size_t nargs)
 {
-	va_list args;
-
+	struct dstr msg;
+	obs_android_format_locale(&msg, obs_module_text(key), args, nargs);
 	pthread_mutex_lock(&c->status_mx);
-	va_start(args, fmt);
-	vsnprintf(c->last_error, sizeof(c->last_error), fmt, args);
-	va_end(args);
-
+	obs_android_copy_utf8(c->last_error, sizeof(c->last_error), msg.array ? msg.array : "");
+	dstr_free(&msg);
 	blog(LOG_WARNING, "android-screen: %s", c->last_error);
 	pthread_mutex_unlock(&c->status_mx);
 }
@@ -567,16 +566,23 @@ static void audio_pump_release(struct screen_source *c)
 
 /* 属性页那一行：伴音这条路通不通，用户只能从这里看见（ mixer 表在别的窗口里）。
  * 生命周期与计数分别由两把锁保护，按固定顺序取快照。 */
-static void audio_state_line(char *out, size_t out_sz)
+static void audio_state_line(struct dstr *out)
 {
 	pthread_mutex_lock(&audio_lifecycle_mx);
 	pthread_mutex_lock(&audio_mx);
-	snprintf(out, out_sz, "系统内录：%s，%ld 颗源在要，累计推送 %llu 帧 ≈ %.2f 秒，本场峰值 %d/32767%s。",
-		 audio_thread_started ? "泵在跑" : "未起", audio_users, (unsigned long long)audio_frames_total,
-		 (double)audio_frames_total / (double)(audio_rate ? audio_rate : 1), audio_peak_all,
-		 (audio_thread_started && audio_peak_all == 0) ? "（峰值恒 0 = 系统没把任何声音给过来）" : "");
+	const char *status = audio_thread_started ? obs_module_text("AudioState.Running")
+						  : obs_module_text("AudioState.Stopped");
+	char users_buf[24], frames_buf[24], sec_buf[24], peak_buf[16];
+	snprintf(users_buf, sizeof(users_buf), "%ld", audio_users);
+	snprintf(frames_buf, sizeof(frames_buf), "%llu", (unsigned long long)audio_frames_total);
+	snprintf(sec_buf, sizeof(sec_buf), "%.2f", (double)audio_frames_total / (double)(audio_rate ? audio_rate : 1));
+	snprintf(peak_buf, sizeof(peak_buf), "%d", audio_peak_all);
+	const char *hint = (audio_thread_started && audio_peak_all == 0) ? obs_module_text("AudioState.ZeroPeakHint")
+									 : "";
 	pthread_mutex_unlock(&audio_mx);
 	pthread_mutex_unlock(&audio_lifecycle_mx);
+	const char *args[] = {status, users_buf, frames_buf, sec_buf, peak_buf, hint};
+	obs_android_format_locale(out, obs_module_text("AudioState.Format"), args, 6);
 }
 
 static void close_capture(struct screen_source *c, const char *why)
@@ -668,12 +674,12 @@ static bool open_capture(struct screen_source *c)
 	 * 而且下面会把 c->ctx 覆盖掉、旧的那份彻底失联。和 camera 的 open_capture_locked
 	 * 同一个闸门，别只靠 try_start 那一处 —— open_capture 还有别的调用者。 */
 	if (!reader_ctx_wait_idle(c->ctx, 0)) {
-		set_error(c, "上一场采集的回调仍未退出，暂不重开");
+		set_error_key(c, "Err.CallbackBusy", NULL, 0);
 		return false;
 	}
 
 	if (!capture_size(c, &w, &h, &dpi)) {
-		set_error(c, "问不到屏幕尺寸（总线未接线，或 Java 侧读不到显示模式）");
+		set_error_key(c, "Err.ScreenSize", NULL, 0);
 		return false;
 	}
 
@@ -695,8 +701,12 @@ static bool open_capture(struct screen_source *c)
 						    &c->reader);
 	if (rst != AMEDIA_OK || !c->reader) {
 		c->reader = NULL;
-		set_error(c, "AImageReader_new(%u,%u,RGBA_8888,%d) 失败：media_status=%d", w, h, MAX_IMAGES,
-			  (int)rst);
+		char width[16], height[16], status[16];
+		snprintf(width, sizeof(width), "%u", w);
+		snprintf(height, sizeof(height), "%u", h);
+		snprintf(status, sizeof(status), "%d", (int)rst);
+		const char *args[] = {width, height, status};
+		set_error_key(c, "Err.ImageReader", args, 3);
 		return false;
 	}
 
@@ -705,7 +715,7 @@ static bool open_capture(struct screen_source *c)
 	 * 所以这里只 retire、不释放 —— 见 reader-ctx.h。 */
 	struct reader_ctx *fresh = reader_ctx_create(c->source);
 	if (!fresh) {
-		set_error(c, "建回调上下文失败（内存不足）");
+		set_error_key(c, "Err.CallbackAlloc", NULL, 0);
 		close_capture(c, "上下文没建成");
 		return false;
 	}
@@ -719,14 +729,14 @@ static bool open_capture(struct screen_source *c)
 
 	AImageReader_ImageListener listener = {c->ctx, on_image_available};
 	if (AImageReader_setImageListener(c->reader, &listener) != AMEDIA_OK) {
-		set_error(c, "AImageReader_setImageListener 失败");
+		set_error_key(c, "Err.ImageListener", NULL, 0);
 		close_capture(c, "监听没挂上");
 		return false;
 	}
 
 	if (AImageReader_getWindow(c->reader, &c->window) != AMEDIA_OK || !c->window) {
 		c->window = NULL;
-		set_error(c, "拿不到 AImageReader 的 ANativeWindow");
+		set_error_key(c, "Err.NoWindow", NULL, 0);
 		close_capture(c, "窗口拿不到");
 		return false;
 	}
@@ -736,8 +746,11 @@ static bool open_capture(struct screen_source *c)
 	if (!obs_android_screen_start_display(c->window)) {
 		char reason[768];
 		obs_android_screen_capture_error(reason, sizeof(reason));
-		set_error(c, "建投影面失败（%ux%u）：%s", w, h,
-			  reason[0] ? reason : "未收到具体原因，请查看 OBS-screen 日志并重新授权共享");
+		char width[16], height[16];
+		snprintf(width, sizeof(width), "%u", w);
+		snprintf(height, sizeof(height), "%u", h);
+		const char *args[] = {width, height, reason[0] ? reason : obs_module_text("Err.VirtualDisplayNoReason")};
+		set_error_key(c, "Err.VirtualDisplay", args, 3);
 		close_capture(c, "投影面没建成");
 		return false;
 	}
@@ -777,7 +790,7 @@ static void try_start(struct screen_source *c)
 	}
 
 	if (!obs_android_screen_ready()) {
-		set_error(c, "屏幕总线没接线（前端没注册，或注册晚于建源）");
+		set_error_key(c, "Err.BusNotReady", NULL, 0);
 		return;
 	}
 
@@ -790,10 +803,12 @@ static void try_start(struct screen_source *c)
 		if (!c->consent_asked) {
 			c->consent_asked = true;
 			const int r = obs_android_screen_request_consent();
-			if (r < 0)
-				set_error(c, "起同意框失败（%d）—— 拿不到 Context 还是 Activity 起不来，见上一条 Java 侧状态",
-					  r);
-			else
+			if (r < 0) {
+				char result[16];
+				snprintf(result, sizeof(result), "%d", r);
+				const char *args[] = {result};
+				set_error_key(c, "Err.ConsentFailed", args, 1);
+			} else
 				blog(LOG_INFO, "android-screen: 还没有投影令牌，已发起同意框（返回 %d）", r);
 		}
 		return;
@@ -844,7 +859,7 @@ static void check_live(struct screen_source *c)
 static const char *screen_getname(void *unused)
 {
 	UNUSED_PARAMETER(unused);
-	return "屏幕采集（MediaProjection）";
+	return obs_module_text("ScreenCapture");
 }
 
 static void *screen_create(obs_data_t *settings, obs_source_t *source)
@@ -993,7 +1008,10 @@ static void screen_video_tick(void *data, float seconds)
 		c->gpu_failed = true;
 		os_atomic_set_long(&c->gpu_runtime_failed, 0);
 		uint32_t delay = screen_gpu_retry_seconds(c->gpu_retries++);
-		set_error(c, "GPU 采集失败或首帧超时，%u 秒后重试，不切换 CPU。若授权失效，请重开源重新授权。", delay);
+		char seconds[16];
+		snprintf(seconds, sizeof(seconds), "%u", delay);
+		const char *args[] = {seconds};
+		set_error_key(c, "Err.GpuRetry", args, 1);
 		close_capture(c, "GPU 采集失败，等待重试");
 		c->next_try_ns = now + (uint64_t)delay * 1000000000ULL;
 		if (!obs_android_screen_has_consent()) c->consent_asked = true;
@@ -1107,18 +1125,18 @@ static obs_properties_t *screen_properties(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
 	struct screen_source *c = data;
-	char state[1536];
-	char audio[192];
-	obs_property_t *resolution = obs_properties_add_list(props, "native_resolution", "采集分辨率",
+	struct dstr state;
+	struct dstr audio;
+	obs_property_t *resolution = obs_properties_add_list(props, "native_resolution", obs_module_text("Resolution"),
 							    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_BOOL);
-	obs_property_list_add_bool(resolution, "1080p 上限（保持比例，减少内存带宽）", false);
-	obs_property_list_add_bool(resolution, "屏幕原生分辨率", true);
-	obs_property_t *alpha = obs_properties_add_list(props, "alpha_mode", "透明度处理", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(alpha, "兼容（默认）", SCREEN_ALPHA_COMPAT);
-	obs_property_list_add_int(alpha, "保留 Alpha（直通）", SCREEN_ALPHA_STRAIGHT);
-	obs_property_list_add_int(alpha, "保留 Alpha（预乘输入）", SCREEN_ALPHA_PREMULTIPLIED);
-	obs_property_set_long_description(alpha, "保留系统交付的 Alpha；无法恢复已合成的背景。预乘模式用于颜色已乘 Alpha 的输入。");
-	obs_properties_add_text(props, "alpha_info", "保留采集帧中的透明度；若背景已被系统合成，将保持不透明。", OBS_TEXT_INFO);
+	obs_property_list_add_bool(resolution, obs_module_text("Resolution.Limit"), false);
+	obs_property_list_add_bool(resolution, obs_module_text("Resolution.Native"), true);
+	obs_property_t *alpha = obs_properties_add_list(props, "alpha_mode", obs_module_text("AlphaMode"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(alpha, obs_module_text("AlphaMode.Compatible"), SCREEN_ALPHA_COMPAT);
+	obs_property_list_add_int(alpha, obs_module_text("AlphaMode.Straight"), SCREEN_ALPHA_STRAIGHT);
+	obs_property_list_add_int(alpha, obs_module_text("AlphaMode.Premultiplied"), SCREEN_ALPHA_PREMULTIPLIED);
+	obs_property_set_long_description(alpha, obs_module_text("AlphaMode.Description"));
+	obs_properties_add_text(props, "alpha_info", obs_module_text("AlphaMode.Info"), OBS_TEXT_INFO);
 
 	bool gpu_open = false, gpu_received = false;
 	char error[1024] = {0};
@@ -1131,31 +1149,49 @@ static obs_properties_t *screen_properties(void *data)
 		snprintf(error, sizeof(error), "%s", c->last_error);
 		pthread_mutex_unlock(&c->status_mx);
 	}
-	if (c && gpu_open)
-		snprintf(state, sizeof(state), "实验性 GPU 采集：%ux%u，%s，已导入 %llu 帧。", (unsigned)c->width,
-			 (unsigned)c->height, gpu_received ? "已收到帧" : "等待首帧", (unsigned long long)c->gpu_frames);
-	else if (c && c->cpu_active && c->gpu_failed)
-		snprintf(state, sizeof(state), "正在手动 CPU 采集：%ux%u。",
-			 (unsigned)c->width, (unsigned)c->height);
-	else if (c && c->cpu_active)
-		snprintf(state, sizeof(state), "正在 CPU 采集：%ux%u，已送出 %llu 帧，丢弃 %llu 帧。",
-			 (unsigned)c->width, (unsigned)c->height, (unsigned long long)c->frames_out,
-			 (unsigned long long)c->frames_dropped);
-	else if (c && error[0])
-		snprintf(state, sizeof(state), "没在采集。最后一次失败原因：%s", error);
-	else if (c)
-		snprintf(state, sizeof(state), "没在采集（源未 activate，或还没拿到投影令牌）。");
-	else
-		snprintf(state, sizeof(state), "总线未接线：拿不到投影令牌，源也没建起来");
+	if (c && (gpu_open || c->cpu_active)) {
+		char width[16], height[16];
+		snprintf(width, sizeof(width), "%u", (unsigned)c->width);
+		snprintf(height, sizeof(height), "%u", (unsigned)c->height);
+		if (gpu_open) {
+			char frames[24];
+			snprintf(frames, sizeof(frames), "%llu", (unsigned long long)c->gpu_frames);
+			const char *status = obs_module_text(gpu_received ? "State.GpuReady" : "State.GpuWaiting");
+			const char *args[] = {width, height, status, frames};
+			obs_android_format_locale(&state, obs_module_text("State.GpuCapturing"), args, 4);
+		} else if (c->gpu_failed) {
+			const char *args[] = {width, height};
+			obs_android_format_locale(&state, obs_module_text("State.ManualCpu"), args, 2);
+		} else {
+			char frames[24], dropped[24];
+			snprintf(frames, sizeof(frames), "%llu", (unsigned long long)c->frames_out);
+			snprintf(dropped, sizeof(dropped), "%llu", (unsigned long long)c->frames_dropped);
+			const char *args[] = {width, height, frames, dropped};
+			obs_android_format_locale(&state, obs_module_text("State.Capturing"), args, 4);
+		}
+	} else if (c && error[0]) {
+		const char *args[] = {error};
+		obs_android_format_locale(&state, obs_module_text("State.Error"), args, 1);
+	} else if (c) {
+		char frames[24], dropped[24];
+		snprintf(frames, sizeof(frames), "%llu", (unsigned long long)c->frames_out);
+		snprintf(dropped, sizeof(dropped), "%llu", (unsigned long long)c->frames_dropped);
+		const char *args[] = {frames, dropped};
+		obs_android_format_locale(&state, obs_module_text("State.Idle"), args, 2);
+	} else {
+		obs_android_format_locale(&state, obs_module_text("State.BusNotReady"), NULL, 0);
+	}
 
-	obs_properties_add_bool(props, "gpu_capture", "GPU 屏幕采集（实验，兼容时启用）");
-	obs_properties_add_text(props, "gpu_info", "默认使用 GPU；失败时退避重试，不自动回退 CPU。取消勾选可手动选择 CPU。", OBS_TEXT_INFO);
-	obs_properties_add_text(props, "cap_state", state, OBS_TEXT_INFO);
+	obs_properties_add_bool(props, "gpu_capture", obs_module_text("GpuCapture"));
+	obs_properties_add_text(props, "gpu_info", obs_module_text("GpuCapture.Info"), OBS_TEXT_INFO);
+	obs_properties_add_text(props, "cap_state", state.array ? state.array : "", OBS_TEXT_INFO);
+	dstr_free(&state);
 
 	/* 内录单独占一行而不是并到上面那句里：它是一路一份的（几颗源共享），把它的账记到
 	 * 单颗源那一行会让人以为"这颗源的音频"是另一回事。 */
-	audio_state_line(audio, sizeof(audio));
-	obs_properties_add_text(props, "cap_audio", audio, OBS_TEXT_INFO);
+	audio_state_line(&audio);
+	obs_properties_add_text(props, "cap_audio", audio.array ? audio.array : "", OBS_TEXT_INFO);
+	dstr_free(&audio);
 	return props;
 }
 
@@ -1183,6 +1219,7 @@ struct obs_source_info android_screen_capture_info = {
 };
 
 OBS_DECLARE_MODULE()
+OBS_MODULE_USE_DEFAULT_LOCALE("android-screen", "en-US")
 
 bool obs_module_load(void)
 {

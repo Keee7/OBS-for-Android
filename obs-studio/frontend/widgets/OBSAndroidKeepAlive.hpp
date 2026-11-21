@@ -5,6 +5,9 @@
 
 #include <QString>
 
+// 同步当前 OBS 语言到 Java 前台保活服务，使通知栏文案与 OBS 界面语言保持一致。
+void obsAndroidKeepAliveSetLocale(const char *locale);
+
 // running=true → 起前台服务（state 进通知栏文案，如 "streaming"/"recording"/"streaming+recording"）；
 // running=false → 停。幂等：重复 true 只刷文案，重复 false 不再惊动 Java。
 // 返回是否让 Java 侧认了这次请求；detail 带一行原文（含 Java describe() 的计数器）供 blog。

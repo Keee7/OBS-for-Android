@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">รักษาการทำงานเอาต์พุต OBS</string>
+    <string name="obs_keepalive_channel_description">คงการทำงานของ OBS ในเบื้องหน้าขณะสตรีมหรือบันทึก</string>
+    <string name="obs_keepalive_notification_title">OBS Studio กำลังทำงาน</string>
+    <string name="obs_keepalive_notification_text">สถานะ: %1$s — ทำงานต่อเนื่องเมื่อสลับไปพื้นหลัง</string>
+    <string name="obs_keepalive_state_streaming_recording">กำลังสตรีมและบันทึก</string>
+    <string name="obs_keepalive_state_streaming">กำลังสตรีม</string>
+    <string name="obs_keepalive_state_recording">กำลังบันทึก</string>
+    <string name="obs_keepalive_state_screen_capture">กำลังจับภาพหน้าจอ</string>
+    <string name="obs_keepalive_state_running">ทำงานอยู่</string>
+    <string name="obs_keepalive_state_idle">ว่าง</string>
+</resources>

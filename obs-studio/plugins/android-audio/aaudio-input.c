@@ -695,7 +695,7 @@ static bool aaudio_capture_start(struct aaudio_source *data)
 static const char *aaudio_getname(void *unused)
 {
 	UNUSED_PARAMETER(unused);
-	return "AAudio 音频输入（Android 麦克风）";
+	return obs_module_text("AAudioInput");
 }
 
 static void *aaudio_create(obs_data_t *settings, obs_source_t *source)
@@ -776,8 +776,8 @@ static obs_properties_t *aaudio_properties(void *unused)
 	 * 与 A3 的 USB 摄像头属性页同构。
 	 * 手填的口子并没关死：场景 JSON 里写个清单外的 id，aaudio_resolve_device 会
 	 * 如实说"不在清单里"并回落到系统默认。 */
-	obs_property_t *dev_list = obs_properties_add_list(props, "device_id", "音频输入设备", OBS_COMBO_TYPE_LIST,
-							   OBS_COMBO_FORMAT_STRING);
+	obs_property_t *dev_list = obs_properties_add_list(props, "device_id", obs_module_text("Device"),
+							   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 
 	struct obs_android_audio_device devs[AUDIO_DEV_MAX];
 	int n = obs_android_audio_enum_devices(devs, AUDIO_DEV_MAX);
@@ -785,16 +785,14 @@ static obs_properties_t *aaudio_properties(void *unused)
 	/* id 以十进制字符串进下拉框（见 aaudio_settings_apply 上方那段）：OBS_COMBO_FORMAT_STRING
 	 * 才能被前端的 obs_property_list_item_string 读出来。 */
 	if (!obs_android_audio_ready()) {
-		obs_property_list_add_string(dev_list,
-					     "系统默认输入（音频总线未接通：宿主 App 没注册 obs_android_set_audio_host）", "0");
+		obs_property_list_add_string(dev_list, obs_module_text("Device.DefaultNoBus"), "0");
 	} else if (n < 0) {
-		obs_property_list_add_string(dev_list,
-					     "系统默认输入（总线已接通，但宿主送来的快照一条也没解析出来：协议不匹配）", "0");
+		obs_property_list_add_string(dev_list, obs_module_text("Device.DefaultParseFailed"), "0");
 	} else {
-		obs_property_list_add_string(dev_list,
-					     (n == 0) ? "系统默认输入（当前没有音频输入设备；未授予 RECORD_AUDIO 时清单可能为空）"
-						      : "系统默认输入（由 AAudio 自己选）",
-					     "0");
+		obs_property_list_add_string(
+			dev_list,
+			(n == 0) ? obs_module_text("Device.DefaultNoDevices") : obs_module_text("Device.DefaultAuto"),
+			"0");
 
 		int hidden = 0;
 		for (int i = 0; i < n; i++) {
@@ -814,34 +812,36 @@ static obs_properties_t *aaudio_properties(void *unused)
 			blog(LOG_WARNING, "aaudio: 刷新属性页时 RECORD_AUDIO 未授予 —— 设备名可能读不到，清单也可能不完整");
 	}
 
-	obs_properties_add_int(props, "sample_rate", "请求采样率（Hz，0 = 交给系统）", 0, 192000, 100);
-	obs_properties_add_int(props, "channels", "请求声道数（1 或 2）", 1, 2, 1);
+	obs_properties_add_int(props, "sample_rate", obs_module_text("SampleRate"), 0, 192000, 100);
+	obs_properties_add_int(props, "channels", obs_module_text("Channels"), 1, 2, 1);
 
-	obs_property_t *p = obs_properties_add_list(props, "input_preset", "输入预设", OBS_COMBO_TYPE_LIST,
-						    OBS_COMBO_FORMAT_STRING);
-	obs_property_list_add_string(p, "generic（通用）", "generic");
-	obs_property_list_add_string(p, "camcorder（摄像机，带自动增益/降噪）", "camcorder");
-	obs_property_list_add_string(p, "voice_recognition（语音识别，尽量原样）", "voice_recognition");
-	obs_property_list_add_string(p, "voice_communication（通话，走回声消除）", "voice_communication");
-	obs_property_list_add_string(p, "unprocessed（不做任何处理）", "unprocessed");
+	obs_property_t *p = obs_properties_add_list(props, "input_preset", obs_module_text("InputPreset"),
+						    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(p, obs_module_text("InputPreset.Generic"), "generic");
+	obs_property_list_add_string(p, obs_module_text("InputPreset.Camcorder"), "camcorder");
+	obs_property_list_add_string(p, obs_module_text("InputPreset.VoiceRecognition"), "voice_recognition");
+	obs_property_list_add_string(p, obs_module_text("InputPreset.VoiceCommunication"), "voice_communication");
+	obs_property_list_add_string(p, obs_module_text("InputPreset.Unprocessed"), "unprocessed");
 
 	/* 这三条是 A4 要"试出低延迟能报什么"的开关。选项文本里写的都是 AAudio.h 的原话，
 	 * 实得值以开流后回读的那条"输入流已打开"日志为准。 */
-	p = obs_properties_add_list(props, "sharing_mode", "共享模式", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-	obs_property_list_add_string(p, "shared（共享，由 AudioFlinger 混音，采样率/格式可能被系统改）", "shared");
-	obs_property_list_add_string(p, "exclusive（独占，延迟最低；同一设备只许一个客户端）", "exclusive");
+	p = obs_properties_add_list(props, "sharing_mode", obs_module_text("SharingMode"), OBS_COMBO_TYPE_LIST,
+				    OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(p, obs_module_text("SharingMode.Shared"), "shared");
+	obs_property_list_add_string(p, obs_module_text("SharingMode.Exclusive"), "exclusive");
 
-	p = obs_properties_add_list(props, "performance_mode", "性能模式", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-	obs_property_list_add_string(p, "none（不作特别要求）", "none");
-	obs_property_list_add_string(p, "low_latency（优先低延迟，能否真拿到看回读）", "low_latency");
-	obs_property_list_add_string(p, "power_saving（省电；头文件写明输入流不支持，会按 none 处理）", "power_saving");
+	p = obs_properties_add_list(props, "performance_mode", obs_module_text("PerformanceMode"), OBS_COMBO_TYPE_LIST,
+				    OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(p, obs_module_text("PerformanceMode.None"), "none");
+	obs_property_list_add_string(p, obs_module_text("PerformanceMode.LowLatency"), "low_latency");
+	obs_property_list_add_string(p, obs_module_text("PerformanceMode.PowerSaving"), "power_saving");
 
-	p = obs_properties_add_list(props, "mmap_policy", "MMAP 路径（该接口 API 36 起才有，本插件按 dlsym 结果决定能否设置）",
-				    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-	obs_property_list_add_string(p, "unspecified（不碰这个开关，按系统默认）", "unspecified");
-	obs_property_list_add_string(p, "never（强制走传统路径）", "never");
-	obs_property_list_add_string(p, "auto（能用 MMAP 就用，否则回落）", "auto");
-	obs_property_list_add_string(p, "always（必须 MMAP，否则开流失败）", "always");
+	p = obs_properties_add_list(props, "mmap_policy", obs_module_text("MmapPolicy"), OBS_COMBO_TYPE_LIST,
+				    OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(p, obs_module_text("MmapPolicy.Unspecified"), "unspecified");
+	obs_property_list_add_string(p, obs_module_text("MmapPolicy.Never"), "never");
+	obs_property_list_add_string(p, obs_module_text("MmapPolicy.Auto"), "auto");
+	obs_property_list_add_string(p, obs_module_text("MmapPolicy.Always"), "always");
 
 	return props;
 }
@@ -862,6 +862,7 @@ struct obs_source_info aaudio_input_info = {
 };
 
 OBS_DECLARE_MODULE()
+OBS_MODULE_USE_DEFAULT_LOCALE("android-audio", "en-US")
 
 bool obs_module_load(void)
 {

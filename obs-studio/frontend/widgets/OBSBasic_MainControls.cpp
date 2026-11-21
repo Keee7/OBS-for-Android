@@ -491,7 +491,7 @@ void OBSBasic::on_actionShowSettingsFolder_triggered()
 	const QString userConfigLocation = QString::fromStdString(userConfigPath);
 
 #ifdef __ANDROID__
-	obsAndroidShowLocalPath(this, "打开设置文件夹", userConfigLocation);
+	obsAndroidShowLocalPath(this, QTStr("Android.OpenSettingsFolder"), userConfigLocation);
 #else
 	QDesktopServices::openUrl(QUrl::fromLocalFile(userConfigLocation));
 #endif
@@ -504,7 +504,7 @@ void OBSBasic::on_actionShowProfileFolder_triggered()
 		QString currentProfileLocation = QString::fromStdString(currentProfile.path.u8string());
 
 #ifdef __ANDROID__
-		obsAndroidShowLocalPath(this, "打开配置文件文件夹", currentProfileLocation);
+		obsAndroidShowLocalPath(this, QTStr("Android.OpenProfileFolder"), currentProfileLocation);
 #else
 		QDesktopServices::openUrl(QUrl::fromLocalFile(currentProfileLocation));
 #endif

@@ -24,11 +24,12 @@
 #include <turbojpeg.h>
 
 #include <pthread.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #include <obs-module.h>
+#include "../android-common/android-locale.h"
+#include <util/dstr.h>
 #include <util/platform.h>
 #include <util/threading.h>
 
@@ -162,14 +163,14 @@ static uint32_t get_u32be(const uint8_t *p)
 	return ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16) | ((uint32_t) p[2] << 8) | (uint32_t) p[3];
 }
 
-static void set_status(struct nikon_source *s, const char *fmt, ...)
+static void set_status_key(struct nikon_source *s, const char *key, const char *const *args, size_t nargs)
 {
-	va_list args;
-	va_start(args, fmt);
+	struct dstr msg;
+	obs_android_format_locale(&msg, obs_module_text(key), args, nargs);
 	pthread_mutex_lock(&s->mtx);
-	vsnprintf(s->status, sizeof(s->status), fmt, args);
+	obs_android_copy_utf8(s->status, sizeof(s->status), msg.array ? msg.array : "");
 	pthread_mutex_unlock(&s->mtx);
-	va_end(args);
+	dstr_free(&msg);
 }
 
 /* 可中断的睡眠：退避期间也要对 deactivate/destroy 及时响应 */
@@ -516,12 +517,12 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 
 	/* ---- 1. 在总线清单里找选中的设备 ---- */
 	if (!s->usb_device[0]) {
-		set_status(s, "未选择设备（在属性页里选一台 Nikon 相机）");
+		set_status_key(s, "Status.NoDeviceSelected", NULL, 0);
 		return false;
 	}
 	const int ndev = obs_android_usb_enum_devices(devs, 8);
 	if (ndev < 0) {
-		set_status(s, "USB 总线未接通（宿主 App 没注册 obs_android_set_usb_host）");
+		set_status_key(s, "Status.BusNotReady", NULL, 0);
 		return false;
 	}
 	bool found = false;
@@ -534,11 +535,13 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 		}
 	}
 	if (!found) {
-		set_status(s, "设备 '%s' 不在 USB 清单里（已拔出？）", s->usb_device);
+		const char *args[] = {s->usb_device};
+		set_status_key(s, "Status.DeviceMissing", args, 1);
 		return false;
 	}
 	if (!has_perm) {
-		set_status(s, "设备 '%s' 未授权", s->usb_device);
+		const char *args[] = {s->usb_device};
+		set_status_key(s, "Status.Unauthorized", args, 1);
 		/* 授权弹窗一轮只发起一次，免得退避循环每转一圈弹一个框 */
 		if (!*perm_requested) {
 			const int pr = obs_android_usb_request_permission(s->usb_device);
@@ -553,10 +556,13 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 	/* ---- 2. 借 fd，包 libusb ---- */
 	c.bridge_fd = obs_android_usb_open(s->usb_device);
 	if (c.bridge_fd <= 0) {
-		set_status(s, "打开设备失败（fd=%d）—— 设备被拔或授权刚被收回", c.bridge_fd);
+		char fb[16];
+		snprintf(fb, sizeof(fb), "%d", c.bridge_fd);
+		const char *args[] = {fb};
+		set_status_key(s, "Status.OpenFailed", args, 1);
 		return false;
 	}
-	set_status(s, "正在初始化 USB/PTP 会话…");
+	set_status_key(s, "Status.Initializing", NULL, 0);
 
 	/* 必须关设备发现：fd 是 Java 借来的、枚举本来就用不上，而 libusb 默认初始化要起
 	 * NETLINK_KOBJECT_UEVENT 热插拔监听 —— Android 的 SELinux 不让应用建这种 netlink
@@ -565,14 +571,20 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 	const struct libusb_init_option opts[] = {{LIBUSB_OPTION_NO_DEVICE_DISCOVERY, {0}}};
 	int r = libusb_init_context(&c.ctx, opts, 1);
 	if (r != 0) {
+		char rb[16];
+		snprintf(rb, sizeof(rb), "%d", r);
+		const char *args[] = {rb};
 		blog(LOG_ERROR, "nikon: libusb_init_context 失败 %d", r);
-		set_status(s, "libusb 初始化失败 %d", r);
+		set_status_key(s, "Status.LibusbInitFailed", args, 1);
 		goto out;
 	}
 	r = libusb_wrap_sys_device(c.ctx, (intptr_t) c.bridge_fd, &c.h);
 	if (r != 0 || !c.h) {
+		char rb[16];
+		snprintf(rb, sizeof(rb), "%d", r);
+		const char *args[] = {rb};
 		blog(LOG_ERROR, "nikon: libusb_wrap_sys_device(fd=%d) 失败 %d", c.bridge_fd, r);
-		set_status(s, "包装 USB fd 失败（%d）", r);
+		set_status_key(s, "Status.WrapFdFailed", args, 1);
 		c.h = NULL;
 		goto out;
 	}
@@ -614,8 +626,11 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 
 	r = libusb_claim_interface(c.h, c.iface);
 	if (r != 0) {
+		char rb[16];
+		snprintf(rb, sizeof(rb), "%d", r);
+		const char *args[] = {rb};
 		blog(LOG_ERROR, "nikon: claim interface %d 失败 %d（设备被别的源占着？）", c.iface, r);
-		set_status(s, "占用 USB 接口失败（%d）—— 别的源（如 UVC 摄像头）可能正占着这台相机", r);
+		set_status_key(s, "Status.ClaimFailed", args, 1);
 		goto out;
 	}
 
@@ -627,7 +642,7 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 	tj = tjInitDecompress();
 	if (!tj) {
 		blog(LOG_ERROR, "nikon: tjInitDecompress 失败：%s", tjGetErrorStr());
-		set_status(s, "JPEG 解码器初始化失败");
+		set_status_key(s, "Status.JpegInitFailed", NULL, 0);
 		goto out;
 	}
 
@@ -641,8 +656,11 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 	if (r == NK_ERR_NOT_OK && resp == PTP_RESP_SESSION_ALREADY_OPEN) {
 		blog(LOG_INFO, "nikon: 会话已开着（上次没关干净），接着用");
 	} else if (r != 0) {
+		char rb[16];
+		snprintf(rb, sizeof(rb), "0x%04X", (unsigned) resp);
+		const char *args[] = {rb};
 		blog(LOG_ERROR, "nikon: OpenSession 失败 r=%d resp=0x%04X", r, (unsigned) resp);
-		set_status(s, "OpenSession 失败（resp=0x%04X）", (unsigned) resp);
+		set_status_key(s, "Status.OpenSessionFailed", args, 1);
 		goto out;
 	}
 	session_open = true;
@@ -653,16 +671,22 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 	r = ptp_data_in(&c, PTP_OP_GetDevicePropValue, 1, PTP_PROP_LV_PROHIBITION, propbuf, sizeof(propbuf), &plen,
 			&resp, PTP_CMD_TIMEOUT_MS);
 	if (r != 0) {
+		char rb[16];
+		snprintf(rb, sizeof(rb), "0x%04X", (unsigned) resp);
+		const char *args[] = {rb};
 		blog(LOG_ERROR, "nikon: GetDevicePropValue(0xD1A4) 失败 r=%d resp=0x%04X", r, (unsigned) resp);
-		set_status(s, "读 LiveView 许可条件失败（resp=0x%04X）", (unsigned) resp);
+		set_status_key(s, "Status.ReadProhibitFailed", args, 1);
 		goto out;
 	}
 	const uint32_t prohibit = plen >= 4 ? get_u32le(propbuf + 12) : 0xFFFFFFFF;
 	if (prohibit != 0) {
+		char pb[16];
+		snprintf(pb, sizeof(pb), "0x%08X", (unsigned) prohibit);
+		const char *args[] = {pb};
 		blog(LOG_WARNING, "nikon: LiveViewProhibitionCondition=0x%08X（bit8 电量耗尽 / bit15 拍摄处理中 / "
 				  "bit17 温度升高 / bit28 镜头错误），进不了 Live View",
 		     (unsigned) prohibit);
-		set_status(s, "相机禁止 Live View（条件位 0x%08X：查电量/温度/镜头/是否正在拍摄）", (unsigned) prohibit);
+		set_status_key(s, "Status.LiveViewProhibited", args, 1);
 		goto out;
 	}
 
@@ -670,17 +694,23 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 	uint8_t v8 = (uint8_t) s->lv_size;
 	r = ptp_data_out(&c, PTP_OP_SetDevicePropValue, PTP_PROP_LV_IMAGE_SIZE, &v8, 1, &resp);
 	if (r != 0) {
+		char rb[16];
+		snprintf(rb, sizeof(rb), "0x%04X", (unsigned) resp);
+		const char *args[] = {rb};
 		blog(LOG_WARNING, "nikon: 设 LiveViewImageSize=%d 失败 r=%d resp=0x%04X", s->lv_size, r,
 		     (unsigned) resp);
-		set_status(s, "设置 LiveView 分辨率失败（resp=0x%04X）", (unsigned) resp);
+		set_status_key(s, "Status.SetLvSizeFailed", args, 1);
 		goto out;
 	}
 	v8 = (uint8_t) s->lv_quality;
 	r = ptp_data_out(&c, PTP_OP_SetDevicePropValue, PTP_PROP_LV_COMPRESSION, &v8, 1, &resp);
 	if (r != 0) {
+		char rb[16];
+		snprintf(rb, sizeof(rb), "0x%04X", (unsigned) resp);
+		const char *args[] = {rb};
 		blog(LOG_WARNING, "nikon: 设 LiveViewImageCompression=%d 失败 r=%d resp=0x%04X", s->lv_quality, r,
 		     (unsigned) resp);
-		set_status(s, "设置 JPEG 质量失败（resp=0x%04X）", (unsigned) resp);
+		set_status_key(s, "Status.SetLvQualityFailed", args, 1);
 		goto out;
 	}
 
@@ -690,25 +720,31 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 		r = ptp_data_in(&c, PTP_OP_GetLiveViewCompressedSize, 0, 0, propbuf, sizeof(propbuf), &plen, &resp,
 				PTP_CMD_TIMEOUT_MS);
 		if (r != 0) {
+			char rb[16];
+			snprintf(rb, sizeof(rb), "0x%04X", (unsigned) resp);
+			const char *args[] = {rb};
 			blog(LOG_ERROR, "nikon: GetLiveViewCompressedSize 失败 r=%d resp=0x%04X", r, (unsigned) resp);
-			set_status(s, "查询 LiveView 缓冲上限失败（resp=0x%04X）", (unsigned) resp);
+			set_status_key(s, "Status.QueryBufSizeFailed", args, 1);
 			goto out;
 		}
 		max_size = plen >= 4 ? get_u32le(propbuf + 12) : 0;
 	}
 	if (max_size < LVO_HEADER_SIZE + 4096 || max_size > 64U * 1024U * 1024U) {
+		char mb[24];
+		snprintf(mb, sizeof(mb), "%u", (unsigned) max_size);
+		const char *args[] = {mb};
 		blog(LOG_ERROR, "nikon: LiveViewObjectMaxSize=%u 不合理", (unsigned) max_size);
-		set_status(s, "相机报告的缓冲上限不合理（%u）", (unsigned) max_size);
+		set_status_key(s, "Status.InvalidBufSize", args, 1);
 		goto out;
 	}
 	rx = bmalloc(max_size);
 	blog(LOG_INFO, "nikon: 会话已建立，LiveViewObject 上限 %u 字节", (unsigned) max_size);
 
 	/* ---- 4. 进 Live View ---- */
-	set_status(s, "正在启动 Live View…");
+	set_status_key(s, "Status.StartingLv", NULL, 0);
 	r = start_liveview(s, &c);
 	if (r != 0) {
-		set_status(s, "StartLiveView 失败");
+		set_status_key(s, "Status.StartLvFailed", NULL, 0);
 		goto out;
 	}
 	lv_started = true;
@@ -845,8 +881,14 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 			blog(LOG_INFO, "nikon: 第 %llu 帧 %dx%d（JPEG %u 字节，累计丢弃 %llu）",
 			     (unsigned long long) s->frames_out, jw, jh, (unsigned) jpeg_len,
 			     (unsigned long long) s->frames_dropped);
-		if (s->frames_out == 1 || s->frames_out % 150 == 0)
-			set_status(s, "采集中：%dx%d，已送出 %llu 帧", jw, jh, (unsigned long long) s->frames_out);
+		if (s->frames_out == 1 || s->frames_out % 150 == 0) {
+			char wb[16], hb[16], fob[24];
+			snprintf(wb, sizeof(wb), "%d", jw);
+			snprintf(hb, sizeof(hb), "%d", jh);
+			snprintf(fob, sizeof(fob), "%llu", (unsigned long long) s->frames_out);
+			const char *args[] = {wb, hb, fob};
+			set_status_key(s, "Status.Capturing", args, 3);
+		}
 	}
 
 out:
@@ -944,7 +986,7 @@ static void nikon_stop_thread(struct nikon_source *s)
 static const char *nikon_getname(void *unused)
 {
 	UNUSED_PARAMETER(unused);
-	return "Nikon Webcam（Z 系列）";
+	return obs_module_text("NikonWebcam");
 }
 
 static void nikon_get_defaults(obs_data_t *settings)
@@ -1042,45 +1084,49 @@ static obs_properties_t *nikon_properties(void *data)
 	obs_properties_t *props = obs_properties_create();
 
 	/* 设备清单是打开属性页这一刻的快照（同 uvc-input.c：插拔后要重开对话框） */
-	obs_property_t *dev_list = obs_properties_add_list(props, "usb_device", "Nikon 相机（USB）",
+	obs_property_t *dev_list = obs_properties_add_list(props, "usb_device", obs_module_text("UsbDevice"),
 							   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	struct obs_android_usb_device devs[8];
 	const int n = obs_android_usb_enum_devices(devs, 8);
 	if (n < 0) {
-		obs_property_list_add_string(dev_list, "（USB 总线未接通：宿主 App 没注册 obs_android_set_usb_host）",
-					     "");
+		obs_property_list_add_string(dev_list, obs_module_text("UsbDevice.BusNotReady"), "");
 	} else if (n == 0) {
-		obs_property_list_add_string(dev_list, "（当前没有 USB 设备，插上相机（MTP 模式）后重新打开本属性页）",
-					     "");
+		obs_property_list_add_string(dev_list, obs_module_text("UsbDevice.None"), "");
 	} else {
 		for (int i = 0; i < n; i++) {
-			char text[OBS_ANDROID_USB_LABEL_LEN + OBS_ANDROID_USB_NAME_LEN + 16];
+			char text[OBS_ANDROID_USB_LABEL_LEN + OBS_ANDROID_USB_NAME_LEN + 64];
 			snprintf(text, sizeof(text), "%s [%s]%s", devs[i].label, devs[i].name,
-				 devs[i].has_permission ? "" : "（未授权）");
+				 devs[i].has_permission ? "" : obs_module_text("UsbDevice.UnauthorizedSuffix"));
 			obs_property_list_add_string(dev_list, text, devs[i].name);
 		}
-		obs_property_list_add_string(dev_list, "（不使用）", "");
+		obs_property_list_add_string(dev_list, obs_module_text("UsbDevice.Disabled"), "");
 	}
 
-	obs_properties_add_button2(props, "request_perm", "申请 USB 授权", on_request_permission, s);
+	obs_properties_add_button2(props, "request_perm", obs_module_text("RequestPerm"), on_request_permission, s);
 
-	obs_property_t *size_list = obs_properties_add_list(props, "lv_size", "Live View 分辨率", OBS_COMBO_TYPE_LIST,
-							    OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(size_list, "QVGA 320×240", 1);
-	obs_property_list_add_int(size_list, "VGA 640×480", 2);
-	obs_property_list_add_int(size_list, "XGA 1024×768（默认，上限）", 3);
+	obs_property_t *size_list = obs_properties_add_list(props, "lv_size", obs_module_text("LvSize"),
+							    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(size_list, obs_module_text("LvSize.Qvga"), 1);
+	obs_property_list_add_int(size_list, obs_module_text("LvSize.Vga"), 2);
+	obs_property_list_add_int(size_list, obs_module_text("LvSize.Xga"), 3);
 
-	obs_properties_add_int_slider(props, "lv_quality", "JPEG 质量（0 最省带宽 ~ 5 最好画质）", 0, 5, 1);
+	obs_properties_add_int_slider(props, "lv_quality", obs_module_text("LvQuality"), 0, 5, 1);
 
 	if (s) {
-		char state[512];
+		struct dstr state;
+		dstr_init(&state);
 		pthread_mutex_lock(&s->mtx);
-		snprintf(state, sizeof(state), "%s", s->status);
+		if (s->status[0])
+			dstr_copy(&state, s->status);
 		pthread_mutex_unlock(&s->mtx);
-		if (!state[0])
-			snprintf(state, sizeof(state), "空闲（源未激活或尚未开始采集）。已送出 %llu 帧",
-				 (unsigned long long) s->frames_out);
-		obs_properties_add_text(props, "cap_state", state, OBS_TEXT_INFO);
+		if (dstr_is_empty(&state)) {
+			char fob[24];
+			snprintf(fob, sizeof(fob), "%llu", (unsigned long long) s->frames_out);
+			const char *args[] = {fob};
+			obs_android_format_locale(&state, obs_module_text("State.Idle"), args, 1);
+		}
+		obs_properties_add_text(props, "cap_state", state.array ? state.array : "", OBS_TEXT_INFO);
+		dstr_free(&state);
 	}
 
 	return props;
@@ -1103,6 +1149,7 @@ struct obs_source_info nikon_source_info = {
 };
 
 OBS_DECLARE_MODULE()
+OBS_MODULE_USE_DEFAULT_LOCALE("nikon-source", "en-US")
 
 bool obs_module_load(void)
 {

@@ -5,6 +5,11 @@
 
 #include <obs-frontend-api.h>
 
+#ifdef __ANDROID__
+#include <OBSApp.hpp>
+#include <util/dstr.h>
+#endif
+
 Multiview::Multiview()
 {
 	InitSafeAreas(&actionSafeMargin, &graphicsSafeMargin, &fourByThreeSafeMargin, &leftLine, &topLine, &rightLine);
@@ -44,12 +49,22 @@ static OBSSource CreateLabel(const char *name, size_t h)
 #elif defined(__APPLE__)
 	obs_data_set_string(font, "face", "Helvetica");
 #elif defined(__ANDROID__)
-	/* 标签文本是本地化 UI 串（实测这台中文机器上画的是「预览」「输出」）与场景名，全是 CJK。
+	/* 标签文本是本地化 UI 串（如「预览」「输出」与场景名），可能含 CJK 字符。
 	 * "Monospace" 在 Android 上不是家族名 ⇒ 走 find-font-android.c 的兜底链拿到 Roboto，而实测
 	 * （设备 /system/fonts 的 name 表 + cmap）Roboto 与 DroidSans 是同一份拉丁字体（字节相同、
 	 * 家族名都叫 "Roboto"），CJK 覆盖 0/8 ⇒ 标签整排 .notdef 方框。设备唯一有 CJK 覆盖的
-	 * NotoSansCJK-Regular.ttc 里 5 个 face 的家族名依次是 "Noto Sans CJK JP/KR/SC/TC/HK"，取简中那档。 */
-	obs_data_set_string(font, "face", "Noto Sans CJK SC");
+	 * NotoSansCJK-Regular.ttc 里 5 个 face 的家族名依次是 "Noto Sans CJK JP/KR/SC/TC/HK"，按当前语言选档。 */
+	const char *loc = App() ? App()->GetLocale() : nullptr;
+	const char *face = "Noto Sans CJK SC";
+	if (loc) {
+		if (astrcmpi_n(loc, "ja", 2) == 0)
+			face = "Noto Sans CJK JP";
+		else if (astrcmpi_n(loc, "ko", 2) == 0)
+			face = "Noto Sans CJK KR";
+		else if (astrcmpi(loc, "zh-TW") == 0)
+			face = "Noto Sans CJK TC";
+	}
+	obs_data_set_string(font, "face", face);
 #else
 	obs_data_set_string(font, "face", "Monospace");
 #endif

@@ -40,12 +40,15 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.content.res.Configuration;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
+
+import java.util.Locale;
 
 public final class ObsForegroundService extends Service {
     private static final String TAG = "OBS-keepalive";
@@ -74,6 +77,8 @@ public final class ObsForegroundService extends Service {
     private static volatile Runnable pendingAfterPromote = null;
     /** 这个服务是不是我们替投影空手起起来的 —— 决定令牌换不成时该不该把它停掉 */
     private static volatile boolean startedForProjection = false;
+    /** OBS 前端选定的语言（BCP-47，如 "en-US" / "zh-CN"），空串表示跟随系统 */
+    private static volatile String appLocale = "";
 
     private static volatile boolean cameraSourceActive;
     private static volatile boolean microphoneSourceActive;
@@ -105,6 +110,23 @@ public final class ObsForegroundService extends Service {
     private NotificationManager nm;
 
     /* ===================== native 调进来的静态入口 ===================== */
+
+    public static void setAppLocale(String bcp47Locale) {
+        appLocale = bcp47Locale == null ? "" : bcp47Locale.trim();
+        final ObsForegroundService svc = instance;
+        if (svc != null && svc.nm != null) {
+            new Handler(Looper.getMainLooper()).post(new Runnable() {
+                @Override
+                public void run() {
+                    final ObsForegroundService cur = instance;
+                    if (cur != null && cur.nm != null) {
+                        cur.createChannel();
+                        cur.nm.notify(NOTIF_ID, cur.buildNotification());
+                    }
+                }
+            });
+        }
+    }
 
     /**
      * 起前台服务。ctx 用 applicationContext，不把 Activity 引用留在静态字段里（会漏）。
@@ -404,13 +426,47 @@ public final class ObsForegroundService extends Service {
         retypeIfNeeded();
     }
 
+    private Context localizedContext() {
+        final String tag = appLocale;
+        if (tag == null || tag.isEmpty())
+            return this;
+        try {
+            final Locale loc = Locale.forLanguageTag(tag);
+            if (loc.getLanguage().isEmpty())
+                return this;
+            final Configuration cfg = new Configuration(getResources().getConfiguration());
+            cfg.setLocale(loc);
+            return createConfigurationContext(cfg);
+        } catch (Throwable ignored) {
+            return this;
+        }
+    }
+
+    private String formatState(Context lctx, String state) {
+        if ("streaming+recording".equals(state))
+            return lctx.getString(R.string.obs_keepalive_state_streaming_recording);
+        if ("streaming".equals(state))
+            return lctx.getString(R.string.obs_keepalive_state_streaming);
+        if ("recording".equals(state))
+            return lctx.getString(R.string.obs_keepalive_state_recording);
+        if ("screen-capture".equals(state))
+            return lctx.getString(R.string.obs_keepalive_state_screen_capture);
+        if ("running".equals(state))
+            return lctx.getString(R.string.obs_keepalive_state_running);
+        if ("idle".equals(state) || "<idle>".equals(state))
+            return lctx.getString(R.string.obs_keepalive_state_idle);
+        return state == null ? "" : state;
+    }
+
     private void createChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O)
             return;
         try {
-            NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "OBS 输出保活",
-                                                             NotificationManager.IMPORTANCE_LOW);
-            ch.setDescription("OBS 推流/录制期间常驻，用来把进程钉在前台档");
+            final Context lctx = localizedContext();
+            NotificationChannel ch = new NotificationChannel(
+                    CHANNEL_ID, lctx.getString(R.string.obs_keepalive_channel_name),
+                    NotificationManager.IMPORTANCE_LOW);
+            ch.setDescription(lctx.getString(R.string.obs_keepalive_channel_description));
             ch.setShowBadge(false);
             nm.createNotificationChannel(ch);
         } catch (Throwable t) {
@@ -436,6 +492,7 @@ public final class ObsForegroundService extends Service {
             Log.w(TAG, "点按 PendingIntent 建失败（通知照样能显示）: " + t);
         }
 
+        final Context lctx = localizedContext();
         Notification.Builder b;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             b = new Notification.Builder(this, CHANNEL_ID);
@@ -443,8 +500,8 @@ public final class ObsForegroundService extends Service {
             b = new Notification.Builder(this);
         }
         b.setSmallIcon(R.drawable.obs_keepalive)
-         .setContentTitle("OBS Studio 正在工作")
-         .setContentText("状态：" + lastState + " —— 切后台也不会停")
+         .setContentTitle(lctx.getString(R.string.obs_keepalive_notification_title))
+         .setContentText(lctx.getString(R.string.obs_keepalive_notification_text, formatState(lctx, lastState)))
          .setOngoing(true)
          .setOnlyAlertOnce(true)
          .setShowWhen(false)

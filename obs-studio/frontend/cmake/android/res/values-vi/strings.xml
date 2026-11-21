@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">Duy trì đầu ra OBS</string>
+    <string name="obs_keepalive_channel_description">Giữ OBS hoạt động ở tiền cảnh khi đang phát trực tiếp hoặc ghi hình.</string>
+    <string name="obs_keepalive_notification_title">OBS Studio đang chạy</string>
+    <string name="obs_keepalive_notification_text">Trạng thái: %1$s — vẫn chạy khi ở nền</string>
+    <string name="obs_keepalive_state_streaming_recording">Đang phát &amp; ghi hình</string>
+    <string name="obs_keepalive_state_streaming">Đang phát trực tiếp</string>
+    <string name="obs_keepalive_state_recording">Đang ghi hình</string>
+    <string name="obs_keepalive_state_screen_capture">Quay màn hình</string>
+    <string name="obs_keepalive_state_running">Đang hoạt động</string>
+    <string name="obs_keepalive_state_idle">Chờ</string>
+</resources>

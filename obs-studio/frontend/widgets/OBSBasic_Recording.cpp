@@ -41,7 +41,7 @@ void OBSBasic::on_actionShow_Recordings_triggered()
 	const char *path = strcmp(mode, "Advanced") ? config_get_string(activeConfiguration, "SimpleOutput", "FilePath")
 						    : adv_path;
 #ifdef __ANDROID__
-	obsAndroidShowLocalPath(this, "显示录像", QString::fromUtf8(path));
+	obsAndroidShowLocalPath(this, QTStr("Android.ShowRecordings"), QString::fromUtf8(path));
 #else
 	QDesktopServices::openUrl(QUrl::fromLocalFile(path));
 #endif

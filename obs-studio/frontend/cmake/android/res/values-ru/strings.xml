@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">Поддержание вывода OBS</string>
+    <string name="obs_keepalive_channel_description">Поддерживает работу OBS на переднем плане во время трансляции или записи.</string>
+    <string name="obs_keepalive_notification_title">OBS Studio работает</string>
+    <string name="obs_keepalive_notification_text">Состояние: %1$s — продолжит работу в фоне</string>
+    <string name="obs_keepalive_state_streaming_recording">Трансляция и запись</string>
+    <string name="obs_keepalive_state_streaming">Трансляция</string>
+    <string name="obs_keepalive_state_recording">Запись</string>
+    <string name="obs_keepalive_state_screen_capture">Захват экрана</string>
+    <string name="obs_keepalive_state_running">Активно</string>
+    <string name="obs_keepalive_state_idle">Ожидание</string>
+</resources>

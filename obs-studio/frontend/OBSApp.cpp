@@ -51,6 +51,7 @@
 #include "widgets/OBSAndroidBrowser.hpp"
 #include "widgets/OBSAndroidAudio.hpp"
 #include "widgets/OBSAndroidDisplay.hpp" // 3-3 模态遮挡：obsAndroidDisplaySetVisible
+#include "widgets/OBSAndroidKeepAlive.hpp" // 前台保活服务语言同步
 #include "widgets/OBSAndroidPath.hpp" // 3-4：openUrl(本地路径) 的 Android 替代
 #include <QAbstractScrollArea> // 3-4 触摸：长按坐标要按 viewport 系给（itemAt/exec 都吃这个系）
 #include <QAbstractItemView>
@@ -1705,6 +1706,9 @@ void OBSApp::AppInit()
 	if (!InitLocale()) {
 		throw "Failed to load locale";
 	}
+#ifdef __ANDROID__
+	obsAndroidKeepAliveSetLocale(locale.c_str());
+#endif
 	if (!InitTheme()) {
 		throw "Failed to load theme";
 	}
@@ -2036,7 +2040,7 @@ void OBSApp::openCrashLogDirectory() const
 	QString crashLogDirectoryString = QString::fromStdString(crashLogDirectory.u8string());
 
 #ifdef __ANDROID__
-	obsAndroidShowLocalPath(GetMainWindow(), "打开崩溃日志文件夹", crashLogDirectoryString);
+	obsAndroidShowLocalPath(GetMainWindow(), QTStr("Android.OpenCrashLogFolder"), crashLogDirectoryString);
 #else
 	QDesktopServices::openUrl(QUrl::fromLocalFile(crashLogDirectoryString));
 #endif

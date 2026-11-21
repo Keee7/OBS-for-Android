@@ -46,6 +46,13 @@ static bool collectCaptureSource(void *data, obs_source_t *source)
     return true;
 }
 
+void obsAndroidKeepAliveSetLocale(const char *locale)
+{
+	const QJniObject jloc = QJniObject::fromString(locale ? QString::fromUtf8(locale) : QString());
+	QJniObject::callStaticMethod<void>(kServiceClass, "setAppLocale", "(Ljava/lang/String;)V",
+					   jloc.object<jstring>());
+}
+
 bool obsAndroidKeepAliveSetRunning(bool running, const char *state, QString *detail)
 {
     CaptureSources sources;

@@ -47,8 +47,21 @@ CLASSES = (b'Lcom/obsproject/studio/ObsCodecCapabilities;', b'Lcom/obsproject/st
 
 
 def run_tool(argv):
-    completed = subprocess.run([str(x) for x in argv], capture_output=True, text=True, check=True)
+    completed = subprocess.run([str(x) for x in argv], capture_output=True, encoding='utf-8', errors='replace', check=True)
     return completed.stdout
+
+
+def missing_notification_locales(aapt, apk, android_source):
+    expected = {path.parent.name.removeprefix('values-')
+                for path in (android_source / 'res').glob('values-*/strings.xml')}
+    if not expected:
+        return set()
+    aapt2 = aapt.with_name('aapt2' + aapt.suffix)
+    dump = run_tool([aapt2, 'dump', 'resources', apk])
+    entry = re.search(r'^\s*resource 0x[0-9a-f]+ string/obs_keepalive_notification_text\n(.*?)(?=^\s*resource |\Z)',
+                      dump, re.MULTILINE | re.DOTALL)
+    packaged = set(re.findall(r'^\s*\(([^)]+)\)', entry[1], re.MULTILINE)) if entry else set()
+    return expected - packaged
 
 
 def dynamic_symbols(text):
@@ -84,8 +97,8 @@ def main():
         print('APK SHA-256:', hashlib.sha256(args.apk.read_bytes()).hexdigest())
         badging = run_tool([aapt, 'dump', 'badging', args.apk])
         package = re.search(r"package: name='([^']+)' versionCode='([^']+)' versionName='([^']*)'", badging)
-        manifest = ET.parse(Path(__file__).resolve().parents[1] /
-                            'obs-studio/frontend/cmake/android/AndroidManifest.xml').getroot()
+        android_source = Path(__file__).resolve().parents[1] / 'obs-studio/frontend/cmake/android'
+        manifest = ET.parse(android_source / 'AndroidManifest.xml').getroot()
         android = '{http://schemas.android.com/apk/res/android}'
         expected_package = (args.expected_package or manifest.get('package'), manifest.get(android + 'versionCode'),
                             manifest.get(android + 'versionName'))
@@ -96,6 +109,9 @@ def main():
                 errors.append(f'{label} is not {expected}')
         if "application-icon-" not in badging:
             errors.append('missing application launcher icon')
+        missing_locales = missing_notification_locales(aapt, args.apk, android_source)
+        if missing_locales:
+            errors.append('missing foreground notification translations: ' + ', '.join(sorted(missing_locales)))
         for permission in sorted(PERMISSIONS):
             if f"uses-permission: name='{permission}'" not in badging:
                 errors.append('missing permission ' + permission)

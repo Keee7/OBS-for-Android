@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">OBS-Ausgabeschutz</string>
+    <string name="obs_keepalive_channel_description">Hält OBS während des Streamings oder der Aufnahme im Vordergrund aktiv.</string>
+    <string name="obs_keepalive_notification_title">OBS Studio wird ausgeführt</string>
+    <string name="obs_keepalive_notification_text">Status: %1$s — läuft im Vordergrund weiter</string>
+    <string name="obs_keepalive_state_streaming_recording">Streaming &amp; Aufnahme</string>
+    <string name="obs_keepalive_state_streaming">Streaming</string>
+    <string name="obs_keepalive_state_recording">Aufnahme</string>
+    <string name="obs_keepalive_state_screen_capture">Bildschirmaufnahme</string>
+    <string name="obs_keepalive_state_running">Aktiv</string>
+    <string name="obs_keepalive_state_idle">Leerlauf</string>
+</resources>

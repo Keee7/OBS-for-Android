@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">OBS Çıkış Koruma</string>
+    <string name="obs_keepalive_channel_description">Yayın veya kayıt sırasında OBS\'yi ön planda aktif tutar.</string>
+    <string name="obs_keepalive_notification_title">OBS Studio çalışıyor</string>
+    <string name="obs_keepalive_notification_text">Durum: %1$s — arka planda çalışmaya devam eder</string>
+    <string name="obs_keepalive_state_streaming_recording">Yayın ve Kayıt</string>
+    <string name="obs_keepalive_state_streaming">Yayın</string>
+    <string name="obs_keepalive_state_recording">Kayıt</string>
+    <string name="obs_keepalive_state_screen_capture">Ekran Yakalama</string>
+    <string name="obs_keepalive_state_running">Etkin</string>
+    <string name="obs_keepalive_state_idle">Boşta</string>
+</resources>

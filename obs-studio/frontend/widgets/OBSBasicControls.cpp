@@ -119,7 +119,7 @@ OBSBasicControls::OBSBasicControls(OBSBasic *main) : QFrame(nullptr), ui(new Ui:
 	 * 起始隐藏：当前场景里有没有这颗源，得由 OBSBasic 查过场景才知道（UpdateContextBar 里刷）。 */
 	auto *flipButton = new QPushButton(this);
 	flipButton->setObjectName("androidFlipCameraButton");
-	flipButton->setText(QString::fromUtf8("前后置")); // 无对应 locale 键，且只在 Android 分支出现
+	flipButton->setText(QTStr("Basic.Main.FlipCamera"));
 	flipButton->setVisible(false);
 	androidFlipCameraButton = flipButton;
 	/* 必须真的挂进 buttonsVLayout：下面校形那段是先 harvest 再按偏好重排，没在竖列里出现过的控件

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBS Studio (Android)</string>
+    <string name="obs_keepalive_channel_name">إبقاء مخرجات OBS نشطة</string>
+    <string name="obs_keepalive_channel_description">يبقي OBS نشطًا في المقدمة أثناء البث أو التسجيل.</string>
+    <string name="obs_keepalive_notification_title">OBS Studio قيد التشغيل</string>
+    <string name="obs_keepalive_notification_text">الحالة: %1$s — يستمر في العمل في الخلفية</string>
+    <string name="obs_keepalive_state_streaming_recording">البث والتسجيل</string>
+    <string name="obs_keepalive_state_streaming">البث</string>
+    <string name="obs_keepalive_state_recording">التسجيل</string>
+    <string name="obs_keepalive_state_screen_capture">التقاط الشاشة</string>
+    <string name="obs_keepalive_state_running">نشط</string>
+    <string name="obs_keepalive_state_idle">خامل</string>
+</resources>

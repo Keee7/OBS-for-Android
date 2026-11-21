@@ -46,9 +46,6 @@
 #include <media/NdkImageReader.h>
 #include <media/NdkImage.h>
 
-/* set_error 是 va_list + vsnprintf：stdarg.h 归 va_*，stdio.h 归 vsnprintf。
-   两个都不靠 obs-module.h 的间接包含 —— 仓里它带得到、别处换套头就没带，那种"现在能编"不留。 */
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -57,9 +54,11 @@
 #include <pthread.h>
 
 /* 回调上下文：源用弱引用、reader 用"退役 + 在册回调归零"。设计与取舍见该文件头。 */
+#include "../android-common/android-locale.h"
 #include "../android-common/reader-ctx.h"
 
 #include <obs-module.h>
+#include <util/dstr.h>
 #include <util/platform.h>
 #include <util/threading.h> /* os_atomic_*（拆除协议那两个计数靠它）+ pthread_mutex_init_value */
 
@@ -221,20 +220,30 @@ struct camera2_source {
 	uint32_t stall_count;
 
 	/* 属性页要把"为什么没画面"讲成人话。只写一次一条：多个失败点串起来反而看不出主因。 */
-	char last_error[192];
+	char last_error[512];
 };
+
+static void format_locale_args(char *out, size_t out_sz, const char *key, const char *const *args, size_t nargs)
+{
+	if (!out || out_sz == 0)
+		return;
+	struct dstr msg;
+	obs_android_format_locale(&msg, obs_module_text(key), args, nargs);
+	obs_android_copy_utf8(out, out_sz, msg.array ? msg.array : "");
+	dstr_free(&msg);
+}
 
 static const char *facing_name(int facing)
 {
 	switch (facing) {
 	case ACAMERA_LENS_FACING_FRONT:
-		return "前置";
+		return obs_module_text("Facing.Front");
 	case ACAMERA_LENS_FACING_BACK:
-		return "后置";
+		return obs_module_text("Facing.Back");
 	case ACAMERA_LENS_FACING_EXTERNAL:
-		return "外接";
+		return obs_module_text("Facing.External");
 	default:
-		return "朝向未知";
+		return obs_module_text("Facing.Unknown");
 	}
 }
 
@@ -336,56 +345,47 @@ static void log_camera_bus_state(const char *when)
 
 /* ============================ c 腿：开设备、取帧、交回 ============================ */
 
-static void set_error(struct camera2_source *c, const char *fmt, ...)
+static void set_error_key(struct camera2_source *c, const char *key, const char *const *args, size_t nargs)
 {
-	va_list args;
-	va_start(args, fmt);
-	vsnprintf(c->last_error, sizeof(c->last_error), fmt, args);
-	va_end(args);
+	format_locale_args(c->last_error, sizeof(c->last_error), key, args, nargs);
 }
 
-/* 打开/配置失败时要能报出人话。属性页里只写一个数字的话，用户分不清"没权限""被系统相机占了"
- * 和"这台机的 NDK 不支持这个尺寸" —— 而那三种的下一步动作完全不同。
- * 这张表是照 NdkCameraError.h:50-142 逐项抄下来的（枚举一共 15 档）。第一稿在这里凭空写了
- * ACAMERA_ERROR_INVALID_DATA 和 ACAMERA_ERROR_TIMEOUT 两个名字 —— 编译器直接拒绝（这份头里没有），
- * 同时把我漏掉的那档 NOT_ENOUGH_MEMORY 暴露出来：手机上它恰恰是最常见的一档（大尺寸 + maxImages
- * 配多了就是这个）。 ⇒ 结论：枚举值一律抄头，不照别的平台的名字推。 */
 static const char *camera_status_text(camera_status_t st)
 {
 	switch ((int) st) {
 	case ACAMERA_OK:
-		return "成功";
+		return obs_module_text("Status.Ok");
 	case ACAMERA_ERROR_INVALID_PARAMETER:
-		return "参数不合法（NDK 侧的 bug，不是设备问题）";
+		return obs_module_text("Status.InvalidParam");
 	case ACAMERA_ERROR_CAMERA_DISCONNECTED:
-		return "相机已断开";
+		return obs_module_text("Status.Disconnected");
 	case ACAMERA_ERROR_METADATA_NOT_FOUND:
-		return "读不到元数据";
+		return obs_module_text("Status.MetadataNotFound");
 	case ACAMERA_ERROR_SESSION_CLOSED:
-		return "会话已关闭";
+		return obs_module_text("Status.SessionClosed");
 	case ACAMERA_ERROR_INVALID_OPERATION:
-		return "当前状态不允许这个操作（会话还没起来？）";
+		return obs_module_text("Status.InvalidOp");
 	case ACAMERA_ERROR_STREAM_CONFIGURE_FAIL:
-		return "流配置被拒（尺寸/格式这台机不支持这么配）";
+		return obs_module_text("Status.StreamConfig");
 	case ACAMERA_ERROR_CAMERA_IN_USE:
-		return "相机正被别的应用占用";
+		return obs_module_text("Status.InUse");
 	case ACAMERA_ERROR_MAX_CAMERA_IN_USE:
-		return "系统里同时在用的相机已达上限";
+		return obs_module_text("Status.MaxCameras");
 	case ACAMERA_ERROR_CAMERA_DISABLED:
-		return "相机被设备策略禁用（企业策略/家长控制）";
+		return obs_module_text("Status.Disabled");
 	case ACAMERA_ERROR_PERMISSION_DENIED:
-		return "没给 CAMERA 权限";
+		return obs_module_text("Status.PermissionDenied");
 	case ACAMERA_ERROR_UNSUPPORTED_OPERATION:
-		return "这台机的相机 HAL 不支持这个调用";
+		return obs_module_text("Status.UnsupportedOp");
 	case ACAMERA_ERROR_NOT_ENOUGH_MEMORY:
-		return "相机侧内存不够（尺寸/缓冲数配大了，降一档再看）";
+		return obs_module_text("Status.NotEnoughMemory");
 	case ACAMERA_ERROR_CAMERA_DEVICE:
-		return "相机 HAL 报了致命错误";
+		return obs_module_text("Status.CameraError");
 	case ACAMERA_ERROR_CAMERA_SERVICE:
-		return "相机服务报了致命错误";
+		return obs_module_text("Status.ServiceError");
 	case ACAMERA_ERROR_UNKNOWN:
 	default:
-		return "未知错误";
+		return obs_module_text("Status.UnknownError");
 	}
 }
 
@@ -626,7 +626,7 @@ static bool choose_camera(struct camera2_source *c, struct camera2_info *out)
 	struct camera2_info cams[MAX_CAMERAS];
 	const int n = enum_cameras(c->manager, cams, MAX_CAMERAS);
 	if (n <= 0) {
-		set_error(c, "NDK 侧数不到相机（没授权，或这台只有 NDK 不支持的 legacy 硬件）");
+		set_error_key(c, "Err.NoCameras", NULL, 0);
 		return false;
 	}
 
@@ -1049,20 +1049,19 @@ static bool open_capture_locked(struct camera2_source *c)
 	struct camera2_info cam;
 
 	if (!c->manager) {
-		set_error(c, "没有 ACameraManager（这台机没有 Camera2，或创建失败）");
+		set_error_key(c, "Err.NoManager", NULL, 0);
 		return false;
 	}
 	if (!choose_camera(c, &cam))
 		return false;
 	if (!cam.raw[0]) {
-		/* enum_cameras 允许"清单里有这一台、但 Framework 给的 id 指针为 NULL"这种项（它照样列出来，
-		 * 只是 raw 是空串）。放在建 reader 之前，return false 才不会漏掉已创建的 AImageReader。 */
-		set_error(c, "相机 '%s' 的原始 id 是空的（Framework 没给 id），开不了设备", cam.id);
+		const char *args[] = {cam.id};
+		set_error_key(c, "Err.EmptyId", args, 1);
 		return false;
 	}
 
 	if (obs_android_camera_ready() && !obs_android_camera_has_permission()) {
-		set_error(c, "未授予 CAMERA 权限，开不了相机");
+		set_error_key(c, "Err.NoPermission", NULL, 0);
 		blog(LOG_WARNING, "android-camera: %s", c->last_error);
 		return false;
 	}
@@ -1072,29 +1071,26 @@ static bool open_capture_locked(struct camera2_source *c)
 	/* 上一场拆除时回调没退干净（close 超时、reader 已留作兜底）：旧 reader 还在那条
 	 * 线程手里，此时再开一路只会两路抢同一颗源。等它退了再开，看门狗每秒会重来一次。 */
 	if (!reader_ctx_wait_idle(c->ctx, 0)) {
-		set_error(c, "上一场采集的回调仍未退出，暂不重开");
+		set_error_key(c, "Err.CallbackBusy", NULL, 0);
 		return false;
 	}
 
 	os_atomic_set_long(&c->shutting_down, 0);
 
-	/* 一次读全这台相机的两张表（尺寸 + AE 帧率），下面挑档和校验都只照着它来。
-	 * 读不到表就不硬开：表外的尺寸设备会静默圆整到 1080p 以下，症状是"选了大的却出个小的"，
-	 * 比直接报错难查得多。 */
 	struct camera2_caps caps;
 	if (!read_camera_caps(c->manager, &cam, &caps)) {
-		set_error(c, "相机 '%s' 读不到能力表，配不出采集尺寸", cam.id);
+		const char *args[] = {cam.id};
+		set_error_key(c, "Err.NoCaps", args, 1);
 		return false;
 	}
 
 	int32_t w = 0, h = 0;
 	if (!resolve_capture_size(&cam, &caps, c->cap_w_pref, c->cap_h_pref, &w, &h)) {
-		set_error(c, "相机 '%s' 没给出可用的 YUV_420_888 输出尺寸", cam.id);
+		const char *args[] = {cam.id};
+		set_error_key(c, "Err.NoSizes", args, 1);
 		return false;
 	}
 
-	/* 帧率那张表可能压根没有（LEGACY 级设备允许不给）：那就**不下发**、用模板请求自带的默认档，
-	 * 而不是把源开不起来 —— 少一帧率偏好照样能出画面。 */
 	int32_t flo = 0, fhi = 0;
 	const bool have_fps = resolve_fps_range(&cam, &caps, c->fps_lo_pref, c->fps_hi_pref, &flo, &fhi);
 	if (!have_fps)
@@ -1111,7 +1107,11 @@ static bool open_capture_locked(struct camera2_source *c)
 
 	ok = (AImageReader_new(w, h, AIMAGE_FORMAT_YUV_420_888, MAX_IMAGES, &s->reader) == AMEDIA_OK) && s->reader;
 	if (!ok) {
-		set_error(c, "AImageReader_new(%d,%d) 失败", (int) w, (int) h);
+		char wb[16], hb[16];
+		snprintf(wb, sizeof(wb), "%d", (int) w);
+		snprintf(hb, sizeof(hb), "%d", (int) h);
+		const char *args[] = {wb, hb};
+		set_error_key(c, "Err.ImageReader", args, 2);
 		goto fail;
 	}
 
@@ -1123,7 +1123,7 @@ static bool open_capture_locked(struct camera2_source *c)
 	 * 挪到这里之后，所有 fail 路径都已经有 reader，close 一定会走到 retire。 */
 	struct reader_ctx *fresh = reader_ctx_create(c->source);
 	if (!fresh) {
-		set_error(c, "建回调上下文失败（内存不足）");
+		set_error_key(c, "Err.CallbackAlloc", NULL, 0);
 		ok = false;
 		goto fail;
 	}
@@ -1139,50 +1139,43 @@ static bool open_capture_locked(struct camera2_source *c)
 	 * （或 NULL），AImageReader_setImageListener 就把回调绑到已经 retire 的上下文上了。 */
 	AImageReader_ImageListener listener = {c->ctx, on_image_available};
 	if (AImageReader_setImageListener(s->reader, &listener) != AMEDIA_OK) {
-		set_error(c, "AImageReader_setImageListener 失败");
+		set_error_key(c, "Err.ImageListener", NULL, 0);
 		ok = false;
 		goto fail;
 	}
 	if (AImageReader_getWindow(s->reader, &s->window) != AMEDIA_OK || !s->window) {
-		set_error(c, "拿不到 AImageReader 的 ANativeWindow");
+		set_error_key(c, "Err.NoWindow", NULL, 0);
 		ok = false;
 		goto fail;
 	}
 
 	const camera_status_t ost = ACameraManager_openCamera(c->manager, cam.raw, &dev_cb, &s->device);
 	if (ost != ACAMERA_OK || !s->device) {
-		/* 只调这一次：openCamera 的返回值就是"为什么开不了"的唯一出处。
-		 * 之前这里写成"链式判断丢掉返回码、失败后再调一次拿码"—— 那等于真发了两次打开请求，
-		 * 第二次可能成功却把设备指针落进一个局部变量里泄漏掉（相机是独占设备，代价是别人拿不到）。 */
-		set_error(c, "开相机 '%s' 失败：%s（camera_status=%d）", cam.id, camera_status_text(ost), (int) ost);
+		char sb[16];
+		snprintf(sb, sizeof(sb), "%d", (int) ost);
+		const char *args[] = {cam.id, camera_status_text(ost), sb};
+		set_error_key(c, "Err.OpenCamera", args, 3);
 		blog(LOG_ERROR, "android-camera: %s", c->last_error);
 		ok = false;
 		goto fail;
 	}
 
 	if (ACaptureSessionOutputContainer_create(&s->container) != ACAMERA_OK) {
-		set_error(c, "建输出容器失败");
+		set_error_key(c, "Err.OutputContainer", NULL, 0);
 		ok = false;
 		goto fail;
 	}
 	if (ACaptureSessionOutput_create(s->window, &s->output) != ACAMERA_OK) {
-		set_error(c, "把窗口包成 session output 失败");
+		set_error_key(c, "Err.SessionOutput", NULL, 0);
 		ok = false;
 		goto fail;
 	}
 	if (ACaptureSessionOutputContainer_add(s->container, s->output) != ACAMERA_OK) {
-		set_error(c, "窗口加不进容器");
+		set_error_key(c, "Err.AddOutput", NULL, 0);
 		ok = false;
 		goto fail;
 	}
 
-	/* 帧率这一档官方**强烈建议**在建会话时就给："the application is strongly recommended to call
-	 * ACameraDevice_createCaptureSessionWithSessionParameters with the target fps range before
-	 * creating the capture session … helps avoid session reconfiguration delays in cases like 60fps"
-	 * （NdkCameraMetadataTags.h:723-730）。但那句话的前提是这把 key 在设备的
-	 * REQUEST_AVAILABLE_SESSION_KEYS 清单里，所以两头都满足才走这条路。传进去的是一个只装了这对值、
-	 * 不带任何 target 的 ACaptureRequest —— 第 3 实参的类型原文是 const ACaptureRequest*
-	 * （NdkCameraDevice.h:791-796），不是 ACameraMetadata。 */
 	if (have_fps && caps.fps_is_session_key) {
 		const int32_t init_pair[2] = {flo, fhi};
 		if (ACameraDevice_createCaptureRequest(s->device, TEMPLATE_RECORD, &s->session_params) == ACAMERA_OK &&
@@ -1200,9 +1193,6 @@ static bool open_capture_locked(struct camera2_source *c)
 		}
 	}
 
-	/* 会话配置失败是**同步**从这个调用返回 STREAM_CONFIGURE_FAIL 的（stateCallbacks 里
-	 * 压根没有 onConfigureFailure 可挂），所以错误码一定要接住并翻成人话。两条路的错误码同源，
-	 * 所以把"走的哪条"写进下面那句 set_error，而不是写进两条分支各报一次。 */
 	camera_status_t sst;
 	if (s->session_params)
 		sst = ACameraDevice_createCaptureSessionWithSessionParameters(s->device, s->container, s->session_params,
@@ -1210,37 +1200,34 @@ static bool open_capture_locked(struct camera2_source *c)
 	else
 		sst = ACameraDevice_createCaptureSession(s->device, s->container, &sess_cb, &s->session);
 	if (sst != ACAMERA_OK || !s->session) {
-		set_error(c, "建采集会话失败：%s（camera_status=%d，%dx%d + %d-%dfps 这组配不出来%s）",
-			  camera_status_text(sst), (int) sst, (int) w, (int) h, (int) flo, (int) fhi,
-			  s->session_params ? "，帧率是按会话参数下发的" : "");
+		char sb[16], wb[16], hb[16], flb[16], fhb[16];
+		snprintf(sb, sizeof(sb), "%d", (int) sst);
+		snprintf(wb, sizeof(wb), "%d", (int) w);
+		snprintf(hb, sizeof(hb), "%d", (int) h);
+		snprintf(flb, sizeof(flb), "%d", (int) flo);
+		snprintf(fhb, sizeof(fhb), "%d", (int) fhi);
+		const char *args[] = {camera_status_text(sst), sb, wb, hb, flb, fhb};
+		set_error_key(c, "Err.CreateSession", args, 6);
 		ok = false;
 		goto fail;
 	}
 
 	if (ACameraDevice_createCaptureRequest(s->device, TEMPLATE_RECORD, &s->request) != ACAMERA_OK || !s->request) {
-		set_error(c, "建 TEMPLATE_RECORD 请求失败");
+		set_error_key(c, "Err.CreateRequest", NULL, 0);
 		ok = false;
 		goto fail;
 	}
-	/* 同一个窗口要在两边各登记一次：session 那边收的是 ACaptureSessionOutput，
-	 * request 这边要另建一个 ACameraOutputTarget。少了后者不会有报错，只会一直不出帧
-	 * （NdkCaptureRequest.h:67-71：request 的 target 必须是 session 窗口清单的子集）。 */
 	if (ACameraOutputTarget_create(s->window, &s->target) != ACAMERA_OK || !s->target) {
-		set_error(c, "建 ACameraOutputTarget 失败");
+		set_error_key(c, "Err.OutputTarget", NULL, 0);
 		ok = false;
 		goto fail;
 	}
 	if (ACaptureRequest_addTarget(s->request, s->target) != ACAMERA_OK) {
-		set_error(c, "把窗口加进请求失败");
+		set_error_key(c, "Err.AddTarget", NULL, 0);
 		ok = false;
 		goto fail;
 	}
 
-	/* 帧率最终一定要出现在**重复请求**里：会话参数只影响"建会话时先按哪档配"，之后每帧的 AE
-	 * 约束看的是请求，而 TEMPLATE_RECORD 自带的那一档不一定是我们挑的。
-	 * 下发失败不算"开不起来"：只会退回默认帧率、画面照样出，所以只 WARNING 不 goto fail。
-	 * 也别把这档当承诺 —— 头里明说实际可达帧率 = min(aeTargetFpsRange.maxFps, 1/各流 minFrameDuration)
-	 * （NdkCameraMetadataTags.h:714-720），"选了 60 却只有 30"多半是那档尺寸本身出不了 60。 */
 	if (have_fps) {
 		const int32_t pair[2] = {flo, fhi};
 		const camera_status_t fst =
@@ -1253,7 +1240,10 @@ static bool open_capture_locked(struct camera2_source *c)
 	ACaptureRequest *reqs[1] = {s->request};
 	const camera_status_t rst = ACameraCaptureSession_setRepeatingRequest(s->session, NULL, 1, reqs, NULL);
 	if (rst != ACAMERA_OK) {
-		set_error(c, "发起循环采集失败：%s（camera_status=%d）", camera_status_text(rst), (int) rst);
+		char sb[16];
+		snprintf(sb, sizeof(sb), "%d", (int) rst);
+		const char *args[] = {camera_status_text(rst), sb};
+		set_error_key(c, "Err.RepeatingRequest", args, 2);
 		ok = false;
 		goto fail;
 	}
@@ -1349,7 +1339,7 @@ static void camera2_video_tick(void *data, float seconds)
 	/* 1) 交还：HOME / 切应用 / 锁屏。没开着的时候 close_capture 自己空转，所以不必先判 open。 */
 	if (!allowed && capture_is_open(c)) {
 		close_capture(c, "面已离开");
-		set_error(c, "应用退到后台，已把相机交还（回前台自动重开）");
+		set_error_key(c, "Err.Backgrounded", NULL, 0);
 		return;
 	}
 
@@ -1376,7 +1366,10 @@ static void camera2_video_tick(void *data, float seconds)
 			     obs_source_get_name(c->source));
 		c->stall_count++;
 		close_capture(c, "失联");
-		set_error(c, "%u ms 没出帧，已按失联拆掉重开", silent_ms);
+		char ms_buf[16];
+		snprintf(ms_buf, sizeof(ms_buf), "%u", silent_ms);
+		const char *args[] = {ms_buf};
+		set_error_key(c, "Err.Stalled", args, 1);
 		/* 不回 return：接着让第 4 支试一次重开。arm_watchdog 在开成功时才挂，
 		 * 所以这里不会当场又判一次失联（那时 capture_is_open 已经是 false）。 */
 	}
@@ -1403,7 +1396,7 @@ static void camera2_video_tick(void *data, float seconds)
 static const char *camera2_getname(void *unused)
 {
 	UNUSED_PARAMETER(unused);
-	return "内置摄像头（Camera2）";
+	return obs_module_text("AndroidCamera");
 }
 
 static void camera2_get_defaults(obs_data_t *settings)
@@ -1593,12 +1586,14 @@ static bool on_request_permission(obs_properties_t *props, obs_property_t *prope
 	struct camera2_source *c = data;
 
 	const int r = obs_android_camera_request_permission();
-	const char *what = r == 0 ? "本来就已授予（弹窗不会出现）"
-				  : r == 1 ? "已发起，系统弹窗出来了 —— 选完后重开本属性页才会刷新"
-					   : "发起失败：拿不到 Activity，或已被系统永久拒绝（要去 设置>应用>权限 里开）";
+	const char *what = r == 0 ? obs_module_text("Perm.AlreadyGranted")
+				  : r == 1 ? obs_module_text("Perm.Requested")
+					   : obs_module_text("Perm.Failed");
 	blog(LOG_INFO, "android-camera: 属性页点【申请相机权限】，总线返回 %d —— %s", r, what);
-	if (c)
-		set_error(c, "申请权限：%s", what);
+	if (c) {
+		const char *args[] = {what};
+		set_error_key(c, "Err.PermPrefix", args, 1);
+	}
 	return false;
 }
 
@@ -1608,58 +1603,52 @@ static obs_properties_t *camera2_properties(void *data)
 	struct camera2_source *c = data;
 	struct camera2_info cams[MAX_CAMERAS];
 
-	/* 三措辞：总线未接通、没授权、有授权但数不到相机，是三种不同的下一步。合成一句就会
-	 * 把用户支到错误的地方去（USB/音频那两条总线当年各踩过一次）。 */
 	if (!obs_android_camera_ready()) {
-		obs_properties_add_text(props, "bus_state",
-					"（相机权限总线未接通：宿主 App 没注册 obs_android_set_camera_host）",
-					OBS_TEXT_INFO);
+		obs_properties_add_text(props, "bus_state", obs_module_text("BusNotReady"), OBS_TEXT_INFO);
 	} else if (!obs_android_camera_has_permission()) {
-		obs_properties_add_text(props, "perm_state",
-					"未授予 CAMERA 权限。也可以直接点下面那个按钮再问一次；"
-					"若首启那次已经选了【不再询问】，就只能去【设置 > 应用 > OBS Studio > 权限】里打开。",
-					OBS_TEXT_INFO);
-		obs_properties_add_button2(props, "request_perm", "申请相机权限", on_request_permission, c);
+		obs_properties_add_text(props, "perm_state", obs_module_text("PermissionMissing"), OBS_TEXT_INFO);
+		obs_properties_add_button2(props, "request_perm", obs_module_text("RequestPermission"),
+					   on_request_permission, c);
 	}
 
-	/* 属性页可能在建源之前就被打开（右键菜单→属性），那时 data 为 NULL，
-	 * 所以自己临时开一个 manager，用完必须自己关 —— 下面 own_manager 就是记这笔。 */
 	ACameraManager *manager = c ? c->manager : ACameraManager_create();
 	const bool own_manager = c ? false : true;
 	const int n = manager ? enum_cameras(manager, cams, MAX_CAMERAS) : -1;
 
-	obs_property_t *list = obs_properties_add_list(props, "camera_id", "相机", OBS_COMBO_TYPE_LIST,
-						       OBS_COMBO_FORMAT_STRING);
+	obs_property_t *list = obs_properties_add_list(props, "camera_id", obs_module_text("Camera"),
+						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	if (n < 0) {
-		obs_property_list_add_string(list, "（拿不到相机清单）", "");
+		obs_property_list_add_string(list, obs_module_text("Camera.EnumFailed"), "");
 	} else if (n == 0) {
-		obs_property_list_add_string(list, "（NDK 侧没有可用相机：没授权，或只有 NDK 不支持的 legacy 硬件）", "");
+		obs_property_list_add_string(list, obs_module_text("Camera.NoneAvailable"), "");
 	} else {
 		for (int i = 0; i < n; i++) {
-			char text[CAMERA_ID_LEN + 96];
-			snprintf(text, sizeof(text), "%s '%s'（转角 %d°）", facing_name(cams[i].facing), cams[i].id,
-				 cams[i].orientation);
+			char text[CAMERA_ID_LEN + 128];
+			char rot[16];
+			snprintf(rot, sizeof(rot), "%d", cams[i].orientation);
+			const char *args[] = {facing_name(cams[i].facing), cams[i].id, rot};
+			format_locale_args(text, sizeof(text), "Camera.ItemFormat", args, 3);
 			obs_property_list_add_string(list, text, cams[i].id);
 		}
-		obs_property_list_add_string(list, "（自动：按下面的朝向偏好挑第一台）", "");
+		obs_property_list_add_string(list, obs_module_text("Camera.Auto"), "");
 	}
 
-	obs_property_t *facing = obs_properties_add_list(props, "facing", "朝向偏好", OBS_COMBO_TYPE_LIST,
-							 OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(facing, "不挑", -1);
-	obs_property_list_add_int(facing, "后置", ACAMERA_LENS_FACING_BACK);
-	obs_property_list_add_int(facing, "前置", ACAMERA_LENS_FACING_FRONT);
+	obs_property_t *facing = obs_properties_add_list(props, "facing", obs_module_text("Facing"),
+							 OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(facing, obs_module_text("Facing.Any"), -1);
+	obs_property_list_add_int(facing, obs_module_text("Facing.Back"), ACAMERA_LENS_FACING_BACK);
+	obs_property_list_add_int(facing, obs_module_text("Facing.Front"), ACAMERA_LENS_FACING_FRONT);
 
 	/* 画面旋转：设备侧 ACAMERA_SENSOR_ORIENTATION 只说"传感器装歪多少度"，真正该转多少
 	 * 还要叠加当前显示旋转与前置镜像，而本插件没有一条腿去读 Display.getRotation ——
 	 * 自动算在本机未必对（猜错就是把正的转歪）。所以给一个显式旋钮，默认"不旋转" =
 	 * 与本插件历史行为一致。上面相机下拉里那个"转角 %d°"就是设备报的传感器角度，供参考。 */
-	obs_property_t *rot = obs_properties_add_list(props, "rotation", "画面旋转", OBS_COMBO_TYPE_LIST,
+	obs_property_t *rot = obs_properties_add_list(props, "rotation", obs_module_text("Rotation"), OBS_COMBO_TYPE_LIST,
 						      OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(rot, "不旋转（默认）", 0);
-	obs_property_list_add_int(rot, "顺时针 90°", 90);
-	obs_property_list_add_int(rot, "旋转 180°", 180);
-	obs_property_list_add_int(rot, "顺时针 270°", 270);
+	obs_property_list_add_int(rot, obs_module_text("Rotation.None"), 0);
+	obs_property_list_add_int(rot, obs_module_text("Rotation.90"), 90);
+	obs_property_list_add_int(rot, obs_module_text("Rotation.180"), 180);
+	obs_property_list_add_int(rot, obs_module_text("Rotation.270"), 270);
 
 	/* d 腿的两张下拉只列设备表里的档 —— 用的就是开采集时那同一把尺子（choose_camera +
 	 * read_camera_caps），所以"属性里列得出来的"和"开采集开得出来的"必然是同一批。读表只要
@@ -1673,73 +1662,84 @@ static obs_properties_t *camera2_properties(void *data)
 			have_caps = read_camera_caps(manager, &sel, &caps);
 	}
 
-	char auto_size[96];
-	snprintf(auto_size, sizeof(auto_size), "（自动：%d×%d 以内挑最大的一档）", CAP_MAX_WIDTH, CAP_MAX_HEIGHT);
+	char auto_size[128];
+	{
+		char mw[16], mh[16];
+		snprintf(mw, sizeof(mw), "%d", CAP_MAX_WIDTH);
+		snprintf(mh, sizeof(mh), "%d", CAP_MAX_HEIGHT);
+		const char *args[] = {mw, mh};
+		format_locale_args(auto_size, sizeof(auto_size), "Resolution.AutoMax", args, 2);
+	}
 
-	obs_property_t *sizes = obs_properties_add_list(props, "cap_size", "分辨率", OBS_COMBO_TYPE_LIST,
-						     OBS_COMBO_FORMAT_STRING);
+	obs_property_t *sizes = obs_properties_add_list(props, "cap_size", obs_module_text("Resolution"),
+							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	if (have_caps && caps.num_sizes > 0) {
 		obs_property_list_add_string(sizes, auto_size, "");
 		for (int i = 0; i < caps.num_sizes; i++) {
-			char label[96];
+			char label[128];
 			char val[32];
+			char mp[16];
 			snprintf(val, sizeof(val), "%dx%d", (int) caps.w[i], (int) caps.h[i]);
-			snprintf(label, sizeof(label), "%s（%.1f MP）", val,
-				 (double) caps.w[i] * (double) caps.h[i] / 1000000.0);
+			snprintf(mp, sizeof(mp), "%.1f", (double) caps.w[i] * (double) caps.h[i] / 1000000.0);
+			const char *args[] = {val, mp};
+			format_locale_args(label, sizeof(label), "Resolution.ItemFormat", args, 2);
 			obs_property_list_add_string(sizes, label, val);
 		}
 	} else {
-		obs_property_list_add_string(sizes, "（自动：这台读不到尺寸表，只能自动）", "");
+		obs_property_list_add_string(sizes, obs_module_text("Resolution.AutoNoTable"), "");
 	}
 
-	obs_property_t *fpsl = obs_properties_add_list(props, "fps", "帧率", OBS_COMBO_TYPE_LIST,
-						     OBS_COMBO_FORMAT_STRING);
+	obs_property_t *fpsl = obs_properties_add_list(props, "fps", obs_module_text("FrameRate"), OBS_COMBO_TYPE_LIST,
+						       OBS_COMBO_FORMAT_STRING);
 	if (have_caps && caps.num_fps > 0) {
-		obs_property_list_add_string(fpsl, "（自动：表里帧率上限最高的一档）", "");
+		obs_property_list_add_string(fpsl, obs_module_text("FrameRate.AutoMax"), "");
 		for (int i = 0; i < caps.num_fps; i++) {
-			char label[96];
+			char label[128];
 			char val[24];
 			snprintf(val, sizeof(val), "%d-%d", (int) caps.fps_lo[i], (int) caps.fps_hi[i]);
-			if (caps.fps_lo[i] == caps.fps_hi[i])
-				snprintf(label, sizeof(label), "%s fps（定帧）", val);
-			else
-				snprintf(label, sizeof(label), "%s fps（AE 在这个区间里自己降）", val);
+			const char *args[] = {val};
+			format_locale_args(label, sizeof(label),
+					   (caps.fps_lo[i] == caps.fps_hi[i]) ? "FrameRate.Fixed" : "FrameRate.Range",
+					   args, 1);
 			obs_property_list_add_string(fpsl, label, val);
 		}
 	} else {
-		obs_property_list_add_string(fpsl, "（自动：这台没给 AE 帧率表，按设备默认跑）", "");
+		obs_property_list_add_string(fpsl, obs_module_text("FrameRate.AutoNoTable"), "");
 	}
 
-	/* 色彩矩阵留成可改的，是因为"Android 相机给的 8bit YUV 到底算不算 limited range"这件事
-	 * 只有真机能定（见 push_frame 那段注释与 plan.md 里 uvc-input 那条同源待办）。
-	 * 默认值写死成 DEFAULT，撞色偏时不用重打包。 */
-	obs_property_t *cs = obs_properties_add_list(props, "colorspace", "色彩矩阵", OBS_COMBO_TYPE_LIST,
-						     OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(cs, "自动（按 Rec. 709）", VIDEO_CS_DEFAULT);
-	obs_property_list_add_int(cs, "Rec. 601", VIDEO_CS_601);
-	obs_property_list_add_int(cs, "Rec. 709", VIDEO_CS_709);
+	obs_property_t *cs = obs_properties_add_list(props, "colorspace", obs_module_text("ColorSpace"),
+						     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(cs, obs_module_text("ColorSpace.Auto"), VIDEO_CS_DEFAULT);
+	obs_property_list_add_int(cs, obs_module_text("ColorSpace.601"), VIDEO_CS_601);
+	obs_property_list_add_int(cs, obs_module_text("ColorSpace.709"), VIDEO_CS_709);
 
 	if (c) {
-		/* 这几个计数是采集线程在写、UI 线程在读：读到旧值甚至读到半个 64 位都不影响判断，
-		 * 它只用来回答"到底有没有帧进来"，不当账算。 */
-		char state[512];
-		char asked_fps[48];
+		struct dstr state;
+		char asked_fps[64];
 		if (c->s.fps_hi > 0)
 			snprintf(asked_fps, sizeof(asked_fps), "%d-%dfps", (int) c->s.fps_lo, (int) c->s.fps_hi);
 		else
-			snprintf(asked_fps, sizeof(asked_fps), "默认帧率");
-		if (c->s.reader && c->s.session)
-			snprintf(state, sizeof(state),
-				 "正在采集：%dx%d %s（都是向设备要的值，设备可能圆整），已送出 %llu 帧，丢弃 %llu 帧"
-				 " —— 这一行是打开本对话框时的快照，只在第一帧到手时刷新一次。",
-				 (int) c->s.width, (int) c->s.height, asked_fps, (unsigned long long) c->frames_out,
-				 (unsigned long long) c->frames_dropped);
-		else if (c->last_error[0])
-			snprintf(state, sizeof(state), "没在采集。最后一次失败原因：%s", c->last_error);
-		else
-			snprintf(state, sizeof(state), "没在采集（源未 activate）。已送出 %llu 帧，丢弃 %llu 帧",
-				 (unsigned long long) c->frames_out, (unsigned long long) c->frames_dropped);
-		obs_properties_add_text(props, "cap_state", state, OBS_TEXT_INFO);
+			snprintf(asked_fps, sizeof(asked_fps), "%s", obs_module_text("State.DefaultFps"));
+		if (c->s.reader && c->s.session) {
+			char wb[16], hb[16], fob[24], fdb[24];
+			snprintf(wb, sizeof(wb), "%d", (int) c->s.width);
+			snprintf(hb, sizeof(hb), "%d", (int) c->s.height);
+			snprintf(fob, sizeof(fob), "%llu", (unsigned long long) c->frames_out);
+			snprintf(fdb, sizeof(fdb), "%llu", (unsigned long long) c->frames_dropped);
+			const char *args[] = {wb, hb, asked_fps, fob, fdb};
+			obs_android_format_locale(&state, obs_module_text("State.Capturing"), args, 5);
+		} else if (c->last_error[0]) {
+			const char *args[] = {c->last_error};
+			obs_android_format_locale(&state, obs_module_text("State.Error"), args, 1);
+		} else {
+			char fob[24], fdb[24];
+			snprintf(fob, sizeof(fob), "%llu", (unsigned long long) c->frames_out);
+			snprintf(fdb, sizeof(fdb), "%llu", (unsigned long long) c->frames_dropped);
+			const char *args[] = {fob, fdb};
+			obs_android_format_locale(&state, obs_module_text("State.Idle"), args, 2);
+		}
+		obs_properties_add_text(props, "cap_state", state.array ? state.array : "", OBS_TEXT_INFO);
+		dstr_free(&state);
 	}
 
 	if (own_manager && manager)
@@ -1770,6 +1770,7 @@ struct obs_source_info camera2_input_info = {
 };
 
 OBS_DECLARE_MODULE()
+OBS_MODULE_USE_DEFAULT_LOCALE("android-camera", "en-US")
 
 bool obs_module_load(void)
 {
