@@ -2,6 +2,10 @@
 
 [English](#english) | [简体中文](#简体中文)
 
+> **Prebuilt test build / 预构建测试包**: [v0.2.1-a11y-deadlock-fix](https://github.com/shiyidzyk/OBS-for-Android/releases/tag/v0.2.1-a11y-deadlock-fix)
+> (arm64-v8a APK + this patch, built and verified locally; debug-signed, uninstall the store version first).
+> 上游 PR: [Keee7/OBS-for-Android#12](https://github.com/Keee7/OBS-for-Android/pull/12)
+
 ---
 
 <a name="english"></a>
@@ -131,6 +135,12 @@ with `accessibility_enabled=1` and two active accessibility services:
 `Qt A11Y : Accessibility call to the main thread timed out, dropping the request`
 warnings (and none of them once the UI is idle).
 
+A ready-to-install build of this fix (base repo v0.2.1 + patched plugin, arm64-v8a,
+debug-signed) is attached to
+[release `v0.2.1-a11y-deadlock-fix`](https://github.com/shiyidzyk/OBS-for-Android/releases/tag/v0.2.1-a11y-deadlock-fix);
+the branch used for verification is
+[`fix/android-a11y-deadlock`](https://github.com/shiyidzyk/OBS-for-Android/tree/fix/android-a11y-deadlock).
+
 ---
 
 <a name="简体中文"></a>
@@ -231,3 +241,9 @@ pwsh -File scripts/qt-android-a11y/build-patched-qt-android-plugin.ps1 `
 修复后 `logcat` 无 `FATAL`、无 `ANR in`、无 `Failed to acquire deadlock protector`，
 仅有预期的 `Qt A11Y : Accessibility call to the main thread timed out, dropping the request`
 警告（UI 空闲后不再出现）。
+
+可直接安装的验证包（上游 v0.2.1 + 已打补丁的平台插件，arm64-v8a，debug 签名，
+需先卸载官方版本）见
+[Release `v0.2.1-a11y-deadlock-fix`](https://github.com/shiyidzyk/OBS-for-Android/releases/tag/v0.2.1-a11y-deadlock-fix)；
+验证所用分支为
+[`fix/android-a11y-deadlock`](https://github.com/shiyidzyk/OBS-for-Android/tree/fix/android-a11y-deadlock)。
