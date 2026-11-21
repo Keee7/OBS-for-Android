@@ -1,0 +1,108 @@
+diff --git a/src/plugins/platforms/android/androidjniaccessibility.cpp b/src/plugins/platforms/android/androidjniaccessibility.cpp
+index ab6d17a..6b27288 100644
+--- a/src/plugins/platforms/android/androidjniaccessibility.cpp
++++ b/src/plugins/platforms/android/androidjniaccessibility.cpp
+@@ -20,6 +20,12 @@
+ #include <QtCore/QObject>
+ #include <QtCore/qpointer.h>
+ #include <QtCore/qvarlengtharray.h>
++#include <QtCore/QSemaphore>
++#include <QtCore/QThread>
++
++#include <functional>
++#include <memory>
++#include <utility>
+ 
+ static const char m_qtTag[] = "Qt A11Y";
+ 
+@@ -77,6 +83,15 @@ namespace QtAndroidAccessibility
+             return;
+         }
+ 
++        // If the call already happens on the object's thread, dispatch it directly.
++        // The deadlock protector is not reentrant and it must not be taken here:
++        // running the accessibility query can itself create or resize a window,
++        // which needs the same protector in QAndroidPlatformOpenGLWindow::eglSurface().
++        if (QThread::currentThread() == context->thread()) {
++            *retVal = std::invoke(std::forward<Func>(func));
++            return;
++        }
++
+         QtAndroidPrivate::AndroidDeadlockProtector protector(
+             u"QtAndroidAccessibility::runInObjectContext()"_s);
+         if (!protector.acquire()) {
+@@ -88,7 +103,28 @@ namespace QtAndroidAccessibility
+ 
+         if (!QtAndroid::blockEventLoopsWhenSuspended()
+             || QGuiApplication::applicationState() != Qt::ApplicationSuspended) {
+-            QMetaObject::invokeMethod(context, func, Qt::BlockingQueuedConnection, retVal);
++            // The Android UI thread must never be blocked here for an unbounded
++            // amount of time: the Qt thread may be waiting for that very thread
++            // (e.g. while it waits for a new Android surface to be created), which
++            // turns a blocking call into a process-wide deadlock.
++            struct CallContext {
++                Ret value{};
++                QSemaphore done;
++            };
++            auto callContext = std::make_shared<CallContext>();
++            auto action = std::make_shared<std::decay_t<Func>>(std::forward<Func>(func));
++            const bool posted = QMetaObject::invokeMethod(context, [callContext, action]() {
++                callContext->value = (*action)();
++                callContext->done.release();
++            }, Qt::QueuedConnection);
++            constexpr int timeoutMs = 120;
++            if (posted && callContext->done.tryAcquire(1, timeoutMs)) {
++                *retVal = callContext->value;
++            } else {
++                __android_log_print(ANDROID_LOG_WARN, m_qtTag,
++                                    "Accessibility call to the main thread timed out, "
++                                    "dropping the request");
++            }
+         } else {
+             __android_log_print(ANDROID_LOG_WARN, m_qtTag,
+                                 "Could not run accessibility call in object context, event loop suspended.");
+diff --git a/src/plugins/platforms/android/qandroidplatformopenglwindow.cpp b/src/plugins/platforms/android/qandroidplatformopenglwindow.cpp
+index c205727..3335d2f 100644
+--- a/src/plugins/platforms/android/qandroidplatformopenglwindow.cpp
++++ b/src/plugins/platforms/android/qandroidplatformopenglwindow.cpp
+@@ -10,6 +10,7 @@
+ #include "qandroidplatformscreen.h"
+ 
+ #include <QSurfaceFormat>
++#include <QtCore/QThread>
+ #include <QtGui/private/qwindow_p.h>
+ #include <QtGui/qguiapplication.h>
+ 
+@@ -64,8 +65,30 @@ EGLSurface QAndroidPlatformOpenGLWindow::eglSurface(EGLConfig config)
+     if (!m_androidSurfaceCreated) {
+         static constexpr char funcName[] = "QAndroidPlatformOpenGLWindow::eglSurface()";
+         QtAndroidPrivate::AndroidDeadlockProtector protector(funcName);
+-        if (!protector.acquire()) {
+-            qFatal("Failed to acquire deadlock protector for %s.", funcName);
++        // The accessibility bridge (QtAndroidAccessibility::runInObjectContext())
++        // takes the same process-wide protector before it blocks on this thread.
++        // If it got there first, the Android UI thread is currently waiting for us
++        // and the surface callback can only be delivered from that very thread, so
++        // creating the surface here would deadlock while aborting the application
++        // (qFatal) is far too brutal. Retry instead: the bridge gives up after a
++        // bounded wait (see androidjniaccessibility.cpp), after which we can go on.
++        constexpr int retryIntervalMs = 25;
++        constexpr int retryCount = 24; // ~600 ms
++        bool acquired = false;
++        for (int i = 0; i < retryCount; ++i) {
++            if (QtAndroidPrivate::acquireAndroidDeadlockProtector()) {
++                QtAndroidPrivate::releaseAndroidDeadlockProtector();
++                acquired = protector.acquire();
++                break;
++            }
++            QThread::msleep(retryIntervalMs);
++        }
++        if (!acquired) {
++            qWarning("Failed to acquire deadlock protector for %s, deferring surface creation.",
++                     funcName);
++            // Force a new attempt later on instead of leaving the window unpainted.
++            QWindowSystemInterface::handleExposeEvent(window(),
++                                                      QRect(QPoint(), window()->geometry().size()));
+             return m_eglSurface;
+         }
+ 
