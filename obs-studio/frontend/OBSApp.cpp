@@ -18,7 +18,6 @@
 #include "OBSApp.hpp"
 
 #include <components/Multiview.hpp>
-#include <dialogs/LogUploadDialog.hpp>
 #include <plugin-manager/PluginManager.hpp>
 #include <utility/CrashHandler.hpp>
 #include <utility/OBSEventFilter.hpp>
@@ -1339,7 +1338,7 @@ protected:
 				QWidget *pop = qApp->activePopupWidget();
 				comboPress = nullptr;
 				if (pop && pop->inherits("QComboBoxPrivateContainer")) {
-					obsAndroidDisplayLog("P8-EAT 吃掉这发松手：弹层=%s 立着", pop->metaObject()->className());
+					obsAndroidDisplayLog("P8-EAT 忽略本次触摸释放，保持下拉框打开：%s", pop->metaObject()->className());
 					return true;
 				}
 			}
@@ -1756,16 +1755,22 @@ void OBSApp::AppInit()
 void OBSApp::checkForUncleanShutdown()
 {
 	bool hasUncleanShutdown = crashHandler_->hasUncleanShutdown();
+#ifdef __ANDROID__
+	constexpr bool hasNewCrashLog = false;
+#else
 	bool hasNewCrashLog = crashHandler_->hasNewCrashLog();
+#endif
 
 	if (hasUncleanShutdown) {
 		UncleanLaunchAction launchAction = handleUncleanShutdown(hasNewCrashLog);
 
 		safe_mode = launchAction.useSafeMode;
 
+#ifndef __ANDROID__
 		if (launchAction.sendCrashReport) {
 			crashHandler_->uploadLastCrashLog();
 		}
+#endif
 	}
 }
 
@@ -1925,6 +1930,7 @@ bool OBSApp::OBSInit()
 		[this](Qt::ApplicationState state) { ResetHotkeyState(state == Qt::ApplicationActive); });
 	ResetHotkeyState(applicationState() == Qt::ApplicationActive);
 
+#ifndef __ANDROID__
 	connect(crashHandler_.get(), &OBS::CrashHandler::crashLogUploadFailed, this,
 		[this](const QString &errorMessage) {
 			emit this->logUploadFailed(OBS::LogFileType::CrashLog, errorMessage);
@@ -1932,6 +1938,7 @@ bool OBSApp::OBSInit()
 
 	connect(crashHandler_.get(), &OBS::CrashHandler::crashLogUploadFinished, this,
 		[this](const QString &fileUrl) { emit this->logUploadFinished(OBS::LogFileType::CrashLog, fileUrl); });
+#endif
 
 	return true;
 }
@@ -2035,6 +2042,7 @@ void OBSApp::openCrashLogDirectory() const
 #endif
 }
 
+#ifndef __ANDROID__
 void OBSApp::uploadLastAppLog() const
 {
 	OBSBasic *basicWindow = static_cast<OBSBasic *>(GetMainWindow());
@@ -2069,6 +2077,7 @@ OBS::LogFileState OBSApp::getLogFileState(OBS::LogFileType type) const
 		return OBS::LogFileState::NoState;
 	}
 }
+#endif
 
 bool OBSApp::TranslateString(const char *lookupVal, const char **out) const
 {

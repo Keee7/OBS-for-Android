@@ -20,6 +20,9 @@ OBSLogViewer::OBSLogViewer(QWidget *parent) : QDialog(parent), ui(new Ui::OBSLog
 	setAttribute(Qt::WA_DeleteOnClose);
 
 	ui->setupUi(this);
+#ifdef __ANDROID__
+	ui->openButton->setText(QTStr("LogExport.Title"));
+#endif
 
 	bool showLogViewerOnStartup = config_get_bool(App()->GetUserConfig(), "LogViewer", "ShowLogStartup");
 
@@ -118,6 +121,9 @@ void OBSLogViewer::AddLine(int type, const QString &str)
 
 void OBSLogViewer::on_openButton_clicked()
 {
+#ifdef __ANDROID__
+	obsAndroidExportLog(this, App()->GetCurrentLog());
+#else
 	char logDir[512];
 	if (GetAppConfigPath(logDir, sizeof(logDir), "obs-studio/logs") <= 0) {
 		return;
@@ -129,9 +135,6 @@ void OBSLogViewer::on_openButton_clicked()
 	path += "/";
 	path += log;
 
-#ifdef __ANDROID__
-	obsAndroidShowLocalPath(this, "打开日志文件", QT_UTF8(path.c_str()));
-#else
 	QDesktopServices::openUrl(QUrl::fromLocalFile(QT_UTF8(path.c_str())));
 #endif
 }

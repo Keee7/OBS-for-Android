@@ -318,7 +318,7 @@ public final class ObsDisplayHost {
     public static boolean attach(final Activity act, int x, int y, int w, int h) {
         synchronized (ObsDisplayHost.class) {
             if (hiddenForModal) {
-                lastAction = "attach 被拒：3-3 藏面中（模态窗口/菜单还开着），不建面盖回它上面";
+                lastAction = "attach 已跳过：模态窗口或菜单打开时暂停预览";
                 Log.i(TAG, lastAction);
                 return false;
             }
@@ -762,13 +762,13 @@ public final class ObsDisplayHost {
             if (visible)
                 healStreak = 0; // 重新露面，自愈的连击计数从头算
             if (view == null) {
-                lastAction = "setVisible(" + visible + ")：没有视图可动（未 attach 或已 detach），只记下期望状态";
+                lastAction = "setVisible(" + visible + ")：预览视图不可用，已记录目标状态";
                 Log.i(TAG, lastAction);
                 return false;
             }
             act = activity;
             v = view;
-            lastAction = visible ? "露面（模态窗口/菜单都关了）" : "藏面（有模态窗口或弹出菜单压着）";
+            lastAction = visible ? "显示预览：模态窗口和菜单已关闭" : "隐藏预览：模态窗口或菜单已打开";
         }
         Log.i(TAG, lastAction);
         /* 只投递、不等执行：这个方法是 Qt 主线程在 QApplication::notify() 里每次窗口 Show/Hide

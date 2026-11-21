@@ -281,7 +281,9 @@ private:
 	// TODO: Unused thread pointer, remove.
 	QScopedPointer<QThread> devicePropertiesThread;
 
+#ifndef __ANDROID__
 	QScopedPointer<QThread> logUploadThread;
+#endif
 
 	ConfigFile activeConfiguration;
 
@@ -668,9 +670,11 @@ private slots:
 	void on_actionRemux_triggered();
 	void on_action_Settings_triggered();
 	void on_actionShowMacPermissions_triggered();
+#ifndef __ANDROID__
 	void on_actionShowLogs_triggered();
 	void on_actionUploadCurrentLog_triggered();
 	void on_actionUploadLastLog_triggered();
+#endif
 	void on_actionViewCurrentLog_triggered();
 	void on_actionCheckForUpdates_triggered();
 	void on_actionRepair_triggered();
@@ -678,7 +682,9 @@ private slots:
 	void on_actionRestartSafe_triggered();
 
 	void on_actionShowCrashLogs_triggered();
+#ifndef __ANDROID__
 	void on_actionUploadLastCrashLog_triggered();
+#endif
 
 	void on_OBSBasic_customContextMenuRequested(const QPoint &pos);
 
@@ -701,7 +707,9 @@ private slots:
 
 	void on_resetUI_triggered();
 
+#ifndef __ANDROID__
 	void logUploadFinished(const std::string &text, const std::string &error, OBS::LogFileType uploadType);
+#endif
 
 public slots:
 	void updateCheckFinished();
@@ -715,7 +723,9 @@ public:
 	void CreateEditTransformWindow(obs_sceneitem_t *item);
 	void CreatePropertiesWindow(obs_source_t *source);
 
+#ifndef __ANDROID__
 	void UploadLog(const char *subdir, const char *file, OBS::LogFileType uploadType);
+#endif
 
 	/* -------------------------------------
 	 * MARK: - OBSBasic_MainMenu

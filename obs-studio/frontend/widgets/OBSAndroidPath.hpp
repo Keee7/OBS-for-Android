@@ -12,6 +12,7 @@ class QWidget;
 // 模态框显示 path（标题用 title），并把 path 写进剪贴板。
 // 这个框会走 3-3 的遮挡逻辑（弹出时销毁预览面，关闭后自动重建），不需要额外处理。
 void obsAndroidShowLocalPath(QWidget *parent, const QString &title, const QString &path);
+void obsAndroidExportLog(QWidget *parent, const char *name);
 
 // Scoped-storage destinations use a resolver-owned, seekable file descriptor.
 void obsAndroidStorageInit();

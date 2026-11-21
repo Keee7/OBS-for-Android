@@ -29,6 +29,10 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileSystemWatcher>
+#ifdef __ANDROID__
+#include <QFontDatabase>
+#include <QLocale>
+#endif
 #include <QMetaEnum>
 #include <QRandomGenerator>
 #include <QSet>
@@ -1045,9 +1049,48 @@ static map<string, string> themeMigrations = {
 	{"System", "com.obsproject.System"},
 };
 
+#ifdef __ANDROID__
+static QStringList androidHanFontFamilies(const QLocale &locale)
+{
+	switch (locale.script()) {
+	case QLocale::SimplifiedHanScript:
+		return {QStringLiteral("MiSans VF"), QStringLiteral("Noto Sans CJK SC")};
+	case QLocale::TraditionalHanScript:
+		if (locale.territory() == QLocale::HongKong || locale.territory() == QLocale::Macao) {
+			return {QStringLiteral("Noto Sans CJK HK"), QStringLiteral("Noto Sans CJK TC")};
+		}
+		return {QStringLiteral("Misans TC VF"), QStringLiteral("Noto Sans CJK TC")};
+	case QLocale::JapaneseScript:
+		return {QStringLiteral("Noto Sans CJK JP")};
+	case QLocale::KoreanScript:
+		return {QStringLiteral("Noto Sans CJK KR")};
+	default:
+		return {};
+	}
+}
+
+static void initAndroidHanFontFallback()
+{
+	// The theme's Latin font leaves Han glyph selection to Qt. Prefer fonts
+	// that match the UI locale when a character has multiple regional forms.
+	QStringList families = androidHanFontFamilies(QLocale());
+	if (families.isEmpty()) {
+		families = androidHanFontFamilies(QLocale::system());
+	}
+	families.removeIf([](const QString &family) { return !QFontDatabase::hasFamily(family); });
+	if (!families.isEmpty()) {
+		QFontDatabase::setApplicationFallbackFontFamilies(QChar::Script_Han, families);
+		qInfo("OBS Android Han font fallback: %s", qUtf8Printable(families.join(QStringLiteral(", "))));
+	}
+}
+#endif
+
 bool OBSApp::InitTheme()
 {
 	defaultPalette = palette();
+#ifdef __ANDROID__
+	initAndroidHanFontFallback();
+#endif
 #if !defined(_WIN32) && !defined(__APPLE__)
 	setStyle(new OBSProxyStyle("Fusion"));
 #elif defined(_WIN32)

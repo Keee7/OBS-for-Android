@@ -154,6 +154,14 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 	ui->setupUi(this);
 	ui->previewDisabledWidget->setVisible(false);
 
+#ifdef __ANDROID__
+	ui->menuLogFiles->clear();
+	ui->menuLogFiles->addAction(QTStr("Basic.MainMenu.Help.Logs.ExportCurrentLog"), this,
+				    [this] { obsAndroidExportLog(this, App()->GetCurrentLog()); });
+	ui->menuLogFiles->addAction(QTStr("Basic.MainMenu.Help.Logs.ExportLastLog"), this,
+				    [this] { obsAndroidExportLog(this, App()->GetLastLog()); });
+#endif
+
 	/* Set up streaming connections */
 	connect(
 		this, &OBSBasic::StreamingStarting, this, [this] { this->streamingStarting = true; },
@@ -2084,9 +2092,11 @@ void OBSBasic::closeWindow()
 	if (updateCheckThread) {
 		updateCheckThread->wait();
 	}
+#ifndef __ANDROID__
 	if (logUploadThread) {
 		logUploadThread->wait();
 	}
+#endif
 	if (devicePropertiesThread && devicePropertiesThread->isRunning()) {
 		devicePropertiesThread->wait();
 		devicePropertiesThread.reset();

@@ -20,7 +20,12 @@
 #include "OBSBasic.hpp"
 #include "OBSBasicStats.hpp"
 
+#ifndef __ANDROID__
 #include <dialogs/LogUploadDialog.hpp>
+#include <nlohmann/json.hpp>
+#include <utility/RemoteTextThread.hpp>
+#include <sstream>
+#endif
 #include <dialogs/OBSAbout.hpp>
 #include <dialogs/OBSBasicAdvAudio.hpp>
 #include <dialogs/OBSBasicFilters.hpp>
@@ -39,7 +44,6 @@
 #ifdef _WIN32
 #include <utility/AutoUpdateThread.hpp>
 #endif
-#include <utility/RemoteTextThread.hpp>
 #if defined(_WIN32) || defined(WHATSNEW_ENABLED)
 #include <utility/WhatsNewInfoThread.hpp>
 #endif
@@ -51,10 +55,7 @@
 #include "OBSAndroidPath.hpp" // 3-4：openUrl(本地路径) 的 Android 替代
 #endif
 
-#include <nlohmann/json.hpp>
 #include <QDesktopServices>
-
-#include <sstream>
 
 extern bool restart;
 extern bool restart_safe;
@@ -68,8 +69,10 @@ extern QCef *cef;
 extern QCefCookieManager *panel_cookies;
 
 using namespace std;
+#ifndef __ANDROID__
 using LogUploadDialog = OBS::LogUploadDialog;
 using LogUploadType = OBS::LogFileType;
+#endif
 
 void OBSBasic::CreateInteractionWindow(obs_source_t *source)
 {
@@ -273,6 +276,7 @@ void OBSBasic::on_actionAdvAudioProperties_triggered()
 	advAudioWindow->SetIconsVisible(iconsVisible);
 }
 
+#ifndef __ANDROID__
 static BPtr<char> ReadLogFile(const char *subdir, const char *log)
 {
 	char logDir[512];
@@ -332,11 +336,7 @@ void OBSBasic::on_actionShowLogs_triggered()
 		return;
 	}
 
-#ifdef __ANDROID__
-	obsAndroidShowLocalPath(this, "打开日志文件夹", QT_UTF8(logDir));
-#else
 	QDesktopServices::openUrl(QUrl::fromLocalFile(QT_UTF8(logDir)));
-#endif
 }
 
 void OBSBasic::on_actionUploadCurrentLog_triggered()
@@ -360,6 +360,7 @@ void OBSBasic::on_actionUploadLastLog_triggered()
 
 	ui->menuLogFiles->setEnabled(true);
 }
+#endif
 
 void OBSBasic::on_actionViewCurrentLog_triggered()
 {
@@ -378,6 +379,7 @@ void OBSBasic::on_actionShowCrashLogs_triggered()
 	App()->openCrashLogDirectory();
 }
 
+#ifndef __ANDROID__
 void OBSBasic::on_actionUploadLastCrashLog_triggered()
 {
 	ui->menuCrashLogs->setEnabled(false);
@@ -388,6 +390,7 @@ void OBSBasic::on_actionUploadLastCrashLog_triggered()
 
 	ui->menuCrashLogs->setEnabled(true);
 }
+#endif
 
 void OBSBasic::on_actionCheckForUpdates_triggered()
 {
@@ -421,6 +424,7 @@ void OBSBasic::on_actionRestartSafe_triggered()
 	}
 }
 
+#ifndef __ANDROID__
 void OBSBasic::logUploadFinished(const std::string &text, const std::string &error, LogUploadType uploadType)
 {
 	OBSApp *app = App();
@@ -434,6 +438,7 @@ void OBSBasic::logUploadFinished(const std::string &text, const std::string &err
 		emit app->logUploadFinished(uploadType, QString::fromStdString(logURL));
 	}
 }
+#endif
 
 void OBSBasic::on_actionHelpPortal_triggered()
 {

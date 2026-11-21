@@ -120,7 +120,7 @@ bool obsAndroidUsbRegisterBus(QString *detail)
 	static bool s_bus_registered = false;
 	if (s_bus_registered) {
 		if (detail)
-			*detail = QStringLiteral("USB 总线已注册过（幂等跳过）");
+			*detail = QStringLiteral("USB 回调已注册");
 		return true;
 	}
 	s_bus_registered = true;
@@ -137,7 +137,7 @@ bool obsAndroidUsbRegisterBus(QString *detail)
 	const jboolean ok = QJniObject::callStaticMethod<jboolean>(kUsbHostClass, "install",
 								   "(Landroid/content/Context;)Z", ctx.object<jobject>());
 	if (!ok) {
-		const QString line = QStringLiteral("ObsUsbHost.install() 返回 false —— 该设备没有 USB Host 服务？");
+		const QString line = QStringLiteral("USB 初始化失败，ObsUsbHost.install() 返回 false");
 		if (detail)
 			*detail = line;
 		blog(LOG_WARNING, "OBSAndroidUsb[Android]: %s", line.toUtf8().constData());
@@ -157,7 +157,7 @@ bool obsAndroidUsbRegisterBus(QString *detail)
 				 .arg(QString::fromUtf8(devs[i].label))
 				 .arg(QString::fromUtf8(devs[i].name))
 				 .arg(devs[i].has_permission ? QStringLiteral("有") : QStringLiteral("无"));
-	const QString line = QStringLiteral("USB 总线四条腿已注册（ready=%1 枚举=%2）%3")
+	const QString line = QStringLiteral("USB 设备回调已注册，ready=%1，枚举返回=%2%3")
 				     .arg(obs_android_usb_ready() ? 1 : 0)
 				     .arg(n)
 				     .arg(lines.isEmpty() ? QStringLiteral("") : QStringLiteral("：") + lines.join(QStringLiteral("，")));

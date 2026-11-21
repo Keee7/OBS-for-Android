@@ -13,8 +13,6 @@ target_link_libraries(obs-studio PRIVATE OBS::properties-view)
 target_sources(
   obs-studio
   PRIVATE
-    dialogs/LogUploadDialog.cpp
-    dialogs/LogUploadDialog.hpp
     dialogs/NameDialog.cpp
     dialogs/NameDialog.hpp
     dialogs/OAuthLogin.cpp
@@ -44,3 +42,10 @@ target_sources(
     dialogs/OBSWhatsNew.cpp
     dialogs/OBSWhatsNew.hpp
 )
+
+if(NOT OS_ANDROID)
+  target_sources(
+    obs-studio
+    PRIVATE dialogs/LogUploadDialog.cpp dialogs/LogUploadDialog.hpp forms/LogUploadDialog.ui
+  )
+endif()

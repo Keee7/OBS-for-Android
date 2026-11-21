@@ -115,6 +115,11 @@ def main():
             for path in libs:
                 payload = apk.read(path)
                 short = path.rsplit('/', 1)[-1]
+                if b'obsproject.com/logs/upload' in payload:
+                    errors.append(path + ' includes the OBS log upload endpoint')
+                if short == 'libobs_arm64-v8a.so' and any(marker not in payload for marker in
+                        (b'Basic.MainMenu.Help.Logs.ExportCurrentLog', b'Basic.MainMenu.Help.Logs.ExportLastLog')):
+                    errors.append('Android current or previous log export is missing from APK')
                 if short == 'obs-ffmpeg.so':
                     if b'Select a specific Android MediaCodec component' in payload:
                         errors.append('obs-ffmpeg.so contains the obsolete FFmpeg codec_name patch; rebuild FFmpeg')

@@ -142,9 +142,8 @@ static void onAndroidApplicationChanged(Qt::ApplicationState state)
 {
 	const bool allowed = stateAllowsCapture(state);
 	const bool was = g_captureAllowed.exchange(allowed);
-	blog(LOG_INFO, "OBSAndroidPermissions[Android]: 应用态变了 state=%d（Qt6 qnamespace.h:271-276："
-		       "0=Suspended 1=Hidden 2=Inactive 4=Active），可采集 %d→%d%s",
-	     (int) state, (int) was, (int) allowed, was == allowed ? "（这一格没变）" : "");
+	blog(LOG_INFO, "OBSAndroidPermissions[Android]: 应用状态 state=%d，允许采集 %d → %d", (int)state, (int)was,
+	     (int)allowed);
 }
 
 static const struct obs_android_camera_host kCameraHost = {
@@ -190,8 +189,8 @@ void obsAndroidPermissionsRegisterCameraBus()
 			 &onAndroidApplicationChanged);
 
 	obs_android_set_camera_host(&kCameraHost);
-	blog(LOG_INFO, "OBSAndroidPermissions[Android]: 相机总线三条腿已注册（可采集初值=%d）",
-	     (int) g_captureAllowed.load());
+	blog(LOG_INFO, "OBSAndroidPermissions[Android]: 相机权限和采集状态回调已注册，初始允许采集=%d",
+	     (int)g_captureAllowed.load());
 }
 
 /* ---------------- P-18-a：屏幕采集同意总线（libobs ↔ ObsProjectionHost） ---------------- */
@@ -455,7 +454,7 @@ static bool screenStartAudio(void *param, uint32_t *sample_rate, uint32_t *chann
 		*sample_rate = (uint32_t)rate;
 	if (channels)
 		*channels = (uint32_t)ch;
-	blog(LOG_INFO, "OBSAndroidPermissions[Android]: 内录总线已接上 %dHz×%d（复用缓冲 %d 个 short ≈ 1 秒）",
+	blog(LOG_INFO, "OBSAndroidPermissions[Android]: 系统音频采集已启动，采样率=%dHz，声道=%d，缓冲区=%d 个样本",
 	     (int)rate, (int)ch, (int)g_audioScratchShorts);
 	return true;
 }
@@ -469,7 +468,7 @@ static void screenStopAudio(void *param)
 	QJniObject::callStaticMethod<void>(kProjectionClass, "stopAudio", "()V");
 	audioReleaseScratch();
 	if (had)
-		blog(LOG_INFO, "OBSAndroidPermissions[Android]: 内录总线已断开，Java 侧=%s",
+		blog(LOG_INFO, "OBSAndroidPermissions[Android]: 系统音频采集已停止，Android 状态=%s",
 		     screenDescribe().toUtf8().constData());
 }
 
@@ -617,19 +616,19 @@ void obsAndroidPermissionsRegisterScreenBus()
 	const QJniObject s = QJniObject::callStaticObjectMethod(kProjectionClass, "describe",
 								"()Ljava/lang/String;");
 	const QString line = QStringLiteral(
-				     "屏幕总线九条腿已注册（ready=%1 现读有令牌=%2 尺寸=%3 %4x%5@%6 "
-				     "无令牌时内录起=%7 %8Hz×%9）Java 侧=%10")
+				     "屏幕采集回调已注册，ready=%1，投影已授权=%2，显示尺寸=%3 %4x%5@%6dpi，"
+				     "无授权时系统音频启动结果=%7 %8Hz/%9声道。Android 状态=%10")
 				     .arg(obs_android_screen_ready() ? 1 : 0)
 				     .arg(obs_android_screen_has_consent() ? 1 : 0)
-				     .arg(sized ? QStringLiteral("成") : QStringLiteral("败"))
+				     .arg(sized ? QStringLiteral("读取成功") : QStringLiteral("读取失败"))
 				     .arg(dw)
 				     .arg(dh)
 				     .arg(ddpi)
-				     .arg(audio_up ? QStringLiteral("成（不该）") : QStringLiteral("败（应当）"))
+				     .arg(audio_up ? QStringLiteral("已启动") : QStringLiteral("未启动"))
 				     .arg(arate)
 				     .arg(ach)
 				     .arg(s.isValid() ? s.toString()
-						      : QStringLiteral("describe 调不到（类没进 APK？）"));
+						      : QStringLiteral("无法读取屏幕采集状态"));
 	blog(LOG_INFO, "OBSAndroidPermissions[Android]: %s", line.toUtf8().constData());
 }
 

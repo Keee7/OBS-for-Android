@@ -17,7 +17,9 @@
 
 #pragma once
 
+#ifndef __ANDROID__
 #include <utility/RemoteTextThread.hpp>
+#endif
 
 #include <util/base.h>
 
@@ -42,15 +44,16 @@ private:
 	QUuid appLaunchUUID_;
 	std::filesystem::path crashSentinelFile_;
 
+	bool isSentinelPresent_ = false;
+	bool isActiveCrashHandler_ = false;
+
+#ifndef __ANDROID__
 	TimePoint lastCrashUploadTime_;
 	std::filesystem::path lastCrashLogFile_;
 	std::string lastCrashLogFileName_;
 	std::string lastCrashLogURL_;
-
-	bool isSentinelPresent_ = false;
-	bool isActiveCrashHandler_ = false;
-
 	std::unique_ptr<RemoteTextThread> crashLogUploadThread_;
+#endif
 
 public:
 	CrashHandler() = default;
@@ -63,35 +66,39 @@ public:
 	~CrashHandler();
 
 	bool hasUncleanShutdown();
-	bool hasNewCrashLog();
 	std::filesystem::path getCrashLogDirectory() const;
+
+#ifndef __ANDROID__
+	bool hasNewCrashLog();
 	void uploadLastCrashLog();
 
 	enum class CrashLogUpdateResult { InvalidResult, NotAvailable, NotUpdated, Updated };
+#endif
 
 private:
 	void checkCrashState();
 	void setupSentinel();
 	std::filesystem::path findLastCrashLog() const;
+	PlatformType getPlatformType() const;
 
+#ifndef __ANDROID__
 	CrashLogUpdateResult updateLocalCrashLogState();
 	void updateCrashLogFromConfig();
 	void saveCrashLogToConfig();
 	void uploadCrashLogToServer();
 	void handleExistingCrashLogUpload();
 
-	PlatformType getPlatformType() const;
-
 private slots:
 	void crashLogUploadResultHandler(const std::string &uploadResult, const std::string &error);
-
-	// FIXME: Turn into private slot once OBSBasic does not handle application shutdown duties anymore.
-public slots:
-	void applicationShutdownHandler() noexcept;
 
 signals:
 	void crashLogUploadStarted() const;
 	void crashLogUploadFailed(const QString &errorMessage) const;
 	void crashLogUploadFinished(const QString &crashLogURL) const;
+#endif
+
+	// FIXME: Turn into private slot once OBSBasic does not handle application shutdown duties anymore.
+public slots:
+	void applicationShutdownHandler() noexcept;
 };
 } // namespace OBS

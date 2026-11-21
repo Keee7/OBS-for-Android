@@ -164,14 +164,14 @@ void OBSQTDisplay::releaseDisplay()
 	 * releaseDisplay（主动摘面）→ 预览永久黑屏）。它的 obs_display 早在 display=nullptr 那行
 	 * 交还了，不摘面不会漏任何东西。 */
 	if (!obsAndroidDisplayIsLifecycleOwner(this)) {
-		obsAndroidDisplayLog("releaseDisplay：ctx=%p 不是预览面主人，只交还 obs_display，不碰共享的 SurfaceView",
+		obsAndroidDisplayLog("releaseDisplay：ctx=%p 已释放 obs_display，共用 SurfaceView 仍在使用",
 				     (void *)this);
 		return;
 	}
 
 	QString detachDetail;
 	obsAndroidDisplayDetach(&detachDetail);
-	obsAndroidDisplayLog("releaseDisplay（主动摘面）—— %s | %s", qUtf8Printable(detachDetail),
+	obsAndroidDisplayLog("releaseDisplay：已分离预览 Surface，%s | %s", qUtf8Printable(detachDetail),
 			     qUtf8Printable(obsAndroidDisplayStatus()));
 #endif
 }
@@ -359,12 +359,12 @@ void OBSQTDisplay::onAndroidSurfaceEvent(int what)
 	if (what == ObsAndroidSurfaceRevoked) {
 		androidSuspended = true;
 		releaseDisplay();
-		obsAndroidDisplayLog("B-7 让位：ctx=%p 已交还 obs_display（面归投影仪，Java 面不动）", (void *)this);
+		obsAndroidDisplayLog("B-7 暂停预览：ctx=%p 已释放 obs_display，Surface 已转移至投影仪", (void *)this);
 		return;
 	}
 	if (what == ObsAndroidSurfaceGranted) {
 		androidSuspended = false;
-		obsAndroidDisplayLog("B-7 回位：ctx=%p 重跑 CreateDisplay", (void *)this);
+		obsAndroidDisplayLog("B-7 恢复预览：ctx=%p，开始重建 obs_display", (void *)this);
 		CreateDisplay();
 		return;
 	}
@@ -375,7 +375,7 @@ void OBSQTDisplay::onAndroidSurfaceEvent(int what)
 		if (display) {
 			display = nullptr;
 			androidSerial = -1;
-			obsAndroidDisplayLog("surfaceEvent#%d：Java 现在没有活面 → 销毁 obs_display，渲染线程停手", what);
+			obsAndroidDisplayLog("surfaceEvent#%d：预览 Surface 不可用，已释放 obs_display", what);
 		}
 		return;
 	}
@@ -385,8 +385,8 @@ void OBSQTDisplay::onAndroidSurfaceEvent(int what)
 
 	if (display) {
 		display = nullptr;
-		obsAndroidDisplayLog("surfaceEvent#%d：面换了（serial %d → %d）→ 先拆绑在旧窗口上的 obs_display", what,
-				     androidSerial, serial);
+		obsAndroidDisplayLog("surfaceEvent#%d：Surface 已更新（serial %d → %d），已释放旧 obs_display",
+				     what, androidSerial, serial);
 		androidSerial = -1;
 	}
 

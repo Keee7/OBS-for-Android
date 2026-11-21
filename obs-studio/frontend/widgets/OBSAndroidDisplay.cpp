@@ -77,8 +77,8 @@ bool obsAndroidDisplaySetVisible(bool visible)
 	/* Java 只在状态真的变了才动 view（幂等），所以这里每打一条就是实打实的一轮藏/露；
 	 * false 表示"没有视图可动"（还没 attach 或已 detach），不是错误 —— 例如主窗口还没
 	 * 建好预览时就有模态框弹出。 */
-	obsAndroidDisplayLog("3-3 setVisible(%s) → Java %s", visible ? "true" : "false",
-			     ok ? "已受理" : "拒绝：没有活动视图");
+	obsAndroidDisplayLog("3-3 setVisible(%s)：%s", visible ? "true" : "false",
+			     ok ? "已提交预览可见性更新" : "预览可见性更新失败");
 	return ok != 0;
 }
 
@@ -241,12 +241,12 @@ static bool claimCommon(QObject *ctx, std::function<void(int)> onSurfaceEvent, b
 
 		if (g_lifecycleCtx && g_lifecycleCtx.data() != ctx) {
 			if (!preempt) {
-				obsAndroidDisplayLog("B-8 认领被拒：槽里是 ctx=%p，这次来的 %p 不是预览面的主人 —— 不 attach",
+				obsAndroidDisplayLog("B-8 预览 Surface 正在使用，当前上下文=%p，请求上下文=%p",
 						     (void *)g_lifecycleCtx.data(), (void *)ctx);
 				return false;
 			}
 			if (g_parkedCtx) {
-				obsAndroidDisplayLog("B-7 抢占被拒：槽里 %p、挂起的还有 %p —— 只支持一层倒手，第二个投影仪不给面",
+				obsAndroidDisplayLog("B-7 无法转移预览 Surface，当前上下文=%p，已暂停上下文=%p",
 						     (void *)g_lifecycleCtx.data(), (void *)g_parkedCtx.data());
 				return false;
 			}
@@ -254,7 +254,7 @@ static bool claimCommon(QObject *ctx, std::function<void(int)> onSurfaceEvent, b
 			revokedFn = g_onSurfaceEvent;
 			g_parkedCtx = revokedCtx;
 			g_onParkedEvent = revokedFn;
-			obsAndroidDisplayLog("B-7 让位：现任主人 %p 挂起，新主人 %p 接管（面只有一块）",
+			obsAndroidDisplayLog("B-7 预览 Surface 转移，暂停上下文=%p，新上下文=%p",
 					     (void *)revokedCtx.data(), (void *)ctx);
 		}
 
@@ -265,7 +265,7 @@ static bool claimCommon(QObject *ctx, std::function<void(int)> onSurfaceEvent, b
 	if (revokedCtx)
 		postSurfaceEventTo(revokedCtx.data(), revokedFn, ObsAndroidSurfaceRevoked);
 
-	obsAndroidDisplayLog("B-8 claimLifecycle ctx=%p（%s）", (void *)ctx, preempt ? "抢占接管" : "已认领");
+	obsAndroidDisplayLog("B-8 claimLifecycle ctx=%p，允许转移=%d", (void *)ctx, int(preempt));
 	return true;
 }
 
@@ -288,7 +288,7 @@ void obsAndroidDisplayReleaseLifecycle(QObject *ctx)
 		std::lock_guard<std::mutex> lk(g_lifecycleMutex);
 
 		if (g_lifecycleCtx && g_lifecycleCtx.data() != ctx) {
-			obsAndroidDisplayLog("B-8 releaseLifecycle %p 不是槽主（%p），不清", (void *)ctx,
+			obsAndroidDisplayLog("B-8 releaseLifecycle 跳过释放，请求上下文=%p，当前上下文=%p", (void *)ctx,
 					     (void *)g_lifecycleCtx.data());
 			return;
 		}
@@ -309,12 +309,12 @@ void obsAndroidDisplayReleaseLifecycle(QObject *ctx)
 	}
 
 	if (promoteCtx) {
-		obsAndroidDisplayLog("B-7 回位：预览面还给 %p（等它自己重跑 CreateDisplay）", (void *)promoteCtx.data());
+		obsAndroidDisplayLog("B-7 恢复预览 Surface 上下文=%p", (void *)promoteCtx.data());
 		postSurfaceEventTo(promoteCtx.data(), promoteFn, ObsAndroidSurfaceGranted);
 		return;
 	}
 
-	obsAndroidDisplayLog("B-8 releaseLifecycle ctx=0x0（解绑，之后的 surface 事件没人接）");
+	obsAndroidDisplayLog("B-8 releaseLifecycle 已取消预览 Surface 事件订阅");
 }
 
 bool obsAndroidDisplayIsLifecycleOwner(QObject *ctx)

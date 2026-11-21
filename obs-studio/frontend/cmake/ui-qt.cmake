@@ -33,7 +33,6 @@ target_sources(
     forms/AutoConfigTestPage.ui
     forms/AutoConfigVideoPage.ui
     forms/ColorSelect.ui
-    forms/LogUploadDialog.ui
     forms/OBSAbout.ui
     forms/OBSAdvAudio.ui
     forms/OBSBasic.ui

@@ -2,11 +2,16 @@
 
 #include "OBSAndroidDisplay.hpp" // obsAndroidDisplayLog：与 3-3/3-4 其余探针同一个 tag，一条 logcat 看全
 
+#include <OBSApp.hpp>
 #include <qt-wrappers.hpp> // OBSMessageBox
 
 #include <QApplication>
 #include <QClipboard>
+#include <QDir>
+#include <QFile>
+#include <QFileDialog>
 #include <QJniObject>
+#include <QSaveFile>
 #include <obs-android.h>
 
 static constexpr auto storageClass = "com/obsproject/studio/ObsStorageHost";
@@ -85,4 +90,62 @@ void obsAndroidShowLocalPath(QWidget *parent, const QString &title, const QStrin
 	OBSMessageBox::information(parent, title,
 				   QString("%1\n\n请使用手机的文件管理器查看此位置。%2")
 					   .arg(path, copied ? "\n\n路径已复制到剪贴板，可粘贴到其他应用。" : ""));
+}
+
+void obsAndroidExportLog(QWidget *parent, const char *name)
+{
+	const QString title = QTStr("LogExport.Title");
+	const auto showError = [parent, &title](const QString &message) {
+		OBSMessageBox::warning(parent, title, QTStr("LogExport.Error").arg(message));
+	};
+	char logDir[512];
+	if (!name || !*name || GetAppConfigPath(logDir, sizeof(logDir), "obs-studio/logs") <= 0) {
+		showError(QTStr("LogExport.NoLogFile"));
+		return;
+	}
+
+	const QString fileName = QString::fromUtf8(name);
+	QFile source(QDir(QString::fromUtf8(logDir)).filePath(fileName));
+	if (!source.open(QIODevice::ReadOnly)) {
+		showError(source.errorString());
+		return;
+	}
+
+	const QUrl suggested = QUrl::fromLocalFile(QDir::home().filePath(fileName));
+	const QUrl destination = QFileDialog::getSaveFileUrl(parent, title, suggested, QTStr("LogExport.Filter"));
+	if (destination.isEmpty()) {
+		return;
+	}
+
+	QSaveFile output(destination.isLocalFile() ? destination.toLocalFile() : destination.toString(QUrl::FullyEncoded));
+	output.setDirectWriteFallback(true);
+	if (!output.open(QIODevice::WriteOnly)) {
+		showError(output.errorString());
+		return;
+	}
+
+	const QByteArray utf8Bom = QByteArray::fromHex("efbbbf");
+	if (source.peek(utf8Bom.size()) != utf8Bom && output.write(utf8Bom) != utf8Bom.size()) {
+		showError(output.errorString());
+		return;
+	}
+	while (true) {
+		const QByteArray bytes = source.read(64 * 1024);
+		if (bytes.isEmpty()) {
+			break;
+		}
+		if (output.write(bytes) != bytes.size()) {
+			showError(output.errorString());
+			return;
+		}
+	}
+	if (source.error() != QFileDevice::NoError) {
+		showError(source.errorString());
+		return;
+	}
+	if (!output.commit()) {
+		showError(output.errorString());
+		return;
+	}
+	OBSMessageBox::information(parent, title, QTStr("LogExport.Success"));
 }

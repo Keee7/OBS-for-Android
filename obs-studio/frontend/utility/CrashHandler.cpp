@@ -19,29 +19,36 @@
 #include <OBSApp.hpp>
 #include <qt-wrappers.hpp>
 
+#ifndef __ANDROID__
 #include <nlohmann/json.hpp>
+#include <sstream>
+#endif
 
 #include <fstream>
 #include <iostream>
-#include <sstream>
 #include <string_view>
 
 #include "moc_CrashHandler.cpp"
 
+#ifndef __ANDROID__
 using json = nlohmann::json;
 using CrashLogUpdateResult = OBS::CrashHandler::CrashLogUpdateResult;
+#endif
 
 namespace {
 
 constexpr std::string_view crashSentinelPath = "obs-studio/.sentinel";
 constexpr std::string_view crashSentinelPrefix = "run_";
-constexpr std::string_view crashUploadURL = "https://obsproject.com/logs/upload";
 
 #ifndef NDEBUG
 constexpr bool isSentinelEnabled = false;
 #else
 constexpr bool isSentinelEnabled = true;
 #endif
+
+#ifndef __ANDROID__
+constexpr std::string_view crashUploadURL = "https://obsproject.com/logs/upload";
+static_assert(!crashUploadURL.empty(), "Crash sentinel upload URL cannot be empty");
 
 std::string getCrashLogFileContent(std::filesystem::path crashLogFile)
 {
@@ -92,13 +99,13 @@ std::pair<OBS::TimePoint, std::string> buildCrashLogUploadContent(OBS::PlatformT
 
 	return std::pair<OBS::TimePoint, std::string>(uploadTimePoint, uploadLogMessage.str());
 }
+#endif
 } // namespace
 
 namespace OBS {
 
 static_assert(!crashSentinelPath.empty(), "Crash sentinel path name cannot be empty");
 static_assert(!crashSentinelPrefix.empty(), "Crash sentinel filename prefix cannot be empty");
-static_assert(!crashUploadURL.empty(), "Crash sentinel upload URL cannot be empty");
 
 CrashHandler::CrashHandler(QUuid appLaunchUUID) : appLaunchUUID_(appLaunchUUID)
 {
@@ -119,14 +126,18 @@ CrashHandler::~CrashHandler()
 
 CrashHandler::CrashHandler(CrashHandler &&other) noexcept
 {
+#ifndef __ANDROID__
 	crashLogUploadThread_ = std::exchange(other.crashLogUploadThread_, nullptr);
+#endif
 	isActiveCrashHandler_ = true;
 	other.isActiveCrashHandler_ = false;
 }
 
 CrashHandler &CrashHandler::operator=(CrashHandler &&other) noexcept
 {
+#ifndef __ANDROID__
 	std::swap(crashLogUploadThread_, other.crashLogUploadThread_);
+#endif
 	isActiveCrashHandler_ = true;
 	other.isActiveCrashHandler_ = false;
 	return *this;
@@ -137,6 +148,7 @@ bool CrashHandler::hasUncleanShutdown()
 	return isSentinelEnabled && isSentinelPresent_;
 }
 
+#ifndef __ANDROID__
 bool CrashHandler::hasNewCrashLog()
 {
 	CrashLogUpdateResult result = updateLocalCrashLogState();
@@ -182,6 +194,7 @@ void CrashHandler::uploadLastCrashLog()
 		handleExistingCrashLogUpload();
 	}
 }
+#endif
 
 void CrashHandler::checkCrashState()
 {
@@ -241,6 +254,7 @@ void CrashHandler::setupSentinel()
 	isActiveCrashHandler_ = true;
 }
 
+#ifndef __ANDROID__
 void CrashHandler::updateCrashLogFromConfig()
 {
 	config_t *appConfig = App()->GetAppConfig();
@@ -350,6 +364,7 @@ void CrashHandler::crashLogUploadResultHandler(const std::string &uploadResult, 
 		emit crashLogUploadFailed(jsonErrorMessage);
 	}
 }
+#endif
 
 void CrashHandler::applicationShutdownHandler() noexcept
 {

@@ -186,11 +186,13 @@ public:
 	const char *GetCurrentLog() const;
 
 	void openCrashLogDirectory() const;
+#ifndef __ANDROID__
 	void uploadLastAppLog() const;
 	void uploadCurrentAppLog() const;
 	void uploadLastCrashLog();
 
 	OBS::LogFileState getLogFileState(OBS::LogFileType type) const;
+#endif
 
 	std::string GetVersionString(bool platform = true) const;
 	bool IsPortableMode();
@@ -255,8 +257,10 @@ signals:
 	void logLineAdded(int logLevel, const QString &message);
 	void StyleChanged();
 
+#ifndef __ANDROID__
 	void logUploadFinished(OBS::LogFileType, const QString &fileUrl);
 	void logUploadFailed(OBS::LogFileType, const QString &errorMessage);
+#endif
 };
 
 int GetAppConfigPath(char *path, size_t size, const char *name);
