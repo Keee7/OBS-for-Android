@@ -68,6 +68,7 @@ class VolumeControl;
 class YouTubeAppDock;
 #endif
 class QMessageBox;
+class QRubberBand;
 class QWidgetAction;
 struct QuickTransition;
 
@@ -503,7 +504,19 @@ public:
 private:
 	void ResizeAndroidDocks();
 	void InitAndroidResponsiveLayout();
+	void SetAndroidPhoneDockLayout(bool phone);
+	void ApplyAndroidPhoneDockOrder();
+	void UpdateAndroidControlColumns(bool phone);
+	void CancelAndroidDockDrag();
+	bool eventFilter(QObject *watched, QEvent *event) override;
 	QTimer *androidLayoutResizeTimer = nullptr;
+	QSize androidDockViewport;
+	QByteArray androidRegularDockLayout;
+	QList<QDockWidget *> androidMainDocks;
+	QList<QDockWidget *> androidPhoneDocks;
+	QPointer<QDockWidget> androidDraggedDock;
+	QPoint androidDockDragStart;
+	QRubberBand *androidDockDropIndicator = nullptr;
 #endif
 
 private slots:
@@ -1474,6 +1487,9 @@ private:
 	QPointer<QVBoxLayout> programLayout;
 	QPointer<QLabel> programLabel;
 	QPointer<QWidget> programOptions;
+#ifdef __ANDROID__
+	QPointer<QWidget> androidStudioOptionsScroll;
+#endif
 	QPointer<OBSQTDisplay> program;
 	OBSWeakSource lastProgramScene;
 

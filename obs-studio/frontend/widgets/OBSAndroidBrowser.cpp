@@ -4,14 +4,18 @@
 #include <QJniObject>
 #include <QJniEnvironment>
 #include <android/hardware_buffer_jni.h>
+#include <climits>
 #include <cstdint>
 
 static constexpr auto hostClass = "com/obsproject/studio/ObsBrowserHost";
 struct BrowserHandle {
 	QJniObject object;
+	jshortArray audioScratch = nullptr;
+	jsize audioScratchShorts = 0;
+	jintArray audioFormat = nullptr;
 };
 static void *createBrowser(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css,
-			   bool transparent)
+			   bool transparent, bool rerouteAudio)
 {
 	QJniObject context = QJniObject::callStaticObjectMethod("org/qtproject/qt/android/QtNative", "getContext",
 								"()Landroid/content/Context;");
@@ -22,9 +26,9 @@ static void *createBrowser(uint32_t texture, uint32_t width, uint32_t height, co
 	auto jcss = QJniObject::fromString(QString::fromUtf8(css ? css : ""));
 	auto object = QJniObject::callStaticObjectMethod(
 		hostClass, "create",
-		"(Landroid/content/Context;IIILjava/lang/String;Ljava/lang/String;Z)Lcom/obsproject/studio/ObsBrowserHost;",
+		"(Landroid/content/Context;IIILjava/lang/String;Ljava/lang/String;ZZ)Lcom/obsproject/studio/ObsBrowserHost;",
 		context.object<jobject>(), jint(texture), jint(width), jint(height), jurl.object<jstring>(),
-		jcss.object<jstring>(), jboolean(transparent));
+		jcss.object<jstring>(), jboolean(transparent), jboolean(rerouteAudio));
 	if (!object.isValid()) {
 		return nullptr;
 	}
@@ -71,14 +75,77 @@ static void touchBrowser(void *ptr, int x, int y, int action)
 {
 	static_cast<BrowserHandle *>(ptr)->object.callMethod<void>("touch", "(III)V", jint(x), jint(y), jint(action));
 }
+static uint32_t readBrowserAudio(void *ptr, int16_t *out, uint32_t max_frames, uint32_t *sample_rate,
+				 uint32_t *channels)
+{
+	auto *h = static_cast<BrowserHandle *>(ptr);
+	if (!h || !out || max_frames == 0)
+		return 0;
+	QJniEnvironment env;
+	if (!env.jniEnv())
+		return 0;
+	if (max_frames > uint32_t(INT_MAX / 2))
+		max_frames = uint32_t(INT_MAX / 2);
+	if (!h->audioFormat) {
+		jintArray fmtArr = env->NewIntArray(2);
+		if (!fmtArr)
+			return 0;
+		h->audioFormat = static_cast<jintArray>(env->NewGlobalRef(fmtArr));
+		env->DeleteLocalRef(fmtArr);
+		if (!h->audioFormat)
+			return 0;
+	}
+	const jsize needShorts = jsize(max_frames * 2);
+	if (!h->audioScratch || h->audioScratchShorts < needShorts) {
+		if (h->audioScratch) {
+			env->DeleteGlobalRef(h->audioScratch);
+			h->audioScratch = nullptr;
+			h->audioScratchShorts = 0;
+		}
+		jshortArray scratch = env->NewShortArray(needShorts);
+		if (!scratch)
+			return 0;
+		h->audioScratch = static_cast<jshortArray>(env->NewGlobalRef(scratch));
+		env->DeleteLocalRef(scratch);
+		if (!h->audioScratch)
+			return 0;
+		h->audioScratchShorts = needShorts;
+	}
+	const jint got = h->object.callMethod<jint>("drainAudio", "([SI[I)I", h->audioScratch, jint(max_frames),
+						   h->audioFormat);
+	if (got <= 0)
+		return 0;
+	jint fmt[2] = {0, 0};
+	env->GetIntArrayRegion(h->audioFormat, 0, 2, fmt);
+	if (fmt[0] <= 0 || (fmt[1] != 1 && fmt[1] != 2))
+		return 0;
+	uint32_t frames = uint32_t(got);
+	if (frames > max_frames)
+		frames = max_frames;
+	env->GetShortArrayRegion(h->audioScratch, 0, jsize(frames * uint32_t(fmt[1])), reinterpret_cast<jshort *>(out));
+	if (sample_rate)
+		*sample_rate = uint32_t(fmt[0]);
+	if (channels)
+		*channels = uint32_t(fmt[1]);
+	return frames;
+}
 static void destroyBrowser(void *ptr)
 {
 	auto *h = static_cast<BrowserHandle *>(ptr);
 	h->object.callMethod<void>("close");
+	QJniEnvironment env;
+	if (env.jniEnv()) {
+		if (h->audioScratch)
+			env->DeleteGlobalRef(h->audioScratch);
+		if (h->audioFormat)
+			env->DeleteGlobalRef(h->audioFormat);
+	}
+	h->audioScratch = nullptr;
+	h->audioFormat = nullptr;
 	delete h;
 }
 static const obs_android_browser_host host = {createBrowser, takeBrowserBuffer, updateBrowser, reloadBrowser,
-					      visibleBrowser, touchBrowser,     destroyBrowser};
+					      visibleBrowser, touchBrowser,     destroyBrowser, readBrowserAudio};
 bool OBSAndroidBrowserInit()
 {
 	obs_android_set_browser_host(&host);

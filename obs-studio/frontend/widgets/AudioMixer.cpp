@@ -119,7 +119,11 @@ AudioMixer::AudioMixer(QWidget *parent) : QFrame(parent)
 	vMixerScrollArea = new QScrollArea(this);
 	vMixerScrollArea->setObjectName("vMixerScrollArea");
 	vMixerScrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+#ifdef __ANDROID__
+	vMixerScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+#else
 	vMixerScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+#endif
 	vMixerScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 	vMixerScrollArea->setWidgetResizable(true);
 	vMixerScrollArea->setContextMenuPolicy(Qt::ContextMenuPolicy::CustomContextMenu);
@@ -749,10 +753,26 @@ void AudioMixer::updateVolumeLayouts()
 	hMixerScrollArea->setWidgetResizable(true);
 
 	int scrollBarSize = QApplication::style()->pixelMetric(QStyle::PM_ScrollBarExtent);
-	stackedMixerArea->setMinimumSize(minimumSize.width() + scrollBarSize, minimumSize.height() + scrollBarSize);
+	int minimumWidth = minimumSize.width() + scrollBarSize;
+	int minimumHeight = minimumSize.height() + scrollBarSize;
+#ifdef __ANDROID__
+	minimumWidth = qMin(minimumWidth, 140);
+	minimumHeight = qMin(minimumHeight, phoneLayout ? 72 : 110);
+#endif
+	stackedMixerArea->setMinimumSize(minimumWidth, minimumHeight);
 
 	setUpdatesEnabled(true);
 }
+
+#ifdef __ANDROID__
+void AudioMixer::setPhoneLayout(bool phone)
+{
+	if (phoneLayout == phone)
+		return;
+	phoneLayout = phone;
+	updateVolumeLayouts();
+}
+#endif
 
 void AudioMixer::mixerContextMenuRequested()
 {

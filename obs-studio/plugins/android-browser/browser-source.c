@@ -25,10 +25,11 @@ MODULE_EXPORT const char *obs_module_description(void)
 }
 
 struct browser_source {
+	obs_source_t *source;
 	pthread_mutex_t mutex;
 	uint32_t width, height, fps;
 	char *url, *css;
-	bool transparent;
+	bool transparent, reroute_audio;
 	long alpha_mode;
 	bool dirty, reload, probed;
 	/* Transparent sources take the ImageReader path; see render(). */
@@ -38,9 +39,76 @@ struct browser_source {
 	gs_android_external_texture_t *external;
 	gs_texture_t *image;
 	void *host;
+	pthread_mutex_t audio_mutex; /* Lock order: mutex -> audio_mutex; audio thread never takes mutex. */
+	void *audio_host;
+	pthread_t audio_thread;
+	bool audio_thread_started;
+	bool audio_quit;
+	pthread_cond_t audio_ready;
 };
+static void *audio_pump_thread(void *param)
+{
+	struct browser_source *s = param;
+	int16_t pcm[1024 * 2];
+	uint64_t ts = 0;
+	uint32_t last_rate = 0;
+	bool first_nonzero_logged = false;
+
+	for (;;) {
+		uint32_t rate = 0, ch = 0, got = 0;
+		pthread_mutex_lock(&s->audio_mutex);
+		while (!s->audio_host && !s->audio_quit)
+			pthread_cond_wait(&s->audio_ready, &s->audio_mutex);
+		if (s->audio_quit) {
+			pthread_mutex_unlock(&s->audio_mutex);
+			break;
+		}
+		got = obs_android_browser_read_audio(s->audio_host, pcm, 1024, &rate, &ch);
+		pthread_mutex_unlock(&s->audio_mutex);
+
+		if (got == 0) {
+			os_sleep_ms(10);
+			continue;
+		}
+		if (rate == 0 || (ch != 1 && ch != 2))
+			continue;
+
+		int peak = 0;
+		for (uint32_t i = 0; i < got * ch; i++) {
+			int v = pcm[i] < 0 ? -(int)pcm[i] : (int)pcm[i];
+			if (v > peak)
+				peak = v;
+		}
+		if (peak > 0 && !first_nonzero_logged) {
+			first_nonzero_logged = true;
+			blog(LOG_INFO, "android-browser: first non-zero audio packet (%uHz x %uch, peak=%d/32767)",
+			     (unsigned)rate, (unsigned)ch, peak);
+		}
+
+		const uint64_t now = os_gettime_ns();
+		if (ts == 0 || rate != last_rate || now > ts + 100000000ULL || ts > now + 100000000ULL) {
+			ts = now;
+			last_rate = rate;
+		}
+
+		struct obs_source_audio out = {0};
+		out.data[0] = (const uint8_t *)pcm;
+		out.frames = got;
+		out.speakers = (ch == 1) ? SPEAKERS_MONO : SPEAKERS_STEREO;
+		out.format = AUDIO_FORMAT_16BIT;
+		out.samples_per_sec = rate;
+		out.timestamp = ts;
+		obs_source_output_audio(s->source, &out);
+
+		ts += (uint64_t)got * 1000000000ULL / (uint64_t)rate;
+	}
+	return NULL;
+}
 static void close_graphics(struct browser_source *s)
 {
+	pthread_mutex_lock(&s->audio_mutex);
+	s->audio_host = NULL;
+	pthread_mutex_unlock(&s->audio_mutex);
 	if (s->host)
 		obs_android_browser_destroy(s->host);
 	s->host = NULL;
@@ -76,6 +144,7 @@ static void update(void *data, obs_data_t *settings)
 	const char *url = obs_data_get_string(settings, "url");
 	const char *css = obs_data_get_string(settings, "css");
 	const bool transparent = obs_data_get_bool(settings, "transparent");
+	const bool reroute = obs_data_get_bool(settings, "reroute_audio");
 	long alpha = (long)obs_data_get_int(settings, "alpha_mode");
 	if (alpha < BROWSER_ALPHA_COMPAT || alpha > BROWSER_ALPHA_PREMULTIPLIED)
 		alpha = BROWSER_ALPHA_COMPAT;
@@ -97,14 +166,45 @@ static void update(void *data, obs_data_t *settings)
 		s->retry_at = 0;
 		s->status = 0;
 	}
+	if (s->reroute_audio != reroute) {
+		s->reroute_audio = reroute;
+		// Recreate the page when switching the browser's audio graph.
+		s->dirty = true;
+		s->retry_at = 0;
+		pthread_mutex_lock(&s->audio_mutex);
+		s->audio_host = NULL;
+		pthread_mutex_unlock(&s->audio_mutex);
+	}
+	if (reroute && !s->audio_thread_started) {
+		if (pthread_create(&s->audio_thread, NULL, audio_pump_thread, s) == 0) {
+			s->audio_thread_started = true;
+			s->dirty = true;
+			s->retry_at = 0;
+		} else {
+			blog(LOG_WARNING, "android-browser: failed to create audio pump thread");
+		}
+	}
 	s->fps = (uint32_t)fps;
+	const bool audioActive = reroute && s->audio_thread_started;
 	pthread_mutex_unlock(&s->mutex);
+	obs_source_set_audio_active(s->source, audioActive);
 }
 static void *create(obs_data_t *settings, obs_source_t *source)
 {
-	UNUSED_PARAMETER(source);
 	struct browser_source *s = bzalloc(sizeof(*s));
+	s->source = source;
 	if (pthread_mutex_init(&s->mutex, NULL)) {
+		bfree(s);
+		return NULL;
+	}
+	if (pthread_mutex_init(&s->audio_mutex, NULL)) {
+		pthread_mutex_destroy(&s->mutex);
+		bfree(s);
+		return NULL;
+	}
+	if (pthread_cond_init(&s->audio_ready, NULL)) {
+		pthread_mutex_destroy(&s->audio_mutex);
+		pthread_mutex_destroy(&s->mutex);
 		bfree(s);
 		return NULL;
 	}
@@ -114,11 +214,20 @@ static void *create(obs_data_t *settings, obs_source_t *source)
 static void destroy(void *data)
 {
 	struct browser_source *s = data;
+	if (s->audio_thread_started) {
+		pthread_mutex_lock(&s->audio_mutex);
+		s->audio_quit = true;
+		pthread_cond_signal(&s->audio_ready);
+		pthread_mutex_unlock(&s->audio_mutex);
+		pthread_join(s->audio_thread, NULL);
+	}
 	obs_enter_graphics();
 	pthread_mutex_lock(&s->mutex);
 	close_graphics(s);
 	pthread_mutex_unlock(&s->mutex);
 	obs_leave_graphics();
+	pthread_cond_destroy(&s->audio_ready);
+	pthread_mutex_destroy(&s->audio_mutex);
 	pthread_mutex_destroy(&s->mutex);
 	bfree(s->url);
 	bfree(s->css);
@@ -188,9 +297,15 @@ static void render(void *data, gs_effect_t *effect)
 			const uint32_t texture =
 				s->reader_mode ? 0 : gs_android_external_texture_get_id(s->external);
 			s->host = obs_android_browser_create(texture, s->width, s->height, s->url, s->css,
-							     s->transparent);
+							     s->transparent, s->reroute_audio && s->audio_thread_started);
 		}
 		if (s->host) {
+			if (s->reroute_audio && s->audio_thread_started) {
+				pthread_mutex_lock(&s->audio_mutex);
+				s->audio_host = s->host;
+				pthread_cond_signal(&s->audio_ready);
+				pthread_mutex_unlock(&s->audio_mutex);
+			}
 			s->started_at = now;
 			s->status = 0;
 		}
@@ -346,6 +461,7 @@ static void defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "height", 720);
 	obs_data_set_default_int(settings, "fps", 30);
 	obs_data_set_default_bool(settings, "transparent", false);
+	obs_data_set_default_bool(settings, "reroute_audio", false);
 	obs_data_set_default_int(settings, "alpha_mode", BROWSER_ALPHA_COMPAT);
 }
 static bool refresh(obs_properties_t *props, obs_property_t *property, void *data)
@@ -377,6 +493,8 @@ static obs_properties_t *properties(void *data)
 	obs_properties_add_int(p, "fps", obs_module_text("FPS"), 1, 60, 1);
 	obs_property_t *transparent = obs_properties_add_bool(p, "transparent", obs_module_text("Transparent"));
 	obs_property_set_long_description(transparent, obs_module_text("Transparent.Description"));
+	obs_property_t *audio = obs_properties_add_bool(p, "reroute_audio", obs_module_text("RerouteAudio"));
+	obs_property_set_long_description(audio, obs_module_text("RerouteAudio.Description"));
 	obs_property_t *alpha = obs_properties_add_list(p, "alpha_mode", obs_module_text("AlphaMode"),
 							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(alpha, obs_module_text("AlphaMode.Compat"), BROWSER_ALPHA_COMPAT);
@@ -390,7 +508,7 @@ static obs_properties_t *properties(void *data)
 static struct obs_source_info info = {
 	.id = "android_browser_source",
 	.type = OBS_SOURCE_TYPE_INPUT,
-	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_INTERACTION,
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_INTERACTION,
 	.get_name = name,
 	.create = create,
 	.destroy = destroy,

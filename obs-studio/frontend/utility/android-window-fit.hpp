@@ -59,9 +59,10 @@ inline AndroidFitResult androidFitTopLevelToScreen(QWidget *w)
 	if (!w || !w->isWindow())
 		return r;
 
-	/* 弹层/工具提示不参与：它们的位置由 Qt 相对锚点算，硬压进来反而错位。 */
+	/* 弹层/工具提示/正在拖动的 dock 不参与：弹层位置由 Qt 相对锚点算，dock 由 QMainWindowLayout 管理。 */
 	const Qt::WindowFlags flags = w->windowFlags();
-	if (flags.testFlag(Qt::Popup) || flags.testFlag(Qt::ToolTip))
+	if (flags.testFlag(Qt::Popup) || flags.testFlag(Qt::ToolTip) || w->inherits("QDockWidget") ||
+	    w->inherits("QDockWidgetGroupWindow"))
 		return r;
 
 	const QScreen *scr = w->screen();

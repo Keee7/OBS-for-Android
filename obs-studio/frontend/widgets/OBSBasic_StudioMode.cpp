@@ -31,7 +31,7 @@
 
 void OBSBasic::CreateProgramDisplay()
 {
-	program = new OBSQTDisplay();
+	program = new OBSQTDisplay(programWidget);
 
 	program->setContextMenuPolicy(Qt::CustomContextMenu);
 	connect(program.data(), &QWidget::customContextMenuRequested, this, &OBSBasic::ProgramViewContextMenuRequested);
@@ -196,6 +196,7 @@ void OBSBasic::SetPreviewProgramMode(bool enabled)
 			EnablePreviewDisplay(true);
 		}
 
+		programWidget = new QWidget(this);
 		CreateProgramDisplay();
 		CreateProgramOptions();
 
@@ -227,7 +228,6 @@ void OBSBasic::SetPreviewProgramMode(bool enabled)
 		programLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
 		programLabel->setProperty("class", "label-preview-title");
 
-		programWidget = new QWidget();
 		programLayout = new QVBoxLayout();
 		programLayout->setContentsMargins(0, 0, 0, 0);
 		programLayout->setSpacing(0);
@@ -257,6 +257,9 @@ void OBSBasic::SetPreviewProgramMode(bool enabled)
 		}
 		TransitionToScene(actualProgramScene, true);
 
+#ifdef __ANDROID__
+		delete androidStudioOptionsScroll;
+#endif
 		delete programOptions;
 		delete program;
 		delete programLabel;

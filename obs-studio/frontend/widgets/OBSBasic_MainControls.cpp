@@ -53,6 +53,7 @@
 
 #ifdef __ANDROID__
 #include "OBSAndroidPath.hpp" // 3-4：openUrl(本地路径) 的 Android 替代
+#include <QScrollArea>
 #endif
 
 #include <QDesktopServices>
@@ -97,19 +98,7 @@ void OBSBasic::CreatePropertiesWindow(obs_source_t *source)
 		 * 上游语义要求此时保留原窗口，直接返回。 */
 		if (!properties->close())
 			return;
-		/* close() 成功**不等于窗口已经没了**：WA_DeleteOnClose 只是排了一个
-		 * deleteLater，真正析构要等事件循环。
-		 * 若这时立刻 new 一个新窗口，旧的会以"已关闭但仍然存在"的僵尸态留在
-		 * 顶层窗列表里。实测（小米平板 25053RP5CC / Android 16，2026-11-08）
-		 * 顶层窗清单里会同时出现**两个** OBSBasicProperties：
-		 *   cls=OBSBasicProperties ... vis=1
-		 *   cls=OBSBasicProperties ... vis=0
-		 * 而 3-3 的遮挡判据（androidSyncPreviewVisibility）把"有顶层窗在场"当成
-		 * 该藏面，于是预览面被永久挡住 ⇒ **双击源就黑屏**。
-		 * 桌面端无所谓（不影响渲染），Android 上致命。
-		 * ⇒ 当场把旧的删掉，别留到下一轮事件循环。先摘掉 WA_DeleteOnClose，
-		 *   免得和已排队的 DeferredDelete 重复删除（QObject 析构本身也会清掉
-		 *   自己挂着的 posted events，这里是显式写清楚意图）。 */
+		// Close may leave the old dialog queued for deletion. Dispose of it before creating a new one.
 		properties->setAttribute(Qt::WA_DeleteOnClose, false);
 		delete properties; // QPointer 随之置空
 	}
@@ -145,6 +134,44 @@ void OBSBasic::ResetUI()
 {
 	bool studioPortraitLayout = config_get_bool(App()->GetUserConfig(), "BasicWindow", "StudioPortraitLayout");
 
+#ifdef __ANDROID__
+	if (programOptions) {
+		auto *options = static_cast<QVBoxLayout *>(programOptions->layout());
+		const bool phone = !androidRegularDockLayout.isEmpty();
+		studioPortraitLayout |= phone;
+		options->setDirection(phone ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
+		if (phone)
+			options->setContentsMargins(4, 2, 4, 2);
+		else
+			options->setContentsMargins(-1, -1, -1, -1);
+		if (tBar)
+			tBar->setMinimumWidth(phone ? 120 : 0);
+		options->invalidate();
+		options->activate();
+		if (phone) {
+			auto *scroll = static_cast<QScrollArea *>(androidStudioOptionsScroll.data());
+			if (!scroll) {
+				scroll = new QScrollArea(this);
+				scroll->setFrameShape(QFrame::NoFrame);
+				scroll->setWidgetResizable(true);
+				scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+				// The scrollbar handles horizontal scrolling so buttons and
+				// the T-bar can receive their own touch gestures.
+				delete ui->previewLayout->replaceWidget(programOptions, scroll);
+				ui->previewLayout->setAlignment(scroll, {});
+				scroll->setWidget(programOptions);
+				androidStudioOptionsScroll = scroll;
+			}
+			scroll->setFixedHeight(programOptions->minimumSizeHint().height() +
+					       scroll->style()->pixelMetric(QStyle::PM_ScrollBarExtent));
+		} else if (auto *scroll = static_cast<QScrollArea *>(androidStudioOptionsScroll.data())) {
+			scroll->takeWidget();
+			delete ui->previewLayout->replaceWidget(scroll, programOptions);
+			ui->previewLayout->setAlignment(programOptions, Qt::AlignCenter);
+			delete scroll;
+		}
+	}
+#endif
 	if (studioPortraitLayout) {
 		ui->previewLayout->setDirection(QBoxLayout::BottomToTop);
 	} else {

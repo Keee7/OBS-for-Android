@@ -38,6 +38,9 @@ OBSBasicStatusBar::OBSBasicStatusBar(QWidget *parent)
 
 	addPermanentWidget(statusWidget, 1);
 	setMinimumHeight(statusWidget->height());
+#ifdef __ANDROID__
+	regularMinimumHeight = statusWidget->minimumHeight();
+#endif
 
 	UpdateIcons();
 	connect(App(), &OBSApp::StyleChanged, this, &OBSBasicStatusBar::UpdateIcons);
@@ -48,6 +51,19 @@ OBSBasicStatusBar::OBSBasicStatusBar(QWidget *parent)
 
 	clearMessage();
 }
+
+#ifdef __ANDROID__
+void OBSBasicStatusBar::SetAndroidPhoneLayout(bool phone)
+{
+	const int minimum = phone ? 0 : regularMinimumHeight;
+	statusWidget->setMinimumHeight(minimum);
+	setMinimumHeight(minimum);
+	setStyleSheet(phone ? QStringLiteral("OBSBasicStatusBar { margin-top: 0px; }"
+					    "StatusBarWidget > QFrame { padding: 0px 4px; }")
+			    : QString());
+	setSizeGripEnabled(!phone);
+}
+#endif
 
 void OBSBasicStatusBar::Activate()
 {

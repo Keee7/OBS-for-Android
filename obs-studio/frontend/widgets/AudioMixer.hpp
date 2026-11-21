@@ -53,6 +53,9 @@ public:
 	void setMixerLayoutVertical(bool vertical);
 	void createMixerContextMenu();
 	void showMixerContextMenu();
+#ifdef __ANDROID__
+	void setPhoneLayout(bool phone);
+#endif
 
 private:
 	std::vector<OBSSignal> signalHandlers;
@@ -77,6 +80,9 @@ private:
 	bool keepHiddenLast{false};
 
 	bool showToolbar{true};
+#ifdef __ANDROID__
+	bool phoneLayout = false;
+#endif
 
 	QVBoxLayout *mainLayout{nullptr};
 

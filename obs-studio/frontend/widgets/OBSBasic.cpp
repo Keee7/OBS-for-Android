@@ -1274,8 +1274,9 @@ void OBSBasic::OBSInit()
 	if (!hideWindowOnStart) {
 #ifdef __ANDROID__
 		// Android's Activity owns the available area, including freeform and
-		// split-screen bounds. Do not leave the content at a saved desktop
-		// normal-window size when the Activity is larger.
+		// split-screen bounds. Dock minimum sizes must not resize the window.
+		layout()->setSizeConstraint(QLayout::SetNoConstraint);
+		setMinimumSize(0, 0);
 		showMaximized();
 		QTimer::singleShot(0, this, [this] {
 			const QRect available = screen()->availableGeometry();
@@ -1981,8 +1982,12 @@ void OBSBasic::saveAll()
 		Auth::Save();
 		SaveProjectNow();
 
-		config_set_string(App()->GetUserConfig(), "BasicWindow", "DockState",
-				  saveState().toBase64().constData());
+#ifdef __ANDROID__
+		const QByteArray dockState = androidRegularDockLayout.isEmpty() ? saveState() : androidRegularDockLayout;
+#else
+		const QByteArray dockState = saveState();
+#endif
+		config_set_string(App()->GetUserConfig(), "BasicWindow", "DockState", dockState.toBase64().constData());
 
 #ifdef BROWSER_AVAILABLE
 		if (cef) {

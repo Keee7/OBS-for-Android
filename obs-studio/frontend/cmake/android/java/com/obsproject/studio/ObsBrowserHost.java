@@ -2,6 +2,7 @@ package com.obsproject.studio;
 
 import android.app.Presentation;
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.SurfaceTexture;
@@ -16,12 +17,14 @@ import android.hardware.display.VirtualDisplay;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.util.Base64;
 import android.util.Log;
 import android.view.Surface;
 import android.view.MotionEvent;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -34,10 +37,173 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** One offscreen browser per OBS source. No MediaProjection or CPU frame copy. */
 public final class ObsBrowserHost {
     private static final String TAG = "OBS-browser";
+    private static final int AUDIO_PACKET_FRAMES = 1024;
+    private static final String AUDIO_HOOK_JS =
+            "(function(){" +
+            "if(window.__obsAudioHooked){if(window.__obsScanMedia)window.__obsScanMedia();return;}" +
+            "window.__obsAudioHooked=true;" +
+            "var AC=window.AudioContext||window.webkitAudioContext;" +
+            "if(!AC)return;" +
+            "var origConnect=AudioNode.prototype.connect;" +
+            "var origDisconnect=AudioNode.prototype.disconnect;" +
+            "function getTap(ctx){" +
+            "if(ctx.__obsTap)return ctx.__obsTap;" +
+            "var gain=ctx.createGain();" +
+            "var proc=ctx.createScriptProcessor(1024,2,2);" +
+            "var silentTail=0;" +
+            "proc.onaudioprocess=function(ev){" +
+            "var inBuf=ev.inputBuffer,outBuf=ev.outputBuffer;" +
+            "var nCh=inBuf.numberOfChannels;" +
+            "var L=inBuf.getChannelData(0);" +
+            "var R=nCh>1?inBuf.getChannelData(1):L;" +
+            "var len=L.length,outCh=outBuf.numberOfChannels;" +
+            "for(var c=0;c<outCh;c++)outBuf.getChannelData(c).fill(0);" +
+            "var maxAbs=0;" +
+            "for(var i=0;i<len;i++){" +
+            "var a=Math.abs(L[i]),b=Math.abs(R[i]);" +
+            "if(a>maxAbs)maxAbs=a;if(b>maxAbs)maxAbs=b;" +
+            "}" +
+            "if(maxAbs>1e-5){silentTail=10;}" +
+            "else if(silentTail>0){silentTail--;}" +
+            "else{return;}" +
+            "var pcm=new Int16Array(len*2);" +
+            "for(var j=0;j<len;j++){" +
+            "var sl=L[j];if(sl>1)sl=1;else if(sl<-1)sl=-1;" +
+            "var sr=R[j];if(sr>1)sr=1;else if(sr<-1)sr=-1;" +
+            "pcm[j*2]=sl<0?(sl*32768)|0:(sl*32767)|0;" +
+            "pcm[j*2+1]=sr<0?(sr*32768)|0:(sr*32767)|0;" +
+            "}" +
+            "var bytes=new Uint8Array(pcm.buffer),bin='';" +
+            "for(var k=0;k<bytes.length;k+=1024){" +
+            "bin+=String.fromCharCode.apply(null,bytes.subarray(k,Math.min(k+1024,bytes.length)));" +
+            "}" +
+            "try{if(window.__obsAudio&&window.__obsAudio.pushPcm){" +
+            "window.__obsAudio.pushPcm(btoa(bin),Math.round(ctx.sampleRate)||48000,2);" +
+            "}}catch(e){}" +
+            "};" +
+            "origConnect.call(gain,proc);" +
+            "origConnect.call(proc,ctx.destination);" +
+            "ctx.__obsTap={gain:gain,proc:proc};" +
+            "return ctx.__obsTap;" +
+            "}" +
+            "AudioNode.prototype.connect=function(dest){" +
+            "var ctx=this.context;" +
+            "if(ctx&&dest===ctx.destination){" +
+            "var tap=getTap(ctx);" +
+            "if(this!==tap.proc){" +
+            "if(ctx.state==='suspended'&&ctx.resume)ctx.resume().catch(function(){});" +
+            "origConnect.call(this,tap.gain,arguments.length>1?arguments[1]:0,0);" +
+            "return dest;" +
+            "}}" +
+            "return origConnect.apply(this,arguments);" +
+            "};" +
+            "AudioNode.prototype.disconnect=function(dest){" +
+            "var ctx=this.context;" +
+            "if(ctx&&dest===ctx.destination&&ctx.__obsTap&&this!==ctx.__obsTap.proc){" +
+            "try{return origDisconnect.call(this,ctx.__obsTap.gain);}catch(e){return;}" +
+            "}" +
+            "return origDisconnect.apply(this,arguments);" +
+            "};" +
+            "var mediaCtx=null;" +
+            "function getMediaCtx(){" +
+            "if(!mediaCtx)mediaCtx=new AC();" +
+            "if(mediaCtx.state==='suspended'&&mediaCtx.resume)mediaCtx.resume().catch(function(){});" +
+            "return mediaCtx;" +
+            "}" +
+            "function isCapturable(el){" +
+            "if(el.srcObject)return true;" +
+            "var s=el.currentSrc||el.getAttribute('src')||el.src||'';" +
+            "if(!s)return true;" +
+            "if(s.indexOf('blob:')===0||s.indexOf('data:')===0)return true;" +
+            "if(el.crossOrigin)return true;" +
+            "try{return new URL(s,location.href).origin===location.origin;}catch(e){return false;}" +
+            "}" +
+            "function connectMedia(el){" +
+            "if(!el||el.__obsAttached)return;" +
+            "try{" +
+            "var ctx=getMediaCtx();" +
+            "var srcNode=ctx.createMediaElementSource(el);" +
+            "origConnect.call(srcNode,getTap(ctx).gain);" +
+            "el.__obsAttached=true;el.__obsSrcNode=srcNode;" +
+            "}catch(e){}" +
+            "}" +
+            "function attachMedia(el){" +
+            "if(!el||el.__obsAttached)return;" +
+            "var s=el.currentSrc||el.getAttribute('src')||el.src||'';" +
+            "if(!s&&!el.srcObject)return;" +
+            "if(isCapturable(el))connectMedia(el);" +
+            "}" +
+            "var origPlay=HTMLMediaElement.prototype.play;" +
+            "if(origPlay){HTMLMediaElement.prototype.play=function(){attachMedia(this);return origPlay.apply(this,arguments);};}" +
+            "function scan(){var els=document.querySelectorAll('audio,video');for(var i=0;i<els.length;i++)attachMedia(els[i]);}" +
+            "window.__obsScanMedia=scan;" +
+            "document.addEventListener('play',function(e){if(e.target&&e.target.tagName)attachMedia(e.target);},true);" +
+            "document.addEventListener('playing',function(e){if(e.target&&e.target.tagName)attachMedia(e.target);},true);" +
+            "scan();" +
+            "var obsRoot=document.documentElement;" +
+            "if(obsRoot&&window.MutationObserver){new MutationObserver(function(){scan();}).observe(obsRoot,{childList:true,subtree:true});}" +
+            "else{document.addEventListener('DOMContentLoaded',function(){scan();" +
+            "if(document.documentElement&&window.MutationObserver){new MutationObserver(function(){scan();}).observe(document.documentElement,{childList:true,subtree:true});}},{once:true});}" +
+            "})();";
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final AtomicBoolean frame = new AtomicBoolean();
     private final int[] binding = new int[1]; // update() is synchronized; no per-frame allocation.
     private final Context context;
+    private final Object audioLock = new Object();
+    private short[] audioRing;
+    private int audioHead, audioTail, audioFilled;
+    private int audioRate = 48000, audioChannels = 2;
+    private final boolean audioReroute;
+
+    private final class AudioBridge {
+        @JavascriptInterface
+        public void pushPcm(String base64Pcm, int sampleRate, int channels) {
+            if (closed || !audioReroute || base64Pcm == null || base64Pcm.isEmpty())
+                return;
+            if (sampleRate < 8000 || sampleRate > 192000 || (channels != 1 && channels != 2))
+                return;
+            final int frameBytes = channels * 2;
+            final int maxBytes = AUDIO_PACKET_FRAMES * frameBytes;
+            if (base64Pcm.length() > 4 * ((maxBytes + 2) / 3))
+                return;
+            final byte[] bytes;
+            try {
+                bytes = Base64.decode(base64Pcm, Base64.DEFAULT);
+            } catch (IllegalArgumentException e) {
+                return;
+            }
+            if (bytes.length == 0 || bytes.length > maxBytes || bytes.length % frameBytes != 0)
+                return;
+            final int frames = bytes.length / frameBytes;
+            synchronized (audioLock) {
+                if (closed)
+                    return;
+                if (audioRing == null || audioRate != sampleRate || audioChannels != channels) {
+                    audioRate = sampleRate;
+                    audioChannels = channels;
+                    audioRing = new short[(sampleRate / 2) * channels];
+                    audioHead = 0;
+                    audioTail = 0;
+                    audioFilled = 0;
+                }
+                for (int f = 0; f < frames; f++) {
+                    if (audioFilled + channels > audioRing.length) {
+                        int drop = Math.min(channels, audioFilled);
+                        audioTail = (audioTail + drop) % audioRing.length;
+                        audioFilled -= drop;
+                    }
+                    final int base = f * frameBytes;
+                    for (int ch = 0; ch < channels; ch++) {
+                        final int bOff = base + ch * 2;
+                        final short sample = (short) ((bytes[bOff + 1] << 8) | (bytes[bOff] & 0xFF));
+                        audioRing[audioHead] = sample;
+                        audioHead = (audioHead + 1) % audioRing.length;
+                        audioFilled++;
+                    }
+                }
+            }
+        }
+    }
     /* Two ways to receive composited frames, chosen by the caller:
      *  - non-zero texture id: SurfaceTexture. Zero copy, but SurfaceFlinger
      *    hands this consumer to the hardware composer, and this device's
@@ -65,10 +231,12 @@ public final class ObsBrowserHost {
     private boolean touching;
     private long downTime;
 
-    private ObsBrowserHost(Context context, int id, int width, int height, String url, String css, boolean transparent) {
+    private ObsBrowserHost(Context context, int id, int width, int height, String url, String css,
+                           boolean transparent, boolean audioReroute) {
         this.context = context.getApplicationContext();
         this.width = width; this.height = height; this.url = url; this.css = css;
         this.transparent = transparent;
+        this.audioReroute = audioReroute;
         this.readerMode = id == 0;
         if (!readerMode) {
             SurfaceTexture candidate = new SurfaceTexture(id);
@@ -87,9 +255,9 @@ public final class ObsBrowserHost {
         ui.post(this::startOnUi);
     }
     public static ObsBrowserHost create(Context context, int id, int width, int height, String url, String css,
-                                        boolean transparent) {
+                                        boolean transparent, boolean audioReroute) {
         if (context == null || width <= 0 || height <= 0) return null;
-        try { return new ObsBrowserHost(context, id, width, height, url, css, transparent); }
+        try { return new ObsBrowserHost(context, id, width, height, url, css, transparent, audioReroute); }
         catch (RuntimeException e) { Log.e(TAG, "Surface creation failed", e); return null; }
     }
     private void startOnUi() {
@@ -154,6 +322,10 @@ public final class ObsBrowserHost {
         try { createWeb(); }
         catch (RuntimeException e) { Log.e(TAG, "WebView creation failed", e); failed = true; cleanupUi(); }
     }
+    private void injectAudioHook(WebView view) {
+        if (audioReroute && !closed && view == web)
+            view.evaluateJavascript(AUDIO_HOOK_JS, null);
+    }
     private void createWeb() {
         if (closed || container == null) return;
         web = new WebView(presentation.getContext());
@@ -162,9 +334,17 @@ public final class ObsBrowserHost {
         web.getSettings().setDomStorageEnabled(true);
         web.getSettings().setAllowFileAccess(false);
         web.getSettings().setAllowContentAccess(false);
+        if (audioReroute) {
+            web.getSettings().setMediaPlaybackRequiresUserGesture(false);
+            web.addJavascriptInterface(new AudioBridge(), "__obsAudio");
+        }
         web.setWebViewClient(new WebViewClient() {
+            @Override public void onPageStarted(WebView view, String pageUrl, Bitmap favicon) {
+                injectAudioHook(view);
+            }
             @Override public void onPageFinished(WebView view, String pageUrl) {
                 if (closed || view != web) return;
+                injectAudioHook(view);
                 // Author styles are appended after this one, so a page that
                 // paints its own background keeps it.
                 if (transparent) {
@@ -246,10 +426,39 @@ public final class ObsBrowserHost {
         MotionEvent event = MotionEvent.obtain(downTime, now, action, x, y, 0);
         try { web.dispatchTouchEvent(event); } finally { event.recycle(); }
     }
+    public int drainAudio(short[] out, int maxFrames, int[] outFormat) {
+        synchronized (audioLock) {
+            if (closed || out == null || maxFrames <= 0 || audioRing == null || audioFilled < audioChannels)
+                return 0;
+            final int availFrames = audioFilled / audioChannels;
+            final int maxOutFrames = out.length / audioChannels;
+            final int frames = Math.min(maxFrames, Math.min(availFrames, maxOutFrames));
+            if (frames <= 0)
+                return 0;
+            final int total = frames * audioChannels;
+            final int first = Math.min(total, audioRing.length - audioTail);
+            System.arraycopy(audioRing, audioTail, out, 0, first);
+            if (total > first)
+                System.arraycopy(audioRing, 0, out, first, total - first);
+            audioTail = (audioTail + total) % audioRing.length;
+            audioFilled -= total;
+            if (outFormat != null && outFormat.length >= 2) {
+                outFormat[0] = audioRate;
+                outFormat[1] = audioChannels;
+            }
+            return frames;
+        }
+    }
     /** No UI-thread wait: the producer is disconnected asynchronously. */
     public synchronized void close() {
         if (closed) return;
         closed = true;
+        synchronized (audioLock) {
+            audioHead = 0;
+            audioTail = 0;
+            audioFilled = 0;
+            audioRing = null;
+        }
         if (texture != null) {
             texture.setOnFrameAvailableListener(null);
             surface.release();

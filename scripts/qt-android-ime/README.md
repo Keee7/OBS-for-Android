@@ -35,6 +35,8 @@ python scripts/qt-android-ime/patch-qt-android-jar.py \
 
 The patched jar replaces the staged `libs/Qt6Android.jar` before invoking Gradle during packaging. The installed Qt SDK jar remains untouched.
 
+The Android build also compiles the Qt 6.11.1 platform plugin from a SHA-256-pinned source archive. Its accessibility patch keeps the Qt accessibility bridge enabled and bounds queries that would otherwise block Android's UI thread during EGL window creation. Packaging replaces the staged plugin alongside the jar. [Upstream Qt bug](https://bugreports.qt.io/browse/QTBUG-140674)
+
 Set `OBS_ANDROID_IME_DIAGNOSTICS=1` or start OBS with `--android-ime-diagnostics` to log focus and cursor geometry without recording typed text.
 
 ---
@@ -69,5 +71,7 @@ python scripts/qt-android-ime/patch-qt-android-jar.py \
 ```
 
 构建脚本在执行 Gradle 打包前，会自动生成已修补的 Jar 包并替换暂存目录下的 `libs/Qt6Android.jar`，本机安装的原生 Qt SDK 目录不会被修改。
+
+Android 构建也会从校验过 SHA-256 的源码包编译 Qt 6.11.1 平台插件。补丁保留 Qt 无障碍功能，并为 EGL 创建期间可能阻塞 Android 界面线程的查询设置等待上限。打包时会一并替换暂存的插件。 [Qt 上游问题](https://bugreports.qt.io/browse/QTBUG-140674)
 
 设置 `OBS_ANDROID_IME_DIAGNOSTICS=1` 或用 `--android-ime-diagnostics` 启动 OBS，可记录焦点和光标位置，日志不含输入的文字。

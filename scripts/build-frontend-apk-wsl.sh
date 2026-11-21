@@ -161,6 +161,8 @@ python3 "$SCRIPT_DIR/qt-android-ime/patch-qt-android-jar.py" \
     --android-jar "$SDK/platforms/android-$COMPILE_SDK_VERSION/android.jar" \
     --javac "$JAVA_HOME/bin/javac" --output "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" || exit 1
 cp -f "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" "$AB_DIR/libs/Qt6Android.jar" || exit 1
+cp -f "$BUILD_DIR/qt-android-platform/libplugins_platforms_qtforandroid_$ABI.so" \
+    "$AB_DIR/libs/$ABI/libplugins_platforms_qtforandroid_$ABI.so" || exit 1
 gradle --no-daemon -p "$AB_DIR" assembleRelease || exit 1
 
 # ---- 应用库 main 可被 dlsym 校验 ----

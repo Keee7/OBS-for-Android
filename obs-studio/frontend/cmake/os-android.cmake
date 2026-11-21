@@ -17,7 +17,7 @@ target_sources(
     utility/NativeEventFilter.cpp
     utility/platform-android.cpp
     utility/system-info-android.cpp
-    # 路线 B（3-2③ B-1）：预览控件 → Java SurfaceView → ANativeWindow 的宿主桥。
+    # One Android TextureView and ANativeWindow for each OBS display.
     # 对应的 Java 侧在 cmake/android/java/com/obsproject/studio/ObsDisplayHost.java，
     # androiddeployqt 从 QT_ANDROID_PACKAGE_SOURCE_DIR 自动收 java/ 目录，不需要在这里列。
     widgets/OBSAndroidDisplay.cpp
@@ -212,4 +212,9 @@ set_target_properties(
     QT_ANDROID_COMPILE_SDK_VERSION "${OBS_ANDROID_COMPILE_SDK_VERSION}"
     QT_ANDROID_TARGET_SDK_VERSION 35
     QT_ANDROID_MIN_SDK_VERSION 29)
+
+add_subdirectory(
+  "${CMAKE_CURRENT_LIST_DIR}/../../../scripts/qt-android-ime/android-platform"
+  "${CMAKE_CURRENT_BINARY_DIR}/qt-android-platform-build"
+)
 

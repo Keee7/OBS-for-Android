@@ -3,6 +3,9 @@
 #include "ui_OBSBasicControls.h"
 
 #include <QFrame>
+#ifdef __ANDROID__
+#include <QList>
+#endif
 #include <QPointer>
 #include <QScopedPointer>
 
@@ -57,6 +60,13 @@ public:
 	/* P-17-e：主界面那颗"前后置"按钮。父对象就是本控件（跟着 controlsDock 一起没），
 	 * 指针只给 OBSBasic 用来切显隐 —— 当前用哪颗镜头的真相在源的设置里，不在这里。 */
 	QPushButton *androidFlipCameraButton = nullptr;
+	void setAndroidColumnCount(int columns);
+
+private:
+	QList<QWidget *> androidControlButtons;
+	int androidColumnCount = 0;
+
+public:
 #endif
 
 signals:

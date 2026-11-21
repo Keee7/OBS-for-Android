@@ -132,6 +132,8 @@ if ($Action -in @('package','all')) {
         '--android-jar', "$sdk/platforms/android-$CompileSdkVersion/android.jar",
         '--javac', "$env:JAVA_HOME/bin/javac.exe", '--output', $patchedQtJar) 'qt-ime-runtime.log'
     Copy-Item -LiteralPath $patchedQtJar -Destination "$androidBuild/libs/Qt6Android.jar" -Force
+    Copy-Item -LiteralPath "$build/qt-android-platform/libplugins_platforms_qtforandroid_arm64-v8a.so" `
+        -Destination "$androidBuild/libs/arm64-v8a/libplugins_platforms_qtforandroid_arm64-v8a.so" -Force
     Invoke-BuildTool "$tools/gradle/gradle-$GradleVersion/bin/gradle.bat" @('--no-daemon', '-p', $androidBuild, 'assembleRelease') 'android-package.log'
     $apk = Get-ChildItem -Path $androidBuild -Recurse -File -Filter '*unsigned.apk' |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1

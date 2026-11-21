@@ -50,7 +50,7 @@
 #ifdef __ANDROID__
 #include "widgets/OBSAndroidBrowser.hpp"
 #include "widgets/OBSAndroidAudio.hpp"
-#include "widgets/OBSAndroidDisplay.hpp" // 3-3 模态遮挡：obsAndroidDisplaySetVisible
+#include "widgets/OBSAndroidDisplay.hpp"
 #include "widgets/OBSAndroidKeepAlive.hpp" // 前台保活服务语言同步
 #include "widgets/OBSAndroidPath.hpp" // 3-4：openUrl(本地路径) 的 Android 替代
 #include <QAbstractScrollArea> // 3-4 触摸：长按坐标要按 viewport 系给（itemAt/exec 都吃这个系）
@@ -1102,7 +1102,8 @@ static void enableFlickScroll(QWidget *w)
 	 * （QComboBoxPrivateContainer）是 Qt::Popup，给它挂 TouchGesture 会改变它的
 	 * 触摸/鼠标合成行为 —— 而那正是 P-8 补丁（组合框弹层被松手打死）刚修好的链路。 */
 	const Qt::WindowFlags f = w->windowFlags();
-	if (f.testFlag(Qt::Popup) || f.testFlag(Qt::ToolTip))
+	if (f.testFlag(Qt::Popup) || f.testFlag(Qt::ToolTip) || w->inherits("QDockWidget") ||
+	    w->inherits("QDockWidgetGroupWindow"))
 		return;
 
 	const QList<QAbstractScrollArea *> areas = w->findChildren<QAbstractScrollArea *>();
@@ -1504,8 +1505,6 @@ private:
 	QPointer<QComboBox> comboPress; // P-8：这发按下落在组合框上（松手时据此决定吃不吃）
 };
 
-/* 定义在下面（3-3 模态遮挡那一段）；构造函数里要起它，先声明。 */
-static void androidStartPreviewVisibilityWatchdog();
 #endif // __ANDROID__
 
 OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
@@ -1526,9 +1525,6 @@ OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
 		QJniObject::callStaticMethod<void>("com/obsproject/studio/ObsImeFocus", "focusChanged", "()V");
 	});
 
-	/* 3-3 模态遮挡的兜底重算（每秒一拍那套事件触发的补充，见函数上方的实测记录）。
-	 * 放构造里只起一次；它自己判断是否需要再启。 */
-	androidStartPreviewVisibilityWatchdog();
 #endif
 
 	/* fix float handling */
@@ -2102,130 +2098,6 @@ QStyle *OBSApp::GetInvisibleCursorStyle()
 	return invisibleCursorStyle.get();
 }
 
-#ifdef __ANDROID__
-/* 3-3 模态遮挡。预览面是 addContentView 到 Activity 内容层、还 setZOrderOnTop(true) 的独立
- * SurfaceView —— 它在 Qt 的窗口之上，对话框物理上盖不住它，不藏就会看见"设置窗口底下露出一块
- * 实时画面"（菜单更糟：整个看不见）。
- * 判据用 Qt 自己维护的 activeModalWidget()/activePopupWidget() 现算，**不做 Show/Hide 计数**：
- * 计数只要漏一条 Hide（widget 直接析构、reject() 与 close() 混用、deleteLater 时序）就永久停在
- * "已藏"，是那种最难复现的脏状态；现算无状态、幂等，代价只是两次指针判空。 */
-static void androidSyncPreviewVisibility()
-{
-	const QWidget *surfaceOwner = qobject_cast<QWidget *>(obsAndroidDisplayLifecycleOwner());
-	const QWidget *ownerWindow = surfaceOwner ? surfaceOwner->window() : nullptr;
-	const QWidget *modal = qApp->activeModalWidget();
-	bool covered = (modal && modal != ownerWindow) || qApp->activePopupWidget();
-
-	/* 只认"模态/弹出"不够：添加源那个窗口（`OBSBasic_SceneItems.cpp:831` 走的是 `show()` 不是
-	 * `exec()`，非模态）2026-09-05 20:09 实测弹出来时一句 藏面 都没有，预览面照样压在它右半边，
-	 * 列表项看不见也点不着。独立窗口层的道理是"**只要有别家窗口在场，这块面就该让位**"，
-	 * 所以判据直接扫顶层窗口。
-	 * 排除：主窗口自己（面归它），以及 Tool/ToolTip/Popup/Splash/SubWindow/Desktop 这类系统浮层
-	 * —— tooltip 也是独立顶层窗口，算进来的话鼠标一停面就闪一下。
-	 * （Qt 6.9 的 WindowType 里没有 StatusBar 这一项，别照抄 Qt5 的枚举名。） */
-	if (!covered) {
-		const QWidget *main = static_cast<OBSApp *>(qApp)->GetMainWindow();
-		/* B-7：投影仪/Multiview 自己就是"当前持有那块面的窗"（可移交认领，见
-		 * OBSAndroidDisplay.cpp 的 claimCommon）。不放行它，判据就会在投影仪一开的那一刻
-		 * 把它脚下这块面藏掉 —— 投影仪整个内容就是这块面，等于开出来必黑。
-		 * 只放行主人那一个窗：主预览（OBSBasicPreview，非顶层窗）当主人时 owner 不在这个循环里，
-		 * 设置/添加源那些对话框照旧藏面，3-3 的原语义没被削弱。 */
-		const QWidget *faceOwner = qobject_cast<QWidget *>(obsAndroidDisplayLifecycleOwner());
-		const auto tops = qApp->topLevelWidgets();
-		for (const QWidget *w : tops) {
-			if (!w->isVisible() || !w->isWindow() || w == main || w == faceOwner || w == ownerWindow)
-				continue;
-			/* 这里原本还有 `case Qt::Desktop:`。它是 Qt 3/4 时代给"桌面控件"用的
-			 * 窗口类型，**Qt 6 起就是 no-op**（6.11 起标了 deprecated，配上本项目的
-			 * -Werror 会直接编不过）。任何 widget 的 windowType() 都不可能是它，
-			 * 所以删掉这个分支不改变任何行为。 */
-			switch (w->windowType()) {
-			case Qt::Tool:
-			case Qt::ToolTip:
-			case Qt::Popup:
-			case Qt::SplashScreen:
-			case Qt::SubWindow:
-				continue;
-			default:
-				break;
-			}
-			covered = true;
-			break;
-		}
-	}
-
-	obsAndroidDisplaySetVisible(!covered);
-}
-
-/* Android 触摸/按键补齐（长按=右键、BACK=Escape）—— AndroidInputFilter 定义在 OBSApp 构造函数之前（构造时要 install）。 */
-
-static void androidResyncPreviewOnWindowToggle(QObject *receiver, QEvent *e)
-{
-	const QEvent::Type type = e->type();
-	/* 顺带认 Close：组合框弹层（QComboBoxPrivateContainer）关闭时只发 Close、不发 Hide
-	 *（2026-11-08 16:26 实测），多认一种事件类型没坏处。
-	 * 但**别指望它救黑屏**——真正那条路是 QDialog 关闭时**什么都不发**（见下面
-	 * obsAndroidPreviewVisibilityChanged 的说明）；这里只是顺手把能收的都收下。 */
-	if (type != QEvent::Show && type != QEvent::Hide && type != QEvent::Close)
-		return;
-	if (!receiver->isWidgetType())
-		return;
-	if (!static_cast<QWidget *>(receiver)->isWindow()) // dock/工具栏这些子控件的变化不算窗口
-		return;
-
-	/* 当场算一次，再挂一次"事件循环下一轮"的复查：对话框的 Show 先到、Qt 置 modal 指针在后
-	 * （关闭时反过来），只算一次会读到半更新的状态。pending 把同一轮里连着几次窗口开关并成
-	 * 一次检查 —— 反正查的是"现在有没有模态在场"这个真相，合并不丢信息。 */
-	static bool pending = false;
-	if (!pending) {
-		pending = true;
-		QTimer::singleShot(0, qApp, [] {
-			pending = false;
-			androidSyncPreviewVisibility();
-		});
-	}
-	androidSyncPreviewVisibility();
-}
-
-/* 给对话框用的显式入口（声明在 widgets/OBSAndroidDisplay.hpp）。见那里的长注释：
- * QDialog 在这套 Qt/Android 组合下关闭时**不发** Hide/Close，靠"监听窗口事件"必漏；
- * 对话框自己叫一次最可靠。**
- * 延到事件循环下一轮再算，是因为调用点常在对话框自己的 closeEvent/析构里：
- * 那一刻顶层窗列表/可见性还没更新完，当场算会读到"窗口还在"的旧状态。 */
-void obsAndroidPreviewVisibilityChanged()
-{
-	QTimer::singleShot(0, qApp, [] { androidSyncPreviewVisibility(); });
-	androidSyncPreviewVisibility();
-}
-
-/* 周期兜底重算。**这不是"再算一次以防万一"，而是这个闩锁唯一可靠的出口**。
- *
- * 实测（2026-11-08，小米平板 25053RP5CC / Android 16）：hiddenForModal 卡在 true 会让
- * **三条**恢复路径同时短路 —— Java 侧 attach() 拒（"3-3 藏面中"）、armHeal() 拒、
- * healIfStale() 拒。于是预览永久黑屏，而渲染循环照跑（CPU 9.6% / 60.00fps），
- * 开关源属性、切场景都救不回来；日志里从 16:08:57 起每秒一次 attach 失败直到日志结束。
- *
- * 触发那次卡死的具体事件是：组合框弹层（QComboBoxPrivateContainer）关闭时**只发 Close、
- * 不发 Hide**，而重算原先只听 Show/Hide ⇒ 最后那次重算被丢掉，此后再无窗口事件来清闩锁。
- * （上面 androidResyncPreviewOnWindowToggle 已把 Close 并进来，修的就是这一条；
- *  这里再加一道与事件类型无关的兜底，因为"漏掉某类事件"这件事本身防不胜防 ——
- *  surfaceOwner 未定、事件被其它过滤器吃掉、对话框不走 Show/Hide 都能再犯一次。）
- *
- * 代价：每秒一次 4 次指针判空 + 一次 setVisible（Java 侧幂等，状态没变就直接返回，
- * 不触 relayout）。相对"永久黑屏"这个后果，这个代价可以忽略。 */
-static void androidStartPreviewVisibilityWatchdog()
-{
-	static QTimer *watchdog = nullptr;
-	if (watchdog)
-		return;
-	watchdog = new QTimer(qApp);
-	/* 5 秒够快（用户不会盯着黑屏超过几秒），又远低于"每秒都去动一次 view"的打扰阈值。 */
-	watchdog->setInterval(5000);
-	QObject::connect(watchdog, &QTimer::timeout, qApp, [] { androidSyncPreviewVisibility(); });
-	watchdog->start();
-}
-#endif // __ANDROID__
-
 // Global handler to receive all QEvent::Show events so we can apply
 // display affinity on any newly created windows and dialogs without
 // caring where they are coming from (e.g. plugins).
@@ -2236,9 +2108,6 @@ bool OBSApp::notify(QObject *receiver, QEvent *e)
 	int windowType;
 
 #ifdef __ANDROID__
-	/* 放最前面、且不引入新局部变量：下面那条 goto skip 链跨不过"跳过初始化"，Java 那边
-	 * 自己已经查过 isWidgetType()，不必借用这条链的前置判断。 */
-	androidResyncPreviewOnWindowToggle(receiver, e);
 	// QApplication handles this event before normal application event filters.
 	// Keep this opt-in probe content-free and observe before Qt handles it.
 	if (e->type() == QEvent::RequestSoftwareInputPanel &&

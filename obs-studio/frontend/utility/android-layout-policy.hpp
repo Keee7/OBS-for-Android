@@ -11,6 +11,15 @@ constexpr bool compact(int width, int height, bool wasCompact = false)
 	return width < (wasCompact ? 1000 : 952) || height < (wasCompact ? 600 : 552);
 }
 
+constexpr bool phoneLandscape(int width, int height, bool wasPhone = false)
+{
+	if (width <= 0 || height <= 0)
+		return wasPhone;
+	// Keep enough width for two dock columns and the preview. Hysteresis also applies to aspect ratio.
+	return width >= (wasPhone ? 600 : 640) && height < (wasPhone ? 580 : 552) &&
+	       width * 10 >= height * (wasPhone ? 16 : 17);
+}
+
 constexpr int touchRowHeight(bool isCompact)
 {
 	return isCompact ? 32 : 48;

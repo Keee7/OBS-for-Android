@@ -25,6 +25,12 @@
 #include <qt-wrappers.hpp>
 
 #include <QInputEvent>
+#ifdef __ANDROID__
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <utility/android-window-fit.hpp>
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -54,9 +60,25 @@ OBSBasicInteraction::OBSBasicInteraction(QWidget *parent, OBSSource source_)
 	setWindowFlags(flags & (~helpFlag));
 
 	ui->setupUi(this);
+
 #ifdef __ANDROID__
-	// This dialog needs the single Android SurfaceView while it is open.
-	ui->preview->setProperty("androidDisplayPreemptive", true);
+	auto *headerLayout = new QHBoxLayout;
+	headerLayout->setContentsMargins(0, 0, 0, 4);
+	headerLayout->setSpacing(8);
+	auto *titleLabel = new QLabel(this);
+	titleLabel->setMinimumWidth(0);
+	titleLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+	connect(this, &QWidget::windowTitleChanged, titleLabel, &QLabel::setText);
+	auto *closeButton = new QPushButton(QTStr("Close"), this);
+	closeButton->setObjectName(QStringLiteral("androidInteractionCloseButton"));
+	closeButton->setMinimumSize(72, 36);
+	closeButton->setAutoDefault(false);
+	closeButton->setDefault(false);
+	connect(closeButton, &QPushButton::clicked, this, &OBSBasicInteraction::close);
+	headerLayout->addWidget(titleLabel, 1);
+	headerLayout->addWidget(closeButton);
+	ui->verticalLayout->insertLayout(0, headerLayout);
+	ui->verticalLayout->setStretchFactor(ui->preview, 1);
 #endif
 
 	ui->preview->setMouseTracking(true);
@@ -69,6 +91,10 @@ OBSBasicInteraction::OBSBasicInteraction(QWidget *parent, OBSSource source_)
 
 	const char *name = obs_source_get_name(source);
 	setWindowTitle(QTStr("Basic.InteractionWindow").arg(QT_UTF8(name)));
+#ifdef __ANDROID__
+	titleLabel->setText(windowTitle());
+	androidFitTopLevelToScreen(this);
+#endif
 
 	auto addDrawCallback = [this]() {
 		obs_display_add_draw_callback(ui->preview->GetDisplay(), OBSBasicInteraction::DrawPreview, this);

@@ -14,6 +14,9 @@ class OBSBasicStatusBar : public QStatusBar {
 
 private:
 	StatusBarWidget *statusWidget = nullptr;
+#ifdef __ANDROID__
+	int regularMinimumHeight = 0;
+#endif
 
 	OBSWeakOutputAutoRelease streamOutput;
 	std::vector<OBSSignal> streamSigs;
@@ -93,6 +96,10 @@ private slots:
 
 public:
 	OBSBasicStatusBar(QWidget *parent);
+
+#ifdef __ANDROID__
+	void SetAndroidPhoneLayout(bool phone);
+#endif
 
 	void StreamDelayStarting(int sec);
 	void StreamDelayStopping(int sec);

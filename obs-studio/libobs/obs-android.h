@@ -303,7 +303,7 @@ EXPORT uint32_t obs_android_screen_read_audio(int16_t *out, uint32_t max_frames)
  * OBS graphics thread; UI work is queued by the host and never waited for. */
 struct obs_android_browser_host {
  void *(*create)(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css,
-		 bool transparent);
+		 bool transparent, bool reroute_audio);
  /* Reader mode, selected by create(texture = 0): instead of binding a
   * SurfaceTexture, the host hands over the compositor's own buffers. Returns
   * the AHardwareBuffer* of the newest frame, valid until the next call, or NULL
@@ -317,10 +317,14 @@ struct obs_android_browser_host {
  /* action: 0 down, 1 up, 2 move, 3 cancel */
  void (*touch)(void *handle, int x, int y, int action);
  void (*destroy)(void *handle);
+ /* Drain up to max_frames of interleaved int16 PCM from this browser instance.
+  * Returns frames written (0 when silent/empty). Out params receive format. */
+ uint32_t (*read_audio)(void *handle, int16_t *out, uint32_t max_frames, uint32_t *sample_rate,
+			uint32_t *channels);
 };
 EXPORT void obs_android_set_browser_host(const struct obs_android_browser_host *host);
 EXPORT void *obs_android_browser_create(uint32_t texture, uint32_t width, uint32_t height, const char *url,
-					const char *css, bool transparent);
+					const char *css, bool transparent, bool reroute_audio);
 /* Reader mode only; see the host struct. */
 EXPORT void *obs_android_browser_take_buffer(void *handle);
 /* -1: failed; 0: no new frame; 1: matrix updated. */
@@ -329,6 +333,8 @@ EXPORT void obs_android_browser_reload(void *handle);
 EXPORT void obs_android_browser_set_visible(void *handle, bool visible);
 EXPORT void obs_android_browser_touch(void *handle, int x, int y, int action);
 EXPORT void obs_android_browser_destroy(void *handle);
+EXPORT uint32_t obs_android_browser_read_audio(void *handle, int16_t *out, uint32_t max_frames,
+					       uint32_t *sample_rate, uint32_t *channels);
 
 #ifdef __cplusplus
 }

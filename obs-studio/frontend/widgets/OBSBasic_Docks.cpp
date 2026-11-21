@@ -22,19 +22,48 @@
 #include <qt-wrappers.hpp>
 
 #ifdef __ANDROID__
+#include "AudioMixer.hpp"
 #include "OBSAndroidDisplay.hpp"
+#include "OBSBasicControls.hpp"
 #include <utility/android-layout-policy.hpp>
+#include <QDockWidget>
+#include <QInputMethod>
+#include <QMouseEvent>
 #include <QResizeEvent>
+#include <QRubberBand>
+#include <QScreen>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
+#include <QWindow>
 
 void OBSBasic::InitAndroidResponsiveLayout()
 {
+	setDockOptions(dockOptions() & ~QMainWindow::AnimatedDocks);
+	setStyleSheet(styleSheet() + QStringLiteral("\nOBSBasic::separator { width: 10px; height: 10px; }"));
 	androidLayoutResizeTimer = new QTimer(this);
 	androidLayoutResizeTimer->setSingleShot(true);
 	androidLayoutResizeTimer->setInterval(120);
 	connect(androidLayoutResizeTimer, &QTimer::timeout, this, &OBSBasic::ResizeAndroidDocks);
+	if (auto *display = screen()) {
+		connect(display, &QScreen::availableGeometryChanged, this, [this] {
+			androidLayoutResizeTimer->start();
+		});
+	}
+	androidMainDocks = {ui->sourcesDock, ui->scenesDock, ui->mixerDock, ui->transitionsDock, controlsDock};
+	for (QDockWidget *dock : androidMainDocks) {
+		dock->setMinimumSize(0, 0);
+		if (dock->isFloating())
+			dock->setFloating(false);
+		dock->installEventFilter(this);
+	}
+	connect(controlsDock, &QDockWidget::dockLocationChanged, this, [this] {
+		androidLayoutResizeTimer->start();
+	});
+	connect(QGuiApplication::inputMethod(), &QInputMethod::visibleChanged, this, [this] {
+		if (!QGuiApplication::inputMethod()->isVisible())
+			androidLayoutResizeTimer->start();
+	});
 	QTimer::singleShot(0, this, &OBSBasic::ResizeAndroidDocks);
 }
 
@@ -46,10 +75,240 @@ void OBSBasic::resizeEvent(QResizeEvent *event)
 		androidLayoutResizeTimer->start();
 }
 
+void OBSBasic::SetAndroidPhoneDockLayout(bool phone)
+{
+	CancelAndroidDockDrag();
+	// Trim vertical padding to leave room for the mixer and status bar.
+	const QString compactInputs = phone ? QStringLiteral(
+		"QPushButton, QComboBox, QSpinBox { padding-top: 2px; padding-bottom: 2px; }") : QString();
+	ui->transitionsFrame->setStyleSheet(compactInputs);
+	controlsDock->widget()->setStyleSheet(compactInputs);
+	ui->statusbar->SetAndroidPhoneLayout(phone);
+	// The source name can shrink on phones while its action buttons remain reachable.
+	ui->contextSourceLabel->setMinimumWidth(phone ? 48 : ui->contextSourceLabel->maximumWidth());
+	// Put the transition and its duration on one row to keep the mixer meter visible.
+	if (phone) {
+		ui->verticalLayout_8->removeWidget(ui->transitions);
+		ui->horizontalLayout_3->insertWidget(0, ui->transitions, 1);
+	} else {
+		ui->horizontalLayout_3->removeWidget(ui->transitions);
+		ui->verticalLayout_8->insertWidget(0, ui->transitions);
+	}
+
+	if (auto *mixer = qobject_cast<AudioMixer *>(ui->mixerDock->widget()))
+		mixer->setPhoneLayout(phone);
+
+	if (!phone) {
+		restoreState(androidRegularDockLayout);
+		androidRegularDockLayout.clear();
+		on_lockDocks_toggled(ui->lockDocks->isChecked());
+		return;
+	}
+
+	androidRegularDockLayout = saveState();
+	if (androidPhoneDocks.isEmpty())
+		androidPhoneDocks = androidMainDocks;
+	ApplyAndroidPhoneDockOrder();
+}
+
+void OBSBasic::ApplyAndroidPhoneDockOrder()
+{
+	QList<bool> shown;
+	for (QDockWidget *dock : androidPhoneDocks) {
+		shown.append(!dock->isHidden());
+		removeDockWidget(dock);
+	}
+
+	addDockWidget(Qt::LeftDockWidgetArea, androidPhoneDocks[0]);
+	splitDockWidget(androidPhoneDocks[0], androidPhoneDocks[1], Qt::Vertical);
+	addDockWidget(Qt::RightDockWidgetArea, androidPhoneDocks[2]);
+	splitDockWidget(androidPhoneDocks[2], androidPhoneDocks[3], Qt::Vertical);
+	splitDockWidget(androidPhoneDocks[3], androidPhoneDocks[4], Qt::Vertical);
+
+	for (qsizetype i = 0; i < androidPhoneDocks.size(); ++i)
+		androidPhoneDocks[i]->setVisible(shown[i]);
+}
+
+void OBSBasic::CancelAndroidDockDrag()
+{
+	androidDraggedDock.clear();
+	if (androidDockDropIndicator)
+		androidDockDropIndicator->hide();
+}
+
+void OBSBasic::UpdateAndroidControlColumns(bool phone)
+{
+	const Qt::DockWidgetArea area = dockWidgetArea(controlsDock);
+	const bool side = area == Qt::LeftDockWidgetArea || area == Qt::RightDockWidgetArea;
+	if (auto *controls = qobject_cast<OBSBasicControls *>(controlsDock->widget()))
+		controls->setAndroidColumnCount(phone || !side ? 2 : 1);
+}
+
+bool OBSBasic::eventFilter(QObject *watched, QEvent *event)
+{
+	const auto type = event->type();
+	if (androidDraggedDock && watched == androidDraggedDock &&
+	    (type == QEvent::Hide || type == QEvent::UngrabMouse))
+		CancelAndroidDockDrag();
+	if (ui->lockDocks->isChecked() ||
+	    (type != QEvent::MouseButtonPress && type != QEvent::MouseMove && type != QEvent::MouseButtonRelease))
+		return OBSMainWindow::eventFilter(watched, event);
+
+	auto *dock = qobject_cast<QDockWidget *>(watched);
+	const auto *mouse = static_cast<QMouseEvent *>(event);
+	const QPoint screenPoint = mouse->globalPosition().toPoint();
+	if (type == QEvent::MouseButtonPress) {
+		if (mouse->button() == Qt::LeftButton && androidMainDocks.contains(dock) && !dock->isFloating() &&
+		    dock->widget() &&
+		    mouse->position().y() < dock->widget()->geometry().top()) {
+			androidDraggedDock = dock;
+			androidDockDragStart = screenPoint;
+			return true;
+		}
+		return OBSMainWindow::eventFilter(watched, event);
+	}
+	if (!androidDraggedDock || dock != androidDraggedDock)
+		return OBSMainWindow::eventFilter(watched, event);
+
+	QDockWidget *target = nullptr;
+	const bool phone = !androidRegularDockLayout.isEmpty();
+	const QRect viewport = contentsRect();
+	const QPoint point = mapFromGlobal(screenPoint);
+	const bool moved = (screenPoint - androidDockDragStart).manhattanLength() >= QApplication::startDragDistance();
+	if (moved) {
+		for (auto *candidate : androidMainDocks) {
+			if (candidate != dock && candidate->isVisible() && !candidate->isFloating() &&
+			    candidate->geometry().contains(point) && dock->isAreaAllowed(dockWidgetArea(candidate))) {
+				target = candidate;
+				break;
+			}
+		}
+	}
+	auto area = target ? dockWidgetArea(target) : Qt::NoDockWidgetArea;
+	if (!phone && moved && !target && viewport.contains(point)) {
+		// Keep empty dock areas reachable. Show the insertion edge without
+		// opening a floating window over the canvas.
+		constexpr int edge = 28;
+		if (point.x() - viewport.left() < edge)
+			area = Qt::LeftDockWidgetArea;
+		else if (viewport.right() - point.x() < edge)
+			area = Qt::RightDockWidgetArea;
+		else if (point.y() - viewport.top() < edge)
+			area = Qt::TopDockWidgetArea;
+		else if (viewport.bottom() - point.y() < edge)
+			area = Qt::BottomDockWidgetArea;
+		if (area == dockWidgetArea(dock) || !dock->isAreaAllowed(area))
+			area = Qt::NoDockWidgetArea;
+	}
+	const bool vertical = area == Qt::LeftDockWidgetArea || area == Qt::RightDockWidgetArea;
+
+	if (type == QEvent::MouseMove) {
+		if (area != Qt::NoDockWidgetArea) {
+			if (!androidDockDropIndicator)
+				androidDockDropIndicator = new QRubberBand(QRubberBand::Rectangle, this);
+			QRect indicator = target ? target->geometry() : viewport;
+			if (!target) {
+				switch (area) {
+				case Qt::LeftDockWidgetArea:
+					indicator.setWidth(6);
+					break;
+				case Qt::RightDockWidgetArea:
+					indicator.setLeft(indicator.right() - 5);
+					break;
+				case Qt::TopDockWidgetArea:
+					indicator.setHeight(6);
+					break;
+				case Qt::BottomDockWidgetArea:
+					indicator.setTop(indicator.bottom() - 5);
+					break;
+				default:
+					break;
+				}
+			} else if (!phone) {
+				if (vertical)
+					indicator.setTop(indicator.bottom() - 5);
+				else if (isRightToLeft())
+					indicator.setWidth(6);
+				else
+					indicator.setLeft(indicator.right() - 5);
+			}
+			if (androidDockDropIndicator->geometry() != indicator)
+				androidDockDropIndicator->setGeometry(indicator);
+			if (androidDockDropIndicator->isHidden()) {
+				androidDockDropIndicator->show();
+				androidDockDropIndicator->raise();
+			}
+		} else if (androidDockDropIndicator) {
+			androidDockDropIndicator->hide();
+		}
+		return true;
+	}
+	if (mouse->button() != Qt::LeftButton)
+		return false;
+
+	CancelAndroidDockDrag();
+	if (area == Qt::NoDockWidgetArea)
+		return true;
+
+	if (phone) {
+		const QList<int> widths{androidPhoneDocks[0]->width(), androidPhoneDocks[2]->width()};
+		QList<int> heights;
+		for (auto *panel : androidPhoneDocks)
+			heights.append(panel->height());
+		androidPhoneDocks.swapItemsAt(androidPhoneDocks.indexOf(dock), androidPhoneDocks.indexOf(target));
+		ApplyAndroidPhoneDockOrder();
+		resizeDocks({androidPhoneDocks[0], androidPhoneDocks[2]}, widths, Qt::Horizontal);
+		resizeDocks(androidPhoneDocks.mid(0, 2), heights.mid(0, 2), Qt::Vertical);
+		resizeDocks(androidPhoneDocks.mid(2), heights.mid(2), Qt::Vertical);
+	} else {
+		const QByteArray previousLayout = saveState();
+		removeDockWidget(dock);
+		const auto direction = vertical ? Qt::Vertical : Qt::Horizontal;
+		if (target)
+			splitDockWidget(target, dock, direction);
+		else
+			addDockWidget(area, dock, direction);
+		dock->show();
+		UpdateAndroidControlColumns(false);
+		const QSize minimum = layout()->minimumSize();
+		if (minimum.width() > viewport.width() || minimum.height() > viewport.height()) {
+			restoreState(previousLayout);
+			UpdateAndroidControlColumns(false);
+		}
+	}
+	return true;
+}
+
 void OBSBasic::ResizeAndroidDocks()
 {
+	if (QGuiApplication::inputMethod()->isVisible())
+		return;
+
+	// Qt Android reports the Activity's root layout through availableGeometry.
+	// QWidget::size() can change when a dock is dragged or its minimum size grows.
+	const auto *display = screen();
+	const QSize available = display ? display->availableGeometry().size() : size();
+	if (available.isEmpty() || androidMainDocks.isEmpty())
+		return;
+	if (size() != available)
+		resize(available);
+	const bool wasPhone = !androidRegularDockLayout.isEmpty();
+	const bool phone = OBSAndroidLayout::phoneLandscape(available.width(), available.height(), wasPhone);
+	if (phone != wasPhone) {
+		SetAndroidPhoneDockLayout(phone);
+		if (IsPreviewProgramMode())
+			ResetUI();
+	}
+
+	UpdateAndroidControlColumns(phone);
+
+	// Preserve user-set divider positions and dock arrangements between real window resizes.
+	if (available == androidDockViewport)
+		return;
+	androidDockViewport = available;
+
 	const QVariant previousMode = property("androidCompactLayout");
-	const bool compact = OBSAndroidLayout::compact(width(), height(), previousMode.toBool());
+	const bool compact = OBSAndroidLayout::compact(available.width(), available.height(), previousMode.toBool());
 	if (!previousMode.isValid() || compact != previousMode.toBool()) {
 		setProperty("androidCompactLayout", compact);
 		ui->scenes->setProperty("androidCompactLayout", compact);
@@ -79,33 +338,149 @@ void OBSBasic::ResizeAndroidDocks()
 				.arg(buttonSize.height() + 2).arg(buttonSize.width()).arg(buttonSize.height()));
 		}
 		UpdateContextBar(true);
-		obsAndroidDisplayLog("Android responsive mode: compact=%d window=%dx%d row=%d", int(compact), width(), height(), rowHeight);
+		obsAndroidDisplayLog("Android responsive mode: compact=%d viewport=%dx%d row=%d", int(compact),
+				     available.width(), available.height(), rowHeight);
 	}
 	/* Keep all five panels visible. Reserve room for the complete touch
 	 * toolbars, then share the remaining width between the bottom panels. */
 	const int toolbarWidth = qMax(ui->scenesToolbar->sizeHint().width(), ui->sourcesToolbar->sizeHint().width());
 
-	/* 左栏宽度：下界保证工具栏的 5 个按钮放得下，上界防止在宽屏上无限膨胀。
-	 *
-	 * 上界 280 沿用上游 on_resetDocks_triggered 的写法（那里是
-	 * min(width*30%, 280)）。没有它的话，1280 宽的平板上这里是 358、
-	 * 1600 宽是 448 —— 左栏随屏幕变宽一直涨，把预览挤掉。
-	 *
-	 * 手写 qMax/qMin 而不是 qBound：下界可能大于上界（工具栏特别宽时），
-	 * 那种情况应该保工具栏完整、让上限失效，而 qBound 要求 min <= max。 */
-	const int side = qMax(toolbarWidth + 8, qMin(width() * 28 / 100, 280));
-	const int rest = qMax(1, width() - side);
-	resizeDocks({ui->scenesDock, ui->sourcesDock}, {side, side}, Qt::Horizontal);
-	resizeDocks({ui->mixerDock, ui->transitionsDock, controlsDock},
-		    {rest * 35 / 100, rest * 25 / 100, rest * 40 / 100}, Qt::Horizontal);
+	if (phone) {
+		const auto insets = windowHandle() ? windowHandle()->safeAreaMargins() : QMargins();
+		const int availableWidth = available.width() - insets.left() - insets.right();
+		const int minToolbarColumn = toolbarWidth + 8;
+		const auto toolbarOnSide = [this](Qt::DockWidgetArea area) {
+			return (!ui->scenesDock->isHidden() && dockWidgetArea(ui->scenesDock) == area) ||
+			       (!ui->sourcesDock->isHidden() && dockWidgetArea(ui->sourcesDock) == area);
+		};
+		const int left = qMax(toolbarOnSide(Qt::LeftDockWidgetArea) ? minToolbarColumn : 0,
+				      availableWidth * 23 / 100);
+		const int right = qMax(toolbarOnSide(Qt::RightDockWidgetArea) ? minToolbarColumn : 0,
+				       availableWidth * 30 / 100);
+		const int statusHeight = ui->statusbar->isHidden() ? 0 : ui->statusbar->sizeHint().height();
+		const int availableHeight = qMax(1, available.height() - statusHeight - insets.top() - insets.bottom());
+		const int half = availableHeight / 2;
+		const int mixer = availableHeight * 40 / 100;
+		const int transitions = availableHeight * 29 / 100;
+		resizeDocks({androidPhoneDocks[0], androidPhoneDocks[2]}, {left, right}, Qt::Horizontal);
+		resizeDocks(androidPhoneDocks.mid(0, 2), {half, half}, Qt::Vertical);
+		resizeDocks(androidPhoneDocks.mid(2),
+			    {mixer, transitions, availableHeight - mixer - transitions}, Qt::Vertical);
+		obsAndroidDisplayLog("Android phone landscape layout: viewport=%dx%d left=%d right=%d status=%d",
+				     available.width(), available.height(), left, right, statusHeight);
+		return;
+	}
 
-	/* Give spare height to the preview without overriding content minima. */
-	const int bottom = qMax(ui->mixerDock->minimumSizeHint().height(),
-				qMax(ui->transitionsDock->minimumSizeHint().height(),
-				     controlsDock->minimumSizeHint().height()));
-	resizeDocks({ui->mixerDock, ui->transitionsDock, controlsDock}, {bottom, bottom, bottom}, Qt::Vertical);
-	obsAndroidDisplayLog("Android layout: side=%d bottom=%d preview=%dx%d", side, bottom,
-			     ui->preview->width(), ui->preview->height());
+	const QSize win = contentsRect().size();
+
+	QList<QDockWidget *> leftDocks, rightDocks, topDocks, bottomDocks;
+	for (QDockWidget *dock :
+	     {ui->scenesDock, ui->sourcesDock, ui->mixerDock, ui->transitionsDock, controlsDock.data()}) {
+		if (!dock || dock->isHidden() || dock->isFloating())
+			continue;
+		switch (dockWidgetArea(dock)) {
+		case Qt::LeftDockWidgetArea:
+			leftDocks.append(dock);
+			break;
+		case Qt::RightDockWidgetArea:
+			rightDocks.append(dock);
+			break;
+		case Qt::TopDockWidgetArea:
+			topDocks.append(dock);
+			break;
+		case Qt::BottomDockWidgetArea:
+			bottomDocks.append(dock);
+			break;
+		default:
+			break;
+		}
+	}
+
+	const bool leftHasToolbar = leftDocks.contains(ui->scenesDock) || leftDocks.contains(ui->sourcesDock);
+	const bool rightHasToolbar = rightDocks.contains(ui->scenesDock) || rightDocks.contains(ui->sourcesDock);
+	int leftW = 0;
+	int rightW = 0;
+
+	if (!leftDocks.isEmpty() && !rightDocks.isEmpty()) {
+		leftW = qMax(leftHasToolbar ? toolbarWidth + 8 : 0, qMin(win.width() * 26 / 100, 260));
+		rightW = qMax(rightHasToolbar ? toolbarWidth + 8 : 0, qMin(win.width() * 24 / 100, 240));
+		const int maxTotalSide = qMax(2, win.width() * 52 / 100);
+		if (leftW + rightW > maxTotalSide) {
+			if (leftHasToolbar && !rightHasToolbar) {
+				leftW = qMin(leftW, maxTotalSide);
+				rightW = qMax(140, maxTotalSide - leftW);
+			} else if (rightHasToolbar && !leftHasToolbar) {
+				rightW = qMin(rightW, maxTotalSide);
+				leftW = qMax(140, maxTotalSide - rightW);
+			} else {
+				leftW = maxTotalSide / 2;
+				rightW = maxTotalSide - leftW;
+			}
+		}
+	} else if (!leftDocks.isEmpty()) {
+		leftW = qMax(leftHasToolbar ? toolbarWidth + 8 : 0, qMin(win.width() * 28 / 100, 280));
+	} else if (!rightDocks.isEmpty()) {
+		rightW = qMax(rightHasToolbar ? toolbarWidth + 8 : 0, qMin(win.width() * 28 / 100, 280));
+	}
+
+	if (!leftDocks.isEmpty()) {
+		QList<int> widths(leftDocks.size(), leftW);
+		resizeDocks(leftDocks, widths, Qt::Horizontal);
+	}
+	if (!rightDocks.isEmpty()) {
+		QList<int> widths(rightDocks.size(), rightW);
+		resizeDocks(rightDocks, widths, Qt::Horizontal);
+	}
+
+	const int restW = qMax(1, win.width() - leftW - rightW);
+	const bool haveTop = !topDocks.isEmpty();
+	const bool haveBottom = !bottomDocks.isEmpty();
+	const int maxAreaH =
+		(haveTop && haveBottom) ? qMax(96, win.height() * 26 / 100) : qMax(120, win.height() * 36 / 100);
+
+	auto sizeHorizontalArea = [&](const QList<QDockWidget *> &docks) -> int {
+		if (docks.isEmpty())
+			return 0;
+		int totalWeight = 0;
+		QList<int> weights;
+		weights.reserve(docks.size());
+		for (QDockWidget *d : docks) {
+			int w = 30;
+			if (d == ui->mixerDock)
+				w = 35;
+			else if (d == ui->transitionsDock)
+				w = 25;
+			else if (d == controlsDock)
+				w = 40;
+			weights.append(w);
+			totalWeight += w;
+		}
+		QList<int> horizSizes;
+		horizSizes.reserve(docks.size());
+		int assigned = 0;
+		for (qsizetype i = 0; i < docks.size(); ++i) {
+			const int s = (i + 1 == docks.size()) ? qMax(1, restW - assigned)
+							      : qMax(1, restW * weights[i] / qMax(1, totalWeight));
+			horizSizes.append(s);
+			assigned += s;
+		}
+		resizeDocks(docks, horizSizes, Qt::Horizontal);
+
+		int desiredH = 0;
+		for (QDockWidget *d : docks) {
+			const auto hint = d == controlsDock ? d->sizeHint() : d->minimumSizeHint();
+			desiredH = qMax(desiredH, hint.height());
+		}
+		const int rowH = qBound(80, desiredH, maxAreaH);
+		QList<int> vertSizes(docks.size(), rowH);
+		resizeDocks(docks, vertSizes, Qt::Vertical);
+		return rowH;
+	};
+
+	const int topH = sizeHorizontalArea(topDocks);
+	const int bottomH = sizeHorizontalArea(bottomDocks);
+	obsAndroidDisplayLog("Android layout: win=%dx%d left=%d right=%d top=%d bottom=%d preview=%dx%d", win.width(),
+			     win.height(), leftW, rightW, topH, bottomH, ui->preview->width(), ui->preview->height());
 }
 #endif
 
@@ -162,6 +537,10 @@ void OBSBasic::on_resetDocks_triggered(bool force)
 #endif
 #undef RESET_DOCKLIST
 
+#ifdef __ANDROID__
+	if (!androidRegularDockLayout.isEmpty())
+		SetAndroidPhoneDockLayout(false);
+#endif
 	restoreState(startingDockLayout);
 	ui->sideDocks->setChecked(true);
 
@@ -187,6 +566,8 @@ void OBSBasic::on_resetDocks_triggered(bool force)
 	resizeDocks({ui->scenesDock, ui->sourcesDock}, {sideDockWidth, sideDockWidth}, Qt::Horizontal);
 
 #ifdef __ANDROID__
+	androidPhoneDocks.clear();
+	androidDockViewport = {};
 	QTimer::singleShot(0, this, &OBSBasic::ResizeAndroidDocks);
 #endif
 
@@ -210,6 +591,13 @@ void OBSBasic::on_lockDocks_toggled(bool lock)
 
 	QDockWidget::DockWidgetFeatures mainFeatures = features;
 	mainFeatures &= ~QDockWidget::QDockWidget::DockWidgetClosable;
+#ifdef __ANDROID__
+	// Main dock moves stay inside the Android window. Qt's usual drag detaches
+	// a temporary native window even with DockWidgetFloatable disabled.
+	mainFeatures &= ~QDockWidget::DockWidgetMovable;
+	if (lock)
+		CancelAndroidDockDrag();
+#endif
 
 	ui->scenesDock->setFeatures(mainFeatures);
 	ui->sourcesDock->setFeatures(mainFeatures);

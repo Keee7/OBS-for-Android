@@ -565,10 +565,10 @@ int obs_android_storage_open(const char *uri, const char *mode) { return storage
 static const struct obs_android_browser_host *browser_host;
 void obs_android_set_browser_host(const struct obs_android_browser_host *host) { browser_host = host; }
 void *obs_android_browser_create(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css,
-				 bool transparent)
+				 bool transparent, bool reroute_audio)
 {
  const struct obs_android_browser_host *h = browser_host;
- return h && h->create ? h->create(texture, width, height, url, css, transparent) : NULL;
+ return h && h->create ? h->create(texture, width, height, url, css, transparent, reroute_audio) : NULL;
 }
 int obs_android_browser_update(void *handle, float transform[16])
 {
@@ -601,6 +601,18 @@ void obs_android_browser_touch(void *handle, int x, int y, int action)
 {
  const struct obs_android_browser_host *h = browser_host;
  if (h && h->touch && handle) h->touch(handle, x, y, action);
+}
+uint32_t obs_android_browser_read_audio(void *handle, int16_t *out, uint32_t max_frames, uint32_t *sample_rate,
+					uint32_t *channels)
+{
+ if (sample_rate)
+	 *sample_rate = 0;
+ if (channels)
+	 *channels = 0;
+ const struct obs_android_browser_host *h = browser_host;
+ if (!h || !h->read_audio || !handle || !out || max_frames == 0)
+	 return 0;
+ return h->read_audio(handle, out, max_frames, sample_rate, channels);
 }
 
 static const struct obs_android_screen_gpu_host *screen_gpu_host;

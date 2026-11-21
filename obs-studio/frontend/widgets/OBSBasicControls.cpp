@@ -7,6 +7,7 @@
 #include <QTimer> // 3-4：☰ 菜单里第二层 exec() 要推到下一轮事件循环
 #include <QPainter> // 3-4：☰ 图标自己画（设备字体没有 U+2630）
 #include <QPixmap>
+#include <QScrollArea>
 #include "OBSAndroidDisplay.hpp" // 3-4 探针日志（logcat tag OBS-display）
 #include <functional>
 #endif
@@ -177,19 +178,22 @@ OBSBasicControls::OBSBasicControls(OBSBasic *main) : QFrame(nullptr), ui(new Ui:
 		paired.append(order); // .ui 里多出来的、没列进偏好表的控件照旧排在尾部
 		order = paired;
 
-		for (QWidget *w : order)
+		for (QWidget *w : order) {
+			w->setMinimumWidth(0);
 			w->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-
-		for (int i = 0; i < order.size(); i += 2) {
-			auto *row = new QHBoxLayout;
-			row->setContentsMargins(0, 0, 0, 0);
-			row->setSpacing(2);
-			row->addWidget(order[i], 1);
-			if (i + 1 < order.size())
-				row->addWidget(order[i + 1], 1);
-			ui->buttonsVLayout->addLayout(row);
 		}
-		ui->buttonsVLayout->addStretch(1); // 按钮保持自然高度，别跟着 dock 一起被拉长
+		androidControlButtons = order;
+		setAndroidColumnCount(2);
+
+		// A tall column of buttons must remain usable without setting the
+		// minimum height of the entire Android window.
+		auto *scroll = new QScrollArea(this);
+		scroll->setFrameShape(QFrame::NoFrame);
+		scroll->setWidgetResizable(true);
+		scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+		ui->verticalLayout_9->removeWidget(ui->controlsFrame);
+		scroll->setWidget(ui->controlsFrame);
+		ui->verticalLayout_9->addWidget(scroll);
 		obsAndroidDisplayLog("3-4 校形：控制按钮 %d 个控件 → %d 行两列", int(order.size()),
 				     (int(order.size()) + 1) / 2);
 	}
@@ -432,3 +436,28 @@ void OBSBasicControls::EnableVirtualCamButtons()
 	ui->virtualCamButton->setVisible(true);
 	ui->virtualCamConfigButton->setVisible(true);
 }
+
+#ifdef __ANDROID__
+void OBSBasicControls::setAndroidColumnCount(int columns)
+{
+	columns = (columns <= 1) ? 1 : 2;
+	if (androidColumnCount == columns || androidControlButtons.isEmpty())
+		return;
+	androidColumnCount = columns;
+
+	// A nested layout is itself the item. Deleting it removes its items
+	// while the buttons remain owned by the controls widget.
+	while (QLayoutItem *it = ui->buttonsVLayout->takeAt(0))
+		delete it;
+
+	for (int i = 0; i < androidControlButtons.size(); i += columns) {
+		auto *row = new QHBoxLayout;
+		row->setContentsMargins(0, 0, 0, 0);
+		row->setSpacing(2);
+		for (int c = 0; c < columns && i + c < androidControlButtons.size(); ++c)
+			row->addWidget(androidControlButtons[i + c], 1);
+		ui->buttonsVLayout->addLayout(row);
+	}
+	ui->buttonsVLayout->addStretch(1);
+}
+#endif

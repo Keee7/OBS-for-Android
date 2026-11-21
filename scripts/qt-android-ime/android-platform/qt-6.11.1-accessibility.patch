@@ -1,0 +1,90 @@
+--- a/src/plugins/platforms/android/androidjniaccessibility.cpp
++++ b/src/plugins/platforms/android/androidjniaccessibility.cpp
+@@ -19,7 +19,13 @@
+ 
+ #include <QtCore/QObject>
+ #include <QtCore/qpointer.h>
++#include <QtCore/qsemaphore.h>
++#include <QtCore/qthread.h>
+ #include <QtCore/qvarlengtharray.h>
++
++#include <atomic>
++#include <memory>
++#include <utility>
+ 
+ static const char m_qtTag[] = "Qt A11Y";
+ 
+@@ -51,6 +57,8 @@
+     static int RANGE_TYPE_INDETERMINATE = 0;
+ 
+     static bool m_accessibilityActivated = false;
++    static std::atomic_flag m_queryPending = ATOMIC_FLAG_INIT;
++    static std::atomic_flag m_loggedQueryTimeout = ATOMIC_FLAG_INIT;
+ 
+     // This object is needed to schedule the execution of the code that
+     // deals with accessibility instances to the Qt main thread.
+@@ -77,21 +85,51 @@
+             return;
+         }
+ 
+-        QtAndroidPrivate::AndroidDeadlockProtector protector(
+-            u"QtAndroidAccessibility::runInObjectContext()"_s);
+-        if (!protector.acquire()) {
+-            __android_log_print(ANDROID_LOG_WARN, m_qtTag,
+-                                "Could not run accessibility call in object context, accessing "
+-                                "main thread could lead to deadlock");
++        if (QtAndroid::blockEventLoopsWhenSuspended()
++                && QGuiApplication::applicationState() == Qt::ApplicationSuspended)
+             return;
+-        }
+-
+-        if (!QtAndroid::blockEventLoopsWhenSuspended()
+-            || QGuiApplication::applicationState() != Qt::ApplicationSuspended) {
+-            QMetaObject::invokeMethod(context, func, Qt::BlockingQueuedConnection, retVal);
++
++        if (context->thread() == QThread::currentThread()) {
++            *retVal = func();
++            return;
++        }
++
++        // EGL needs the Android UI thread to create new window surfaces.
++        // Allow one bounded query at a time. When it times out, subsequent
++        // notifications return immediately until Qt can service its queue.
++        if (m_queryPending.test_and_set(std::memory_order_acquire))
++            return;
++
++        struct Request
++        {
++            void markFinished()
++            {
++                if (!finished.exchange(true, std::memory_order_acq_rel))
++                    m_queryPending.clear(std::memory_order_release);
++            }
++
++            ~Request() { markFinished(); }
++
++            QSemaphore done;
++            std::atomic_bool cancelled{false};
++            std::atomic_bool finished{false};
++            Ret result{};
++        };
++        auto request = std::make_shared<Request>();
++        if (!QMetaObject::invokeMethod(context, [request, fn = std::forward<Func>(func)] {
++                if (!request->cancelled.load(std::memory_order_acquire))
++                    request->result = fn();
++                request->markFinished();
++                request->done.release();
++            }, Qt::QueuedConnection))
++            return;
++
++        if (request->done.tryAcquire(1, 50)) {
++            *retVal = std::move(request->result);
+         } else {
+-            __android_log_print(ANDROID_LOG_WARN, m_qtTag,
+-                                "Could not run accessibility call in object context, event loop suspended.");
++            request->cancelled.store(true, std::memory_order_release);
++            if (!m_loggedQueryTimeout.test_and_set())
++                __android_log_print(ANDROID_LOG_WARN, m_qtTag, "Accessibility query timed out waiting for Qt");
+         }
+     }
+ 

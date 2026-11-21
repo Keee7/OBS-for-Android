@@ -423,6 +423,8 @@ package_apk() {
         --android-jar "$SDK/platforms/$PLATFORM/android.jar" --javac "$JAVA_HOME/bin/javac" \
         --output "$BUILD_DIR/qt-ime-patched/Qt6Android.jar"
     cp -f "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" "$ab_dir/libs/Qt6Android.jar"
+    cp -f "$BUILD_DIR/qt-android-platform/libplugins_platforms_qtforandroid_arm64-v8a.so" \
+        "$ab_dir/libs/arm64-v8a/libplugins_platforms_qtforandroid_arm64-v8a.so"
     "$GRADLE_BIN" --no-daemon -p "$ab_dir" assembleRelease
 
 
