@@ -9,7 +9,7 @@
 #
 # 环境变量（都有默认值）：
 #   NDK_VERSION     默认 r30（校验已有 NDK 的 Pkg.ReleaseName）
-#   QT_VERSION      默认 6.11.1
+#   QT_VERSION      默认 6.12.0
 #   GRADLE_VERSION  默认 system（或指定版本号；也可直接传 GRADLE_BIN）
 #   BUILD_TOOLS     默认 36.0.0
 #   PLATFORM        默认 android-36
@@ -28,7 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${OBS_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 NDK_VERSION="${NDK_VERSION:-r30}"
-QT_VERSION="${QT_VERSION:-6.11.1}"
+QT_VERSION="${QT_VERSION:-6.12.0}"
 GRADLE_VERSION="${GRADLE_VERSION:-system}"
 BUILD_TOOLS="${BUILD_TOOLS:-36.0.0}"
 PLATFORM="${PLATFORM:-android-36}"

@@ -1,9 +1,9 @@
 --- a/src/plugins/platforms/android/androidjniaccessibility.cpp
 +++ b/src/plugins/platforms/android/androidjniaccessibility.cpp
-@@ -19,7 +19,13 @@
- 
+@@ -21,7 +21,13 @@
  #include <QtCore/QObject>
  #include <QtCore/qpointer.h>
+ #include <QtCore/qscopeguard.h>
 +#include <QtCore/qsemaphore.h>
 +#include <QtCore/qthread.h>
  #include <QtCore/qvarlengtharray.h>
@@ -14,8 +14,8 @@
  
  static const char m_qtTag[] = "Qt A11Y";
  
-@@ -51,6 +57,8 @@
-     static int RANGE_TYPE_INDETERMINATE = 0;
+@@ -71,6 +77,8 @@
+     static int ACTION_EXPAND = 0;
  
      static bool m_accessibilityActivated = false;
 +    static std::atomic_flag m_queryPending = ATOMIC_FLAG_INIT;
@@ -23,7 +23,7 @@
  
      // This object is needed to schedule the execution of the code that
      // deals with accessibility instances to the Qt main thread.
-@@ -77,21 +85,51 @@
+@@ -97,21 +105,51 @@
              return;
          }
  

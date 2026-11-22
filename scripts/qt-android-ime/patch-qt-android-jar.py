@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Produce an isolated Qt 6.11.1 Android jar with OBS runtime fixes.
+"""Produce an isolated Qt 6.12 Android jar with OBS runtime fixes.
 
 The input Qt installation is read only. Run after androiddeployqt has staged
 its jar and before Gradle builds the APK; replace only that staged copy.
@@ -18,10 +18,11 @@ ROOT_LAYOUT = Path(__file__).with_name('QtRootLayout.java')
 WINDOW_INSETS = Path(__file__).with_name('QtWindowInsetsController.java')
 FOCUS = ROOT / 'obs-studio/frontend/cmake/android/java/com/obsproject/studio/ObsImeFocus.java'
 PREFIX = 'org/qtproject/qt/android/QtInputDelegate'
+QT_VERSION = '6.12.0'
 ORIGINAL_CLASS_HASHES = {
-    PREFIX + '.class': '72a86e3de3ac323b3f82e83e570390d83454f6dbc50ff0bc0b9a1422f0e4166a',
-    'org/qtproject/qt/android/QtRootLayout.class': '8716ce20ca6321d57de99824e91103539f41bcaa1363e208f53aff4a26e5c3e5',
-    'org/qtproject/qt/android/QtWindowInsetsController.class': '3a089d1aa514370adb030577a2e3a87bc6339c24d870d4ad8c92e833c28ad59d',
+    PREFIX + '.class': 'a8c74ad15a1a2a96a95e3363b09a7196906ca1e4b98335c4d70386de57a49fad',
+    'org/qtproject/qt/android/QtRootLayout.class': '80f444387fed3baa0dbe6dce2720f01eab4f3119f839c9f6d18994daed5ab635',
+    'org/qtproject/qt/android/QtWindowInsetsController.class': '4080f9b3585f52a0700ca1f862df69ca2b271a9453f0d2efe576f7163815ce95',
 }
 CLASS_PREFIXES = tuple(name.removesuffix('.class') for name in ORIGINAL_CLASS_HASHES)
 
@@ -34,14 +35,14 @@ def main():
     parser.add_argument('--javac', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
-    if args.qt_version != '6.11.1':
-        parser.error('this patch is limited to Qt 6.11.1')
+    if args.qt_version != QT_VERSION:
+        parser.error(f'this patch is limited to Qt {QT_VERSION}')
     if args.jar.resolve() == args.output.resolve():
         parser.error('output must differ from the input jar')
     with zipfile.ZipFile(args.jar) as jar:
         for name, expected in ORIGINAL_CLASS_HASHES.items():
             if hashlib.sha256(jar.read(name)).hexdigest() != expected:
-                parser.error(name + ' does not match the pinned Qt 6.11.1 binary')
+                parser.error(f'{name} does not match the pinned Qt {QT_VERSION} binary')
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='obs-qt-ime-', dir=args.output.parent) as tmp:
             tmp = Path(tmp)

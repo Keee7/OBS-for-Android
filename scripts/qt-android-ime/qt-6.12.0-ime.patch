@@ -8,7 +8,7 @@
  import android.app.Activity;
  import android.content.Context;
  import android.graphics.Rect;
-@@ -49,7 +50,19 @@
+@@ -51,7 +52,19 @@
      static native void handleLocationChanged(int id, int x, int y);
      // handle methods
  
@@ -29,7 +29,7 @@
      private InputMethodManager m_imm;
  
      // We can't rely on a hardcoded value, because screens have different resolutions.
-@@ -143,13 +156,30 @@
+@@ -155,13 +168,30 @@
          }
      }
  
@@ -61,7 +61,7 @@
              decorView.setWindowInsetsAnimationCallback(
                  new WindowInsetsAnimation.Callback(
                      WindowInsetsAnimation.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
-@@ -207,6 +237,7 @@
+@@ -219,6 +249,7 @@
          if (m_imm == null)
              return;
  
@@ -69,7 +69,7 @@
          QtNative.runAction(() -> {
              if (m_imm == null || m_currentEditText == null)
                  return;
-@@ -218,7 +249,7 @@
+@@ -230,7 +261,7 @@
              m_currentEditText.setLayoutParams(new QtLayout.LayoutParams(width, height, x, y));
              m_currentEditText.requestFocus();
              m_currentEditText.postDelayed(() -> {
@@ -78,7 +78,7 @@
                  if (m_currentEditText.m_optionsChanged) {
                      m_imm.restartInput(m_currentEditText);
                      m_currentEditText.m_optionsChanged = false;
-@@ -241,10 +272,35 @@
+@@ -253,10 +284,35 @@
      public void updateHandles(int mode, int editX, int editY, int editButtons,
                                int x1, int y1, int x2, int y2, boolean rtl)
      {
@@ -116,7 +116,7 @@
      }
  
      @Override
-@@ -404,6 +460,7 @@
+@@ -416,6 +472,7 @@
          setKeyboardTransitionInProgress(visibility);
  
          if (!visibility) {
@@ -124,7 +124,7 @@
              // Hiding the keyboard clears the immersive mode, so we need to set it again.
              m_keyboardVisibilityListener.onKeyboardVisibilityChange();
              if (m_currentEditText != null)
-@@ -414,7 +471,17 @@
+@@ -426,7 +483,17 @@
      void setFocusedView(QtEditText currentEditText)
      {
          setKeyboardTransitionInProgress(false);

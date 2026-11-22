@@ -103,7 +103,7 @@ def _keep_app_locales(build_gradle: Path) -> None:
         return
     locales.add("en")
     source = build_gradle.read_text(encoding="utf-8")
-    # Qt 6.11.1's template filters out all Android resources outside English.
+    # Some Qt Android templates filter out all resources outside English.
     config = "resourceConfigurations.addAll(" + json.dumps(sorted(locales)) + ") // OBS app locales"
     filter_line = r'''(?m)^([ \t]*)(?:resConfig[ \t]+(["'])en\2|resourceConfigurations\.addAll\([^\n]+\) // OBS app locales)[ \t]*$'''
     updated = re.sub(filter_line, lambda match: match[1] + config, source)

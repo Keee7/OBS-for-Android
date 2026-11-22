@@ -79,7 +79,7 @@ git push origin v0.1.19
 | 首次（缓存全空） | **40–60 分钟** |
 | 依赖 + 工具链都命中缓存 | **10–15 分钟** |
 
-CI 复用 runner 上的 Android SDK、NDK 和 CMake，使用 JDK 17，并通过 `setup-gradle` 安装 Gradle 9.3.1。缓存如下。
+CI 复用 runner 上的 Android SDK、NDK 和 CMake，使用 JDK 17，并通过 `setup-gradle` 安装 Gradle 9.5.1。缓存如下。
 
 | 缓存 | 内容 | 失效条件 |
 | --- | --- | --- |
@@ -123,12 +123,12 @@ bash scripts/ci-build-android.sh
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `NDK_VERSION` | `r30` | 与仓库 Windows 构建一致 |
-| `QT_VERSION` | `6.11.1` | 由 aqt 按版本解析官方仓库 |
+| `QT_VERSION` | `6.12.0` | 由 aqt 按版本解析官方仓库 |
 | `ANDROID_SDK_ROOT` | 自动查找 | 指向已安装的 SDK，脚本也检查 `ANDROID_HOME` 和 runner 的 SDK 目录 |
-| `GRADLE_VERSION` | `system` | 校验 `PATH` 中的 Gradle，工作流指定 `9.3.1` |
+| `GRADLE_VERSION` | `system` | 校验 `PATH` 中的 Gradle，工作流指定 `9.5.1` |
 | `GRADLE_BIN` | `PATH` 中的 `gradle` | 可显式指定 Gradle 可执行文件的完整路径 |
 | `BUILD_TOOLS` | `36.0.0` | 也用于 zipalign / apksigner |
-| `PLATFORM` | `android-36` | Qt 6.11.1 的 Gradle 模板要 platform 36 |
+| `PLATFORM` | `android-36` | Qt 6.12.0 的 Gradle 模板要 platform 36 |
 | `JOBS` | `nproc` | |
 | `QT_ROOT` | `$HOME/Qt` | Qt 安装根目录，包含版本子目录 |
 | `DL_ROOT` | 仓库同级的 `obs-dl` | 下载物落盘（**不**缓存） |
@@ -140,7 +140,7 @@ bash scripts/ci-build-android.sh
 - CI 构建 APK 并校验包名、版本、原生库和插件。已签名的 APK 还会校验签名和 16 KB 对齐。
 - **只有 arm64-v8a**。与本仓其余构建路径一致（x86_64 需要改 ABI 与依赖构建参数）。
 - **Qt 由 `aqt install-qt` 安装**（`all_os/android` + `linux/desktop`），不需要 Qt 账号。
-  升版本只改 `QT_VERSION`，不再需要找 7z 时间戳或手工拼 URL。
+  aqt 按 `QT_VERSION` 选择官方包。升级时需同步更新 Android 运行时补丁、校验值和 Gradle。
 - **依赖构建是源码级**：`fetch.sh` 里 `x264`/`rnnoise` 用的是分支（`master`）而不是 tag，
   所以不同时间构建出来的依赖**不是逐字节可复现**的。要严格复现请把版本钉到具体 commit。
 - **Release 只在该次构建真的签过名时才创建**（避免发出装不上的包）。
@@ -157,7 +157,7 @@ bash scripts/ci-build-android.sh
 | `CMake 版本过低` | 安装 CMake 3.31.6，并确保在 `PATH` 中能找到它。脚本检查的最低版本为 3.28 |
 | `Unrecognized named-value: 'runner'` | job 级 `env` 里用了 `runner.*`。`runner` 上下文只在 step 级可用；job 级改用 `github.*` |
 | `Could not find ... nlohmann_json` | 前端 `CMakeLists.txt:73` 无条件要它，但它不在 `deps-android` 清单里。脚本的 `install_nlohmann_json()` 会装；若报错看该函数日志 |
-| `uic: error while loading shared libraries: libicui18n.so.73` / `AutoUic subprocess error` / exit 127 | **旧版 6.9.3 手工解包**漏了独立的 ICU 73 运行时包（Ubuntu 24.04 自带 74）。现在用 aqt 装完整 Qt 6.11.1 宿主包，不再缺 ICU；若换回 6.9.x 手工解包才需要重新处理 |
+| `uic: error while loading shared libraries: libicui18n.so.73` / `AutoUic subprocess error` / exit 127 | **旧版 6.9.3 手工解包**漏了独立的 ICU 73 运行时包（Ubuntu 24.04 自带 74）。现在用 aqt 装完整 Qt 6.12.0 宿主包，不再缺 ICU；若换回 6.9.x 手工解包才需要重新处理 |
 | `Host tool ... 跑不起来` / 工具自检 FATAL | 宿主 Qt 工具缺共享库。脚本的 `probe_host_tools()` 在装配阶段就会撞出来（秒级），不必等构建 |
 | 签名步骤报口令错 | Secrets 里的四项要来自**同一次** `generate-release-key.sh` 输出 |
 | `base64: invalid input` | `ANDROID_KEYSTORE_BASE64` 粘贴时断行/带了多余字符；重新整行复制 |

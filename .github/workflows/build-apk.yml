@@ -59,8 +59,8 @@ jobs:
     env:
       # 工具链版本。runner 环境准备在 workflow 开头统一完成；BUILD_TOOLS / PLATFORM 用于配置与签名校验。
       NDK_VERSION: r30
-      QT_VERSION: 6.11.1
-      GRADLE_VERSION: '9.3.1'
+      QT_VERSION: 6.12.0
+      GRADLE_VERSION: '9.5.1'
       BUILD_TOOLS: 36.0.0
       PLATFORM: android-36
       # 下载物放到工作区**外**（$GITHUB_WORKSPACE/.. 就是 runner 的 work 目录；

@@ -23,7 +23,7 @@ SDK="${ANDROID_SDK_ROOT:?缺 ANDROID_SDK_ROOT，先 source ~/.obs-android-env.sh
 QT="${QT_DIR:?缺 QT_DIR}"
 HOST="${QT_HOST_PATH:?缺 QT_HOST_PATH}"
 NDK="${NDK_ROOT:?缺 NDK_ROOT}"
-GRADLE_BIN="${GRADLE_BIN:-$HOME/toolchain/gradle-9.3.1/bin}"
+GRADLE_BIN="${GRADLE_BIN:-$HOME/toolchain/gradle-9.5.1/bin}"
 COMPILE_SDK_VERSION="${OBS_ANDROID_COMPILE_SDK_VERSION:-36}"
 case "$COMPILE_SDK_VERSION" in
   ''|*[!0-9]*) echo "FATAL: OBS_ANDROID_COMPILE_SDK_VERSION 必须为 SDK 平台版本号" >&2; exit 1 ;;
@@ -157,7 +157,7 @@ python3 "$SCRIPT_DIR/stage-qt-gradle-properties.py" \
     --build-tools 36.0.0 || exit 1
 
 python3 "$SCRIPT_DIR/qt-android-ime/patch-qt-android-jar.py" \
-    --qt-version 6.11.1 --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
+    --qt-version 6.12.0 --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
     --android-jar "$SDK/platforms/android-$COMPILE_SDK_VERSION/android.jar" \
     --javac "$JAVA_HOME/bin/javac" --output "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" || exit 1
 cp -f "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" "$AB_DIR/libs/Qt6Android.jar" || exit 1

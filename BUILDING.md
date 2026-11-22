@@ -19,17 +19,17 @@ This guide describes how to build OBS for Android on Ubuntu / WSL, via GitHub Ac
 | --- | --- | --- | --- |
 | **GitHub Actions** | Hosted Ubuntu Runner | `obs-android-apk-<sha>` workflow artifact | Automated CI builds |
 | **Ubuntu / WSL CI Build Script** | Ubuntu 24.04 (or WSL2) with the toolchain installed | APK located in `build-fe-arm64-v8a-ci/` | Build native dependencies and package the APK using the CI entry point |
-| **WSL / Linux Existing Toolchain** | Configured NDK r30 & Qt 6.11.1 | `releases/OBS-Android-arm64-v8a-wsl-*.apk` | Local day-to-day incremental development |
+| **WSL / Linux Existing Toolchain** | Configured NDK r30 & Qt 6.12.0 | `releases/OBS-Android-arm64-v8a-wsl-*.apk` | Local day-to-day incremental development |
 | **Native Windows** | Windows 10/11 + MSYS2 + PowerShell | `releases/OBS-Android-arm64-obs-*.apk` | Native Windows cross-compilation & packaging |
 
 ### Toolchain Requirements
 
 * **Android SDK**: Build-Tools `36.0.0`, Platform `android-36`, Platform-Tools (ADB)
 * **Android NDK**: `r30` (30.0.16248370)
-* **Qt**: `6.11.1` (Android arm64 package + matching host Qt with `androiddeployqt`)
+* **Qt**: `6.12.0` (Android arm64 package + matching host Qt with `androiddeployqt`)
 * **Java**: JDK 17
 * **Build System**: CMake 3.31+ and Ninja
-* **Gradle**: 9.3.1
+* **Gradle**: 9.5.1
 * **Host Tools**: Python 3; MSYS2 (for compiling specific native dependencies on Windows)
 
 Dependency versions are tracked in [deps-android/versions.sh](deps-android/versions.sh).
@@ -37,7 +37,7 @@ Dependency versions are tracked in [deps-android/versions.sh](deps-android/versi
 <a name="ci-toolchain-setup"></a>
 ### Ubuntu / WSL CI Build Script
 
-On Ubuntu 24.04 or WSL2, first install the [Android SDK command-line tools](https://developer.android.com/tools/sdkmanager) under `$HOME/Android/Sdk/cmdline-tools/latest` and unpack [Gradle 9.3.1](https://gradle.org/releases/) under `$HOME/toolchain`. Adjust the paths below if installed elsewhere.
+On Ubuntu 24.04 or WSL2, first install the [Android SDK command-line tools](https://developer.android.com/tools/sdkmanager) under `$HOME/Android/Sdk/cmdline-tools/latest` and unpack [Gradle 9.5.1](https://gradle.org/releases/) under `$HOME/toolchain`. Adjust the paths below if installed elsewhere.
 
 ```sh
 sudo apt-get update
@@ -50,16 +50,16 @@ source "$HOME/.venvs/obs-android/bin/activate"
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
 export QT_ROOT="$HOME/Qt"
-export GRADLE_VERSION=9.3.1
-export PATH="$HOME/toolchain/gradle-9.3.1/bin:$PATH"
+export GRADLE_VERSION=9.5.1
+export PATH="$HOME/toolchain/gradle-9.5.1/bin:$PATH"
 
 python -m pip install 'cmake==3.31.6' aqtinstall
 SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses
 "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" \
   "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;30.0.16248370"
-aqt install-qt all_os android 6.11.1 android_arm64_v8a -O "$QT_ROOT"
-aqt install-qt linux desktop 6.11.1 linux_gcc_64 -O "$QT_ROOT"
+aqt install-qt all_os android 6.12.0 android_arm64_v8a -O "$QT_ROOT"
+aqt install-qt linux desktop 6.12.0 linux_gcc_64 -O "$QT_ROOT"
 ```
 
 From the repository root, run the build with the configured environment. The script builds the native dependencies and packages the APK.
@@ -77,10 +77,10 @@ Run the commands from the repository root. Point the variables at your installed
 ```sh
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
 export NDK_ROOT="$ANDROID_SDK_ROOT/ndk/30.0.16248370"
-export QT_DIR="$HOME/Qt/6.11.1"
+export QT_DIR="$HOME/Qt/6.12.0"
 export QT_HOST_PATH="$QT_DIR/gcc_64"
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-export GRADLE_BIN="$HOME/toolchain/gradle-9.3.1/bin"
+export GRADLE_BIN="$HOME/toolchain/gradle-9.5.1/bin"
 
 bash deps-android/fetch.sh
 NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a
@@ -102,10 +102,10 @@ The Windows build script [scripts/build-frontend-apk-windows.ps1](scripts/build-
 build-tools/
   android-sdk/                  # Contains platforms/android-36 and build-tools/36.0.0
   ndk/android-ndk-r30/           # Windows NDK r30
-  Qt/6.11.1/android_arm64_v8a/  # Qt Android ARM64
-  Qt/6.11.1/msvc2022_64/        # Host Qt with bin/androiddeployqt.exe
+  Qt/6.12.0/android_arm64_v8a/  # Qt Android ARM64
+  Qt/6.12.0/msvc2022_64/        # Host Qt with bin/androiddeployqt.exe
   jdk-17.0.12/                  # JDK 17
-  gradle/gradle-9.3.1/          # Gradle
+  gradle/gradle-9.5.1/          # Gradle
   cmake/cmake-3.31.6-windows-x86_64/
   ninja/                        # ninja.exe
   android-deps-ffmpeg8/arm64-v8a/       # Precompiled ARM64 native headers and libraries
@@ -155,24 +155,24 @@ Pass `-AntutuPackage` to stage the alternate application ID `com.antutu.ABenchMa
 | --- | --- | --- | --- |
 | **GitHub Actions** | 托管 Ubuntu 运行器 | 工作流产物 `obs-android-apk-<sha>` | 持续集成与自动化流水线 |
 | **Ubuntu / WSL CI 构建脚本** | Ubuntu 24.04（或 WSL2），已安装工具链 | `build-fe-arm64-v8a-ci/` 下的安装包 | 使用 CI 构建入口编译依赖并打包 APK |
-| **WSL / Linux 本地现有工具链** | 已配置 NDK r30 与 Qt 6.11.1 | `releases/OBS-Android-arm64-v8a-wsl-*.apk` | 日常本地增量开发与调试 |
+| **WSL / Linux 本地现有工具链** | 已配置 NDK r30 与 Qt 6.12.0 | `releases/OBS-Android-arm64-v8a-wsl-*.apk` | 日常本地增量开发与调试 |
 | **Windows 原生环境** | Windows 10/11 + MSYS2 + PowerShell | `releases/OBS-Android-arm64-obs-*.apk` | 原生 Windows 交叉编译与自动化打包 |
 
 ### 基础工具链要求
 
 * **Android SDK**：Build-Tools `36.0.0`，Platform `android-36`，Platform-Tools (ADB)
 * **Android NDK**：`r30` (30.0.16248370)
-* **Qt**：`6.11.1` (Android arm64 预编译包 + 对应宿主工具，包含 `androiddeployqt`)
+* **Qt**：`6.12.0` (Android arm64 预编译包 + 对应宿主工具，包含 `androiddeployqt`)
 * **Java**：JDK 17
 * **构建系统**：CMake 3.31+ 与 Ninja
-* **Gradle**：9.3.1
+* **Gradle**：9.5.1
 * **宿主依赖库**：Python 3，MSYS2 环境（用于 Windows 下编译部分 C/C++ 原生依赖）
 
 依赖版本的完整定义见 [deps-android/versions.sh](deps-android/versions.sh)。
 
 ### Ubuntu / WSL 快速构建
 
-在 Ubuntu 24.04 或 WSL2 上，先按[工具链安装步骤](#ci-toolchain-setup)准备 JDK 17、CMake、Gradle 9.3.1、Android SDK（含 API 36、Build-Tools 36.0.0、ADB 和 NDK r30）以及 Qt 6.11.1 的宿主和 arm64 套件。按安装位置设置 `JAVA_HOME`、`ANDROID_SDK_ROOT`、`QT_ROOT` 和 `PATH`。
+在 Ubuntu 24.04 或 WSL2 上，先按[工具链安装步骤](#ci-toolchain-setup)准备 JDK 17、CMake、Gradle 9.5.1、Android SDK（含 API 36、Build-Tools 36.0.0、ADB 和 NDK r30）以及 Qt 6.12.0 的宿主和 arm64 套件。按安装位置设置 `JAVA_HOME`、`ANDROID_SDK_ROOT`、`QT_ROOT` 和 `PATH`。
 
 在同一终端进入仓库根目录。脚本会编译原生依赖并打包 APK。
 
@@ -198,10 +198,10 @@ Windows 构建脚本 [scripts/build-frontend-apk-windows.ps1](scripts/build-fron
 build-tools/
   android-sdk/                  # 包含 platforms/android-36 与 build-tools/36.0.0
   ndk/android-ndk-r30/           # Windows 版 NDK r30
-  Qt/6.11.1/android_arm64_v8a/  # Qt Android ARM64
-  Qt/6.11.1/msvc2022_64/        # Qt 宿主工具 (含 androiddeployqt.exe)
+  Qt/6.12.0/android_arm64_v8a/  # Qt Android ARM64
+  Qt/6.12.0/msvc2022_64/        # Qt 宿主工具 (含 androiddeployqt.exe)
   jdk-17.0.12/                  # JDK 17
-  gradle/gradle-9.3.1/          # Gradle
+  gradle/gradle-9.5.1/          # Gradle
   cmake/cmake-3.31.6-windows-x86_64/
   ninja/                        # ninja.exe
   android-deps-ffmpeg8/arm64-v8a/       # 预编译好的 ARM64 原生头文件与库

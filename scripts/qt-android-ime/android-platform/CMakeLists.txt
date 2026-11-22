@@ -1,10 +1,10 @@
 # Build the patched QPA plugin against the same Qt used by androiddeployqt.
 include(FetchContent)
-find_package(Qt6 6.11.1 EXACT CONFIG REQUIRED COMPONENTS CorePrivate GuiPrivate)
+find_package(Qt6 6.12.0 EXACT CONFIG REQUIRED COMPONENTS CorePrivate GuiPrivate)
 FetchContent_Declare(
   obs_qtbase_android
-  URL https://codeload.github.com/qt/qtbase/tar.gz/refs/tags/v6.11.1
-  URL_HASH SHA256=e20852bd45cdef5da5175f3634e285e03e2be7ca437f3d2b7e1a2af7321bca7a
+  URL https://codeload.github.com/qt/qtbase/tar.gz/refs/tags/v6.12.0
+  URL_HASH SHA256=dff6570582c272cbe744d2e460700318262af505460f4215276459970ae31b46
   SOURCE_SUBDIR obs-no-cmake
 )
 
@@ -46,7 +46,7 @@ endfunction()
 FetchContent_MakeAvailable(obs_qtbase_android)
 set(QtBase_SOURCE_DIR "${obs_qtbase_android_SOURCE_DIR}")
 
-set(patch "${CMAKE_CURRENT_LIST_DIR}/qt-6.11.1-accessibility.patch")
+set(patch "${CMAKE_CURRENT_LIST_DIR}/qt-6.12.0-accessibility.patch")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${patch}")
 file(SHA256 "${patch}" patch_hash)
 string(SUBSTRING "${patch_hash}" 0 16 patch_hash)

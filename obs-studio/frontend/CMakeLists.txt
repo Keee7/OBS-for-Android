@@ -56,7 +56,7 @@ if(OS_ANDROID)
   # .so staging and Qt6Android.jar patching, so keep Qt's auto-generated APK
   # targets out of the default ALL build graph.
   set(QT_NO_GLOBAL_APK_TARGET_PART_OF_ALL ON)
-  find_package(Qt6 6.11.1 REQUIRED COMPONENTS Core)
+  find_package(Qt6 6.12.0 REQUIRED COMPONENTS Core)
   qt_add_executable(obs-studio MANUAL_FINALIZATION)
 else()
   add_executable(obs-studio)
