@@ -6,6 +6,7 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 
 class QWidget;
 
@@ -13,6 +14,10 @@ class QWidget;
 // 这个框会走 3-3 的遮挡逻辑（弹出时销毁预览面，关闭后自动重建），不需要额外处理。
 void obsAndroidShowLocalPath(QWidget *parent, const QString &title, const QString &path);
 void obsAndroidExportLog(QWidget *parent, const char *name);
+
+bool obsAndroidExportProfile(const QString &tree, const QString &source, const QString &name,
+			     const QStringList &files);
+QString obsAndroidImportProfile(const QString &tree, const QString &destination, const QStringList &files);
 
 // Scoped-storage destinations use a resolver-owned, seekable file descriptor.
 void obsAndroidStorageInit();

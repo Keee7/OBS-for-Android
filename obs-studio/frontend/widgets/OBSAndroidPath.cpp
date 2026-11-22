@@ -10,6 +10,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QJniArray>
 #include <QJniObject>
 #include <QSaveFile>
 #include <obs-android.h>
@@ -196,4 +197,37 @@ void obsAndroidExportLog(QWidget *parent, const char *name)
 		return;
 	}
 	OBSMessageBox::information(parent, title, QTStr("LogExport.Success"));
+}
+
+bool obsAndroidExportProfile(const QString &tree, const QString &source, const QString &name,
+			     const QStringList &files)
+{
+	const auto context = storageContext();
+	if (!context.isValid())
+		return false;
+	const auto uri = QJniObject::fromString(tree);
+	const auto path = QJniObject::fromString(source);
+	const auto directoryName = QJniObject::fromString(name);
+	const QJniArray fileNames(files);
+	return QJniObject::callStaticMethod<jboolean>(
+		storageClass, "exportProfile",
+		"(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)Z",
+		context.object<jobject>(), uri.object<jstring>(), path.object<jstring>(),
+		directoryName.object<jstring>(), fileNames.object<jobjectArray>());
+}
+
+QString obsAndroidImportProfile(const QString &tree, const QString &destination, const QStringList &files)
+{
+	const auto context = storageContext();
+	if (!context.isValid())
+		return {};
+	const auto uri = QJniObject::fromString(tree);
+	const auto path = QJniObject::fromString(destination);
+	const QJniArray fileNames(files);
+	return QJniObject::callStaticObjectMethod(
+		       storageClass, "importProfile",
+		       "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)Ljava/lang/String;",
+		       context.object<jobject>(), uri.object<jstring>(), path.object<jstring>(),
+		       fileNames.object<jobjectArray>())
+		.toString();
 }

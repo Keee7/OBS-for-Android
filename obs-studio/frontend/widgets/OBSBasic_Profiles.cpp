@@ -17,6 +17,10 @@
 
 #include "OBSBasic.hpp"
 
+#ifdef __ANDROID__
+#include "OBSAndroidPath.hpp"
+#endif
+
 #ifdef YOUTUBE_ENABLED
 #include <docks/YouTubeAppDock.hpp>
 #endif
@@ -27,6 +31,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QTemporaryDir>
 
 #include <unordered_set>
 
@@ -48,6 +53,8 @@ extern const char *get_simple_output_encoder(const char *name);
 // MARK: - Anonymous Namespace
 namespace {
 QList<QString> sortedProfiles{};
+
+const QStringList profileFiles{"basic.ini", "service.json", "streamEncoder.json", "recordEncoder.json"};
 
 void updateSortedProfiles(const OBSProfileCache &profiles)
 {
@@ -553,113 +560,113 @@ void OBSBasic::on_actionRemoveProfile_triggered(bool skipConfirmation)
 
 void OBSBasic::on_actionImportProfile_triggered()
 {
-	const QString home = QDir::homePath();
+	const QString title = QTStr("Basic.MainMenu.Profile.Import");
+	const QString sourceDirectory = SelectDirectory(this, title, QDir::homePath());
+	if (sourceDirectory.isEmpty())
+		return;
 
-	const QString sourceDirectory = SelectDirectory(this, QTStr("Basic.MainMenu.Profile.Import"), home);
+	const auto showError = [this, &title] {
+		OBSMessageBox::warning(this, title, QTStr("Basic.MainMenu.Profile.ImportError"));
+	};
 
-	if (!sourceDirectory.isEmpty() && !sourceDirectory.isNull()) {
-		const std::filesystem::path sourcePath =
-			std::filesystem::u8path(QDir::cleanPath(sourceDirectory).toStdString());
-		const std::string directoryName = sourcePath.filename().u8string();
+	const auto profilesPath = App()->userProfilesLocation / std::filesystem::u8path(OBSProfilePath.substr(1));
+	QDir profilesDirectory(QString::fromStdString(profilesPath.u8string()));
+	const QDir stagingParent(QString::fromStdString(profilesPath.parent_path().u8string()));
+	QTemporaryDir staging(stagingParent.filePath(".profile-import-XXXXXX"));
+	if (!staging.isValid()) {
+		showError();
+		return;
+	}
 
-		if (auto profile = GetProfileByDirectoryName(directoryName)) {
-			OBSMessageBox::warning(this, QTStr("Basic.MainMenu.Profile.Import"),
-					       QTStr("Basic.MainMenu.Profile.Exists"));
-			return;
-		}
-
-		std::string destinationPathString;
-		destinationPathString.reserve(App()->userProfilesLocation.u8string().size() + OBSProfilePath.size() +
-					      directoryName.size());
-		destinationPathString.append(App()->userProfilesLocation.u8string())
-			.append(OBSProfilePath)
-			.append(directoryName);
-
-		const std::filesystem::path destinationPath = std::filesystem::u8path(destinationPathString);
-
-		try {
-			std::filesystem::create_directory(destinationPath);
-		} catch (const std::filesystem::filesystem_error &error) {
-			blog(LOG_WARNING, "Failed to create profile directory '%s':\n%s", directoryName.c_str(),
-			     error.what());
-			return;
-		}
-
-		const std::array<std::pair<std::string, bool>, 4> profileFiles{{
-			{"basic.ini", true},
-			{"service.json", false},
-			{"streamEncoder.json", false},
-			{"recordEncoder.json", false},
-		}};
-
-		for (auto &[file, isMandatory] : profileFiles) {
-			const std::filesystem::path sourceFile = sourcePath / std::filesystem::u8path(file);
-
-			if (!std::filesystem::exists(sourceFile)) {
-				if (isMandatory) {
-					blog(LOG_ERROR,
-					     "Failed to import profile from directory '%s' - necessary file '%s' not found",
-					     directoryName.c_str(), file.c_str());
-					return;
-				}
-				continue;
-			}
-
-			const std::filesystem::path destinationFile = destinationPath / std::filesystem::u8path(file);
-
-			try {
-				std::filesystem::copy(sourceFile, destinationFile);
-			} catch (const std::filesystem::filesystem_error &error) {
-				blog(LOG_WARNING, "Failed to copy import file '%s' for profile '%s':\n%s", file.c_str(),
-				     directoryName.c_str(), error.what());
+	QString directoryName;
+#ifdef __ANDROID__
+	if (sourceDirectory.startsWith("content://")) {
+		directoryName = obsAndroidImportProfile(sourceDirectory, staging.path(), profileFiles);
+	} else
+#endif
+	{
+		const QDir source(sourceDirectory);
+		directoryName = source.dirName();
+		for (const auto &name : profileFiles) {
+			const QString file = source.filePath(name);
+			if (QFile::exists(file) && !QFile::copy(file, staging.filePath(name))) {
+				showError();
 				return;
 			}
 		}
-
-		RefreshProfiles(true);
 	}
+
+	if (directoryName.isEmpty() || directoryName == "." || directoryName == ".." ||
+	    directoryName.contains('/') || directoryName.contains('\\') || directoryName.contains(QChar::Null)) {
+		showError();
+		return;
+	}
+
+	const QString stagedSettings = staging.filePath(profileFiles.front());
+	ConfigFile config;
+	if (config.Open(stagedSettings.toUtf8().constData(), CONFIG_OPEN_EXISTING) != CONFIG_SUCCESS) {
+		showError();
+		return;
+	}
+	const char *name = config_get_string(config, "General", "Name");
+	const std::string directory = directoryName.toStdString();
+	if (GetProfileByDirectoryName(directory) || GetProfileByName(name ? name : directory)) {
+		OBSMessageBox::warning(this, title, QTStr("Basic.MainMenu.Profile.Exists"));
+		return;
+	}
+
+	if (!profilesDirectory.rename(staging.path(), profilesDirectory.filePath(directoryName))) {
+		showError();
+		return;
+	}
+	staging.setAutoRemove(false);
+	RefreshProfiles(true);
 }
 
 void OBSBasic::on_actionExportProfile_triggered()
 {
-	const OBSProfile &currentProfile = GetCurrentProfile();
+	const QString title = QTStr("Basic.MainMenu.Profile.Export");
+	const auto showError = [this, &title] {
+		OBSMessageBox::warning(this, title, QTStr("Basic.MainMenu.Profile.ExportError"));
+	};
 
-	const QString home = QDir::homePath();
+	try {
+		const OBSProfile currentProfile = GetCurrentProfile();
+		const QString destinationDirectory = SelectDirectory(this, title, QDir::homePath());
+		if (destinationDirectory.isEmpty())
+			return;
 
-	const QString destinationDirectory = SelectDirectory(this, QTStr("Basic.MainMenu.Profile.Export"), home);
+#ifdef __ANDROID__
+		if (destinationDirectory.startsWith("content://")) {
+			const auto source = QString::fromStdString(currentProfile.path.u8string());
+			const auto name = QString::fromStdString(currentProfile.directoryName);
+			if (obsAndroidExportProfile(destinationDirectory, source, name, profileFiles))
+				OBSMessageBox::information(this, title, QTStr("Basic.MainMenu.Profile.ExportSuccess"));
+			else
+				showError();
+			return;
+		}
+#endif
 
-	const std::array<std::string, 4> profileFiles{"basic.ini", "service.json", "streamEncoder.json",
-						      "recordEncoder.json"};
-
-	if (!destinationDirectory.isEmpty() && !destinationDirectory.isNull()) {
-		const std::filesystem::path sourcePath = currentProfile.path;
-		const std::filesystem::path destinationPath =
-			std::filesystem::u8path(destinationDirectory.toStdString()) /
-			std::filesystem::u8path(currentProfile.directoryName);
-
-		if (!std::filesystem::exists(destinationPath)) {
-			std::filesystem::create_directory(destinationPath);
+		if (!std::filesystem::is_regular_file(currentProfile.profileFile)) {
+			showError();
+			return;
 		}
 
-		std::filesystem::copy_options copyOptions = std::filesystem::copy_options::overwrite_existing;
-
-		for (auto &file : profileFiles) {
-			const std::filesystem::path sourceFile = sourcePath / std::filesystem::u8path(file);
-
-			if (!std::filesystem::exists(sourceFile)) {
-				continue;
-			}
-
-			const std::filesystem::path destinationFile = destinationPath / std::filesystem::u8path(file);
-
-			try {
-				std::filesystem::copy(sourceFile, destinationFile, copyOptions);
-			} catch (const std::filesystem::filesystem_error &error) {
-				blog(LOG_WARNING, "Failed to copy export file '%s' for profile '%s'\n%s", file.c_str(),
-				     currentProfile.name.c_str(), error.what());
-				return;
+		const auto destinationPath = std::filesystem::u8path(destinationDirectory.toStdString()) /
+					     std::filesystem::u8path(currentProfile.directoryName);
+		std::filesystem::create_directory(destinationPath);
+		for (const auto &file : profileFiles) {
+			const auto name = std::filesystem::u8path(file.toStdString());
+			const auto sourceFile = currentProfile.path / name;
+			if (std::filesystem::exists(sourceFile)) {
+				std::filesystem::copy_file(sourceFile, destinationPath / name,
+							   std::filesystem::copy_options::overwrite_existing);
 			}
 		}
+	} catch (const std::exception &error) {
+		blog(LOG_WARNING, "Failed to export profile: %s", error.what());
+		showError();
 	}
 }
 

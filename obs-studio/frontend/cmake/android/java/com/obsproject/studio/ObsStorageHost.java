@@ -2,6 +2,7 @@
 package com.obsproject.studio;
 
 import android.content.ContentValues;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.database.Cursor;
 import android.net.Uri;
@@ -15,6 +16,13 @@ import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.util.Log;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.Arrays;
+import java.util.List;
 
 /** Scoped-storage recording destinations. No all-files-access permission. */
 public final class ObsStorageHost {
@@ -127,6 +135,88 @@ public final class ObsStorageHost {
             return false;
         }
     }
+
+    public static boolean exportProfile(Context context, String treePath, String sourcePath,
+                                        String directoryName, String[] files) {
+        ContentResolver resolver = context.getContentResolver();
+        Uri folder = null;
+        try {
+            Uri tree = Uri.parse(treePath);
+            Uri parent = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree));
+            File source = new File(sourcePath);
+            if (!new File(source, "basic.ini").isFile()) throw new IOException("Profile has no basic.ini");
+
+            // Use a new folder so a failed export cannot damage an earlier backup.
+            folder = DocumentsContract.createDocument(resolver, parent,
+                    DocumentsContract.Document.MIME_TYPE_DIR, directoryName);
+            if (folder == null) throw new IOException("Could not create profile directory");
+
+            byte[] buffer = new byte[16384];
+            for (String name : files) {
+                File file = new File(source, name);
+                if (!file.exists() && !"basic.ini".equals(name)) continue;
+                String mime = name.endsWith(".json") ? "application/json" : "application/octet-stream";
+                Uri document = DocumentsContract.createDocument(resolver, folder, mime, name);
+                if (document == null) throw new IOException("Could not create " + name);
+                try (InputStream input = new FileInputStream(file);
+                     OutputStream output = resolver.openOutputStream(document, "wt")) {
+                    copyProfileFile(input, output, buffer);
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Could not export profile", e);
+            if (folder != null) remove(context, folder.toString());
+            return false;
+        }
+    }
+
+    public static String importProfile(Context context, String treePath, String destinationPath, String[] files) {
+        ContentResolver resolver = context.getContentResolver();
+        try {
+            Uri tree = Uri.parse(treePath);
+            String id = DocumentsContract.getTreeDocumentId(tree);
+            Uri folder = DocumentsContract.buildDocumentUriUsingTree(tree, id);
+            String directoryName;
+            try (Cursor directory = resolver.query(folder,
+                    new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null)) {
+                if (directory == null || !directory.moveToFirst()) throw new IOException("Could not read profile directory");
+                directoryName = directory.getString(0);
+            }
+
+            Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, id);
+            String[] columns = {DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE};
+            byte[] buffer = new byte[16384];
+            List<String> profileFiles = Arrays.asList(files);
+            try (Cursor list = resolver.query(children, columns, null, null, null)) {
+                if (list == null) throw new IOException("Could not list profile directory");
+                while (list.moveToNext()) {
+                    String name = list.getString(1);
+                    if (!profileFiles.contains(name) ||
+                            DocumentsContract.Document.MIME_TYPE_DIR.equals(list.getString(2))) continue;
+                    File destination = new File(destinationPath, name);
+                    if (destination.exists()) throw new IOException("Duplicate profile file " + name);
+                    Uri document = DocumentsContract.buildDocumentUriUsingTree(tree, list.getString(0));
+                    try (InputStream input = resolver.openInputStream(document);
+                         OutputStream output = new FileOutputStream(destination)) {
+                        copyProfileFile(input, output, buffer);
+                    }
+                }
+            }
+            return directoryName;
+        } catch (Exception e) {
+            Log.e(TAG, "Could not import profile", e);
+            return "";
+        }
+    }
+
+    private static void copyProfileFile(InputStream input, OutputStream output, byte[] buffer) throws IOException {
+        if (input == null || output == null) throw new IOException("Could not open profile file");
+        int size;
+        while ((size = input.read(buffer)) != -1) output.write(buffer, 0, size);
+    }
+
     public static int open(Context context, String path, String mode) {
         try (ParcelFileDescriptor fd = context.getContentResolver().openFileDescriptor(Uri.parse(path),
                 mode.startsWith("w") ? "rwt" : mode.startsWith("a") ? "wa" : "r")) {
