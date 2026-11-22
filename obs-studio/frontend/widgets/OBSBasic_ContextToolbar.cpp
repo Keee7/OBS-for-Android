@@ -90,8 +90,9 @@ void OBSBasic::UpdateContextBarVisibility()
 		return;
 	}
 
+	const bool rebuild = contextBarSize == ContextBarSize_Minimized || contextBarSizeNew == ContextBarSize_Minimized;
 	contextBarSize = contextBarSizeNew;
-	UpdateContextBarDeferred();
+	UpdateContextBarDeferred(rebuild);
 }
 
 static bool is_network_media_source(obs_source_t *source, const char *id)
@@ -143,13 +144,21 @@ std::optional<QWidget *> OBSBasic::createContextBarWidget(obs_source_t *source)
 	uint32_t flags = obs_source_get_output_flags(source);
 	const char *id = obs_source_get_unversioned_id(source);
 
+#ifdef __ANDROID__
+	const bool compactMedia = contextBarSize == ContextBarSize_Minimized && (flags & OBS_SOURCE_CONTROLLABLE_MEDIA);
+#else
+	constexpr bool compactMedia = false;
+#endif
+	if (contextBarSize == ContextBarSize_Minimized && !compactMedia)
+		return std::nullopt;
+
 	if (obs_source_load_state(id) != OBS_MODULE_ENABLED) {
 		return std::nullopt;
 	}
 
 	if (flags & OBS_SOURCE_CONTROLLABLE_MEDIA) {
 		if (!is_network_media_source(source, id)) {
-			MediaControls *contextBarWidget = new MediaControls(ui->emptySpace);
+			MediaControls *contextBarWidget = new MediaControls(ui->emptySpace, compactMedia);
 			contextBarWidget->SetSource(source);
 			return contextBarWidget;
 		}
@@ -232,12 +241,13 @@ void OBSBasic::UpdateContextBar(bool force)
 
 		bool updateNeeded = true;
 		QLayoutItem *la = ui->emptySpace->layout()->itemAt(0);
-		if (la) {
-			if (SourceToolbar *toolbar = dynamic_cast<SourceToolbar *>(la->widget())) {
+		QWidget *currentToolbar = la ? la->widget() : nullptr;
+		if (currentToolbar) {
+			if (SourceToolbar *toolbar = dynamic_cast<SourceToolbar *>(currentToolbar)) {
 				if (toolbar->GetSource() == source) {
 					updateNeeded = false;
 				}
-			} else if (MediaControls *toolbar = dynamic_cast<MediaControls *>(la->widget())) {
+			} else if (MediaControls *toolbar = dynamic_cast<MediaControls *>(currentToolbar)) {
 				if (toolbar->GetSource() == source) {
 					updateNeeded = false;
 				}
@@ -248,15 +258,19 @@ void OBSBasic::UpdateContextBar(bool force)
 		uint32_t flags = obs_source_get_output_flags(source);
 		ui->sourceInteractButton->setVisible(flags & OBS_SOURCE_INTERACTION);
 
-		if (contextBarSize >= ContextBarSize_Reduced && (updateNeeded || force)) {
+		if (updateNeeded || force) {
 			ClearContextBar();
-			std::optional<QWidget *> contextBarWidget = createContextBarWidget(source);
-			if (contextBarWidget.has_value()) {
-				ui->emptySpace->layout()->addWidget(contextBarWidget.value());
-			}
-		} else if (contextBarSize == ContextBarSize_Minimized) {
-			ClearContextBar();
+			currentToolbar = createContextBarWidget(source).value_or(nullptr);
+			if (currentToolbar)
+				ui->emptySpace->layout()->addWidget(currentToolbar);
 		}
+
+#ifdef __ANDROID__
+		// The source list already shows the selected name. Keep the transport buttons in the narrow row.
+		const bool compactMedia =
+			contextBarSize == ContextBarSize_Minimized && qobject_cast<MediaControls *>(currentToolbar);
+		ui->contextSourceLabel->setVisible(!compactMedia);
+#endif
 
 		QIcon icon;
 
@@ -282,6 +296,9 @@ void OBSBasic::UpdateContextBar(bool force)
 		ClearContextBar();
 		ui->contextSourceIcon->hide();
 		ui->contextSourceIconSpacer->show();
+#ifdef __ANDROID__
+		ui->contextSourceLabel->show();
+#endif
 		ui->contextSourceLabel->setText(QTStr("ContextBar.NoSelectedSource"));
 
 		ui->sourceFiltersButton->setEnabled(false);

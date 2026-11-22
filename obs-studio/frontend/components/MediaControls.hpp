@@ -15,11 +15,12 @@ private:
 	OBSWeakSource weakSource = nullptr;
 	QTimer mediaTimer;
 	QTimer seekTimer;
-	int seek;
-	int lastSeek;
+	int seek = -1;
+	int lastSeek = -1;
 	bool prevPaused = false;
 	bool countDownTimer = false;
 	bool isSlideshow = false;
+	const bool compact;
 
 	QString FormatSeconds(int totalSeconds);
 	void StartMediaTimer();
@@ -70,7 +71,7 @@ public slots:
 	void PauseMedia();
 
 public:
-	MediaControls(QWidget *parent = nullptr);
+	MediaControls(QWidget *parent, bool compact = false);
 	~MediaControls();
 
 	OBSSource GetSource();

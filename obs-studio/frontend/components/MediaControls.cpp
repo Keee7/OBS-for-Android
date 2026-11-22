@@ -3,6 +3,7 @@
 
 #include <OBSApp.hpp>
 
+#include <QHBoxLayout>
 #include <QToolTip>
 
 #include "moc_MediaControls.cpp"
@@ -43,10 +44,34 @@ void MediaControls::OBSMediaPrevious(void *data, calldata_t *)
 	QMetaObject::invokeMethod(media, &MediaControls::UpdateSlideCounter);
 }
 
-MediaControls::MediaControls(QWidget *parent) : QWidget(parent), ui(new Ui::MediaControls)
+MediaControls::MediaControls(QWidget *parent, bool compact)
+	: QWidget(parent),
+	  compact(compact),
+	  ui(new Ui::MediaControls)
 {
 	ui->setupUi(this);
 	setFocusPolicy(Qt::StrongFocus);
+	if (compact) {
+		auto *transport = new QHBoxLayout;
+		for (auto *button : {ui->playPauseButton, ui->previousButton, ui->stopButton, ui->nextButton}) {
+			ui->horizontalLayout->removeWidget(button);
+			transport->addWidget(button);
+		}
+		transport->addStretch();
+
+		auto *position = new QHBoxLayout;
+		ui->horizontalLayout->removeWidget(ui->slider);
+		ui->horizontalLayout->removeWidget(ui->timerLabel);
+		ui->slider->setMinimumHeight(28);
+		position->addWidget(ui->slider, 1);
+		position->addWidget(ui->timerLabel);
+
+		ui->horizontalLayout->setDirection(QBoxLayout::TopToBottom);
+		ui->horizontalLayout->insertLayout(0, transport);
+		ui->horizontalLayout->insertLayout(1, position);
+		ui->label->hide();
+		ui->durationLabel->hide();
+	}
 
 	connect(&mediaTimer, &QTimer::timeout, this, &MediaControls::SetSliderPosition);
 	connect(&seekTimer, &QTimer::timeout, this, &MediaControls::SeekTimerCallback);
@@ -155,6 +180,8 @@ void MediaControls::AbsoluteSliderReleased()
 
 void MediaControls::AbsoluteSliderHovered(int val)
 {
+	if (compact)
+		return;
 	float seconds = ((float)GetSliderTime(val) / 1000.0f);
 	QToolTip::showText(QCursor::pos(), FormatSeconds((int)seconds), this);
 }
@@ -185,7 +212,7 @@ void MediaControls::StartMediaTimer()
 	}
 
 	if (!mediaTimer.isActive()) {
-		mediaTimer.start(16);
+		mediaTimer.start(compact ? 50 : 16);
 	}
 }
 
@@ -265,13 +292,13 @@ void MediaControls::RefreshControls()
 		show();
 	}
 
-	bool has_playlist = strcmp(id, "ffmpeg_source") != 0;
+	bool has_playlist = !compact && strcmp(id, "ffmpeg_source") != 0;
 	ui->previousButton->setVisible(has_playlist);
 	ui->nextButton->setVisible(has_playlist);
 
 	isSlideshow = strcmp(id, "slideshow") == 0;
 	ui->slider->setVisible(!isSlideshow);
-	ui->emptySpaceAgain->setVisible(isSlideshow);
+	ui->emptySpaceAgain->setVisible(!compact && isSlideshow);
 
 	obs_media_state state = obs_source_media_get_state(source);
 
@@ -531,6 +558,8 @@ void MediaControls::UpdateLabels(int val)
 
 	ui->timerLabel->setText(FormatSeconds((int)(time / 1000.0f)));
 
+	if (compact)
+		return;
 	if (!countDownTimer) {
 		ui->durationLabel->setText(FormatSeconds((int)(duration / 1000.0f)));
 	} else {
