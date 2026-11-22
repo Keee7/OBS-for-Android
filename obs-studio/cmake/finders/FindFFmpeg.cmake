@@ -395,6 +395,38 @@ if(ANDROID AND TARGET FFmpeg::avcodec)
   endif()
 endif()
 
+# Android's static libavformat needs the transport library and its crypto backend.
+if(ANDROID AND TARGET FFmpeg::avformat)
+  find_library(FFmpeg_SRT_LIBRARY NAMES srt)
+  if(FFmpeg_SRT_LIBRARY)
+    find_package(MbedTLS 3...<4 CONFIG QUIET)
+    if(NOT MbedTLS_FOUND)
+      find_package(MbedTLS 3...<4 REQUIRED)
+    endif()
+    set_property(
+      TARGET FFmpeg::avformat APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+      "${FFmpeg_SRT_LIBRARY}" MbedTLS::mbedtls
+    )
+    if(ANDROID_STL STREQUAL "c++_static" OR CMAKE_ANDROID_STL_TYPE STREQUAL "c++_static")
+      set_property(TARGET FFmpeg::avformat APPEND PROPERTY INTERFACE_LINK_LIBRARIES c++_static c++abi unwind)
+    else()
+      set_property(TARGET FFmpeg::avformat APPEND PROPERTY INTERFACE_LINK_LIBRARIES c++_shared)
+    endif()
+  else()
+    execute_process(
+      COMMAND "${CMAKE_NM}" -g --defined-only "${FFmpeg_avformat_LIBRARY}"
+      RESULT_VARIABLE _srt_nm_result OUTPUT_VARIABLE _avformat_symbols ERROR_QUIET
+    )
+    if(NOT _srt_nm_result EQUAL 0)
+      message(FATAL_ERROR "Unable to inspect Android libavformat for SRT support")
+    endif()
+    if(_avformat_symbols MATCHES "ff_libsrt_protocol")
+      message(FATAL_ERROR "Android libavformat requires the missing SRT static library")
+    endif()
+    unset(_avformat_symbols)
+  endif()
+endif()
+
 # The GPL FFmpeg build enables the pp filter, which uses libpostproc. Static
 # targets must carry this dependency themselves; the desktop builds use shared
 # FFmpeg libraries and resolve it inside libavfilter instead.

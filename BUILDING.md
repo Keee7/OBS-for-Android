@@ -89,6 +89,8 @@ bash scripts/build-frontend-apk-wsl.sh
 
 CMake, Ninja and the host tools must be on PATH. Install the `nlohmann_json` CMake package (3.11+) in the dependency prefix if it is missing. The automated build installs it for you. To refresh the AV1 software decoder in an older prefix, run `NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a aom ffmpeg --clean` before packaging.
 
+For SRT playback in Media Sources, refresh an older dependency prefix with `bash deps-android/fetch.sh` and `NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a ffmpeg`. The FFmpeg build pulls in SRT and Mbed TLS.
+
 ### Native Windows Build
 
 #### 1. Tool and Dependency Layout
@@ -107,7 +109,7 @@ build-tools/
   android-deps-ffmpeg8/arm64-v8a/       # Precompiled ARM64 native headers and libraries
 ```
 
-The dependency prefix must include the full Android ARM64 dependency set and the `nlohmann_json` CMake package (3.11+). Use `-NativeDeps` to point at another prefix. If an older APK lacks the libaom AV1 decoder, rebuild both `aom` and `ffmpeg` with [the Windows dependency script](scripts/build-deps-windows.sh).
+The dependency prefix must include the full Android ARM64 dependency set and the `nlohmann_json` CMake package (3.11+). Use `-NativeDeps` to point at another prefix. If an older APK lacks the libaom AV1 decoder, rebuild both `aom` and `ffmpeg` with [the Windows dependency script](scripts/build-deps-windows.sh). For SRT playback, the script also needs the `srt-1.5.4` and `mbedtls-3.6.4` source directories under `SOURCES_ROOT`.
 
 #### 2. Compiling and Packaging
 Execute the build script in PowerShell:
@@ -181,6 +183,8 @@ cat build-fe-arm64-v8a-ci/.final-apk-path
 
 按 [已有工具链命令](#existing-toolchain) 设置 SDK、NDK、Qt、JDK 和 Gradle 路径。先构建 `deps-android/prebuilt/arm64-v8a/` 依赖前缀，再运行 WSL 打包脚本。若前缀缺少 `nlohmann_json` CMake 包，需先安装 3.11 或更新版本。自动化脚本会安装该依赖。旧前缀需要同时重编 AOM 和 FFmpeg 才能加入 AV1 软解。
 
+如需为旧依赖前缀加入媒体源 SRT 拉流支持，先运行 `bash deps-android/fetch.sh`，再运行 `NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a ffmpeg`。构建 FFmpeg 时会一并构建 SRT 和 Mbed TLS。
+
 ### Windows 环境原生构建
 
 #### 1. 工具与依赖目录结构
@@ -199,7 +203,7 @@ build-tools/
   android-deps-ffmpeg8/arm64-v8a/       # 预编译好的 ARM64 原生头文件与库
 ```
 
-依赖前缀须包含完整的 Android ARM64 依赖与 `nlohmann_json` CMake 包（3.11 或更新版本）。可用 `-NativeDeps` 指定其他前缀。旧包缺少 libaom AV1 软解时，使用 [Windows 依赖脚本](scripts/build-deps-windows.sh) 同时重编 `aom` 与 `ffmpeg`。
+依赖前缀须包含完整的 Android ARM64 依赖与 `nlohmann_json` CMake 包（3.11 或更新版本）。可用 `-NativeDeps` 指定其他前缀。旧包缺少 libaom AV1 软解时，使用 [Windows 依赖脚本](scripts/build-deps-windows.sh) 同时重编 `aom` 与 `ffmpeg`。构建 SRT 支持时，脚本还需要 `SOURCES_ROOT` 下的 `srt-1.5.4` 和 `mbedtls-3.6.4` 源码目录。
 
 #### 2. 编译与打包
 在 PowerShell 中执行构建命令：

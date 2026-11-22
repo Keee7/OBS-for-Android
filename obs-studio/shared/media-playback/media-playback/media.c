@@ -720,6 +720,7 @@ static bool init_avformat(mp_media_t *m)
 
 	AVDictionary *opts = NULL;
 	bool is_rist = strncmp(m->path, RIST_PROTO, strlen(RIST_PROTO)) == 0;
+	const bool is_srt = !m->is_local_file && strncmp(m->path, "srt://", 6) == 0;
 	if (m->buffering && !m->is_local_file && !is_rist)
 		av_dict_set_int(&opts, "buffer_size", m->buffering, 0);
 
@@ -756,7 +757,10 @@ static bool init_avformat(mp_media_t *m)
 		m->fmt->flags |= AVFMT_FLAG_NOBUFFER;
 	}
 	if (!m->is_local_file) {
-		av_dict_set(&opts, "stimeout", "30000000", 0);
+		if (is_srt)
+			av_dict_set(&opts, "rw_timeout", "5000000", AV_DICT_DONT_OVERWRITE);
+		else
+			av_dict_set(&opts, "stimeout", "30000000", 0);
 		m->fmt->interrupt_callback.callback = interrupt_callback;
 		m->fmt->interrupt_callback.opaque = m;
 	}
@@ -765,8 +769,12 @@ static bool init_avformat(mp_media_t *m)
 	av_dict_free(&opts);
 
 	if (ret < 0) {
-		if (!m->reconnecting)
-			blog(LOG_WARNING, "MP: Failed to open media: '%s'", m->path);
+		if (!m->reconnecting) {
+			if (is_srt)
+				blog(LOG_WARNING, "MP: Failed to open SRT input: %s", av_err2str(ret));
+			else
+				blog(LOG_WARNING, "MP: Failed to open media: '%s': %s", m->path, av_err2str(ret));
+		}
 		return false;
 	}
 

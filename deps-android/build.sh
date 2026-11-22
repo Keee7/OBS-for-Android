@@ -103,6 +103,13 @@ for a in "$@"; do
 done
 [ -z "${TARGETS// /}" ] && for b in $DEP_BATCHES; do TARGETS="$TARGETS $(batch_deps "$b")"; done
 
+# Resolve shared dependencies before either network consumer, including targeted builds.
+case " $TARGETS " in
+  *' ffmpeg '*) TARGETS="mbedtls srt $TARGETS" ;;
+  *' srt '*|*' curl '*) TARGETS="mbedtls $TARGETS" ;;
+esac
+TARGETS=$(printf '%s\n' $TARGETS | awk '!seen[$0]++')
+
 # A changed patch needs pristine sources and must invalidate the shared prefix's stamp.
 ffmpeg_patch="$HERE/../scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch"
 ffmpeg_patch_digest=$(sha256sum < "$ffmpeg_patch") || exit 1

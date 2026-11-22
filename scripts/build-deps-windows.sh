@@ -110,11 +110,21 @@ if [[ "$targets" == *' x264 '* ]]; then
    make install-lib-static)
 fi
 if [[ "$targets" == *' ffmpeg '* ]]; then
+  for required in mbedtls-3.6.4 srt-1.5.4; do
+    test -f "$SOURCES_ROOT/$required/CMakeLists.txt" || { echo "Missing source: $required" >&2; exit 1; }
+  done
+  cmake_android "$SOURCES_ROOT/mbedtls-3.6.4" "$WORK_ROOT/mbedtls-build" \
+    -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF -DGEN_FILES=OFF -DMBEDTLS_FATAL_WARNINGS=OFF
+  cmake_android "$SOURCES_ROOT/srt-1.5.4" "$WORK_ROOT/srt-build" \
+    -DENABLE_APPS=OFF -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DUSE_ENCLIB=mbedtls \
+    -DMBEDTLS_PREFIX="$(cygpath -m "$prefix")"
+  sed -i 's/^Libs.private:.*/Libs.private: -lmbedtls -lmbedx509 -lmbedcrypto -lc++_static -lc++abi -lunwind -lm -ldl/' \
+    "$prefix/lib/pkgconfig/srt.pc"
   (cd "$ffmpeg_work"
    ./configure --prefix="$prefix" --enable-cross-compile --target-os=android --arch=aarch64 \
      --cc="$CC" --ar="$AR" --ranlib="$RANLIB" --strip="$STRIP" --enable-static --disable-shared \
      --disable-doc --disable-programs --disable-debug --disable-stripping --disable-autodetect \
-     --enable-gpl --enable-libx265 --enable-libaom --enable-decoder=libaom_av1 --pkg-config-flags=--static \
+     --enable-gpl --enable-libx265 --enable-libaom --enable-decoder=libaom_av1 --enable-libsrt --pkg-config-flags=--static \
      --enable-mediacodec --enable-jni --enable-avcodec --enable-avformat --enable-avutil \
      --enable-swscale --enable-swresample --enable-avfilter --enable-avdevice --enable-zlib \
      --enable-asm --enable-inline-asm --enable-neon --disable-vulkan --disable-v4l2-m2m \

@@ -180,6 +180,14 @@ build_aom() {
     -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_DECODER=1
 }
 
+build_srt() {
+  _run_cmake "$(src_dir srt)" -DENABLE_APPS=OFF -DENABLE_SHARED=OFF -DENABLE_STATIC=ON \
+    -DUSE_ENCLIB=mbedtls -DMBEDTLS_PREFIX="$PREFIX" || return 1
+  # SRT generates host-specific absolute paths and -lc++ in Libs.private.
+  sed -i 's/^Libs.private:.*/Libs.private: -lmbedtls -lmbedx509 -lmbedcrypto -lc++_static -lc++abi -lunwind -lm -ldl/' \
+    "$PREFIX/lib/pkgconfig/srt.pc"
+}
+
 # ---------------------------------------------------------------- ffmpeg
 build_ffmpeg() {
   local s; s=$(src_dir ffmpeg)
@@ -215,7 +223,7 @@ build_ffmpeg() {
       --enable-static --disable-shared \
       --disable-doc --disable-programs --disable-debug --disable-stripping \
       --disable-autodetect --enable-gpl --enable-libx265 --enable-libaom --enable-decoder=libaom_av1 \
-      --pkg-config-flags=--static \
+      --enable-libsrt --pkg-config-flags=--static \
       --enable-mediacodec --enable-jni \
       --enable-avcodec --enable-avformat --enable-avutil \
       --enable-swscale --enable-swresample --enable-avfilter --enable-avdevice \
