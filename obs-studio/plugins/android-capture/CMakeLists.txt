@@ -47,8 +47,8 @@ if(OS_ANDROID)
             NO_DEFAULT_PATH REQUIRED)
 
   target_include_directories(android-capture PRIVATE "${ANDROID_USB_INCLUDE_DIR}")
-  # 插件只链 libobs + turbojpeg + libusb，刻意不链 libandroid（与 android-camera 同一约束）
-  target_link_libraries(android-capture PRIVATE "${ANDROID_TURBOJPEG_LIBRARY}" "${ANDROID_LIBUSB_LIBRARY}")
+  # 链接 TurboJPEG、libusb 与 AAudio，沿用 libobs 的 Android 音频设备接口
+  target_link_libraries(android-capture PRIVATE "${ANDROID_TURBOJPEG_LIBRARY}" "${ANDROID_LIBUSB_LIBRARY}" aaudio)
 endif()
 
 set_target_properties_obs(android-capture PROPERTIES FOLDER plugins/android-capture PREFIX "")
