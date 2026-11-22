@@ -761,6 +761,9 @@ void OBSBasic::TransitionClicked()
 
 void OBSBasic::TBarReleased()
 {
+	if (!IsPreviewProgramMode() || !tBar)
+		return;
+
 	int val = tBar->value();
 
 	OBSSourceAutoRelease transition = obs_get_output_source(0);
@@ -808,6 +811,9 @@ static bool ValidTBarTransition(OBSSource transition)
 
 void OBSBasic::TBarChanged(int value)
 {
+	if (!IsPreviewProgramMode() || !tBar)
+		return;
+
 	OBSSourceAutoRelease transition = obs_get_output_source(0);
 
 	if (!tBarActive) {
@@ -840,7 +846,7 @@ void OBSBasic::TBarChanged(int value)
 
 int OBSBasic::GetTbarPosition()
 {
-	return tBar->value();
+	return tBar ? tBar->value() : 0;
 }
 
 static inline void ResetQuickTransitionText(QuickTransition *qt)

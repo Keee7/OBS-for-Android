@@ -66,6 +66,15 @@ PreviewProgramSizeObserver::PreviewProgramSizeObserver(QWidget *widgetLeft, QWid
 
 PreviewProgramSizeObserver::~PreviewProgramSizeObserver()
 {
+	stop();
+}
+
+void PreviewProgramSizeObserver::stop()
+{
+	if (stopped)
+		return;
+	stopped = true;
+
 	if (ancestorContainer) {
 		ancestorContainer->removeEventFilter(this);
 	}
@@ -117,24 +126,31 @@ std::pair<QWidget *, QWidget *> PreviewProgramSizeObserver::findSiblingParents(Q
 
 void PreviewProgramSizeObserver::syncContainerSizes(int containerSizeDelta)
 {
-	auto setMax = (orientation == Qt::Horizontal) ? [](QWidget* widget, int value) {
-		widget->setMaximumWidth(value);
-		} : [](QWidget* widget, int value) {
-		widget->setMaximumHeight(value);
-		};
-
 	QLayout *ancestorLayout = ancestorContainer->layout();
 	if (QBoxLayout *boxLayout = qobject_cast<QBoxLayout *>(ancestorLayout)) {
 		setOrientation((boxLayout->direction() == QBoxLayout::LeftToRight) ? Qt::Horizontal : Qt::Vertical);
 	}
 
+	auto setMax = [this](QWidget *widget, int value) {
+		if (stopped || !widget)
+			return;
+		if (orientation == Qt::Horizontal)
+			widget->setMaximumWidth(value);
+		else
+			widget->setMaximumHeight(value);
+	};
+
 	if (orientation == Qt::Horizontal) {
 		leftContainer->setMaximumHeight(leftOriginalMaxSize.height());
-		rightContainer->setMaximumHeight(rightOriginalMaxSize.height());
+		if (!stopped && rightContainer)
+			rightContainer->setMaximumHeight(rightOriginalMaxSize.height());
 	} else {
 		leftContainer->setMaximumWidth(leftOriginalMaxSize.width());
-		rightContainer->setMaximumWidth(rightOriginalMaxSize.width());
+		if (!stopped && rightContainer)
+			rightContainer->setMaximumWidth(rightOriginalMaxSize.width());
 	}
+	if (stopped || !left || !right || !leftContainer || !rightContainer)
+		return;
 
 	int leftInner = (orientation == Qt::Horizontal) ? left->width() : left->height();
 	int rightInner = (orientation == Qt::Horizontal) ? right->width() : right->height();
@@ -170,7 +186,7 @@ void PreviewProgramSizeObserver::syncContainerSizes(int containerSizeDelta)
 
 		// Force a second recalculation
 		QTimer::singleShot(1, this, [&, setMax]() {
-			if (updating) {
+			if (stopped || updating || !leftContainer || !rightContainer) {
 				return;
 			}
 
@@ -186,7 +202,7 @@ void PreviewProgramSizeObserver::syncContainerSizes(int containerSizeDelta)
 
 bool PreviewProgramSizeObserver::eventFilter(QObject *target, QEvent *event)
 {
-	if (event->type() != QEvent::Resize && event->type() != QEvent::LayoutRequest) {
+	if (stopped || (event->type() != QEvent::Resize && event->type() != QEvent::LayoutRequest)) {
 		return QObject::eventFilter(target, event);
 	}
 

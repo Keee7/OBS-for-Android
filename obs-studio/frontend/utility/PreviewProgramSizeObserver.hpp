@@ -39,6 +39,7 @@ class PreviewProgramSizeObserver : public QObject {
 	QPointer<QWidget> ancestorContainer;
 
 	bool updating = false;
+	bool stopped = false;
 
 	Qt::Orientation orientation = Qt::Horizontal;
 
@@ -50,6 +51,7 @@ public:
 	PreviewProgramSizeObserver(QWidget *widgetLeft, QWidget *widgetRight, QObject *parent = nullptr);
 	~PreviewProgramSizeObserver();
 
+	void stop();
 	void setOrientation(Qt::Orientation orientation_);
 
 protected:

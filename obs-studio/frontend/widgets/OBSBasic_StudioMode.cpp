@@ -27,7 +27,10 @@
 #include <qt-wrappers.hpp>
 #include <slider-ignorewheel.hpp>
 
+#include <QScopedValueRollback>
 #include <QToolTip>
+
+#include <utility>
 
 void OBSBasic::CreateProgramDisplay()
 {
@@ -47,12 +50,14 @@ void OBSBasic::CreateProgramDisplay()
 	connect(program.data(), &OBSQTDisplay::DisplayResized, this, displayResize);
 
 	auto addDisplay = [this](OBSQTDisplay *window) {
-		obs_display_add_draw_callback(window->GetDisplay(), OBSBasic::RenderProgram, this);
+		if (window != program || !IsPreviewProgramMode() || !window->GetDisplay())
+			return;
 
 		struct obs_video_info ovi;
 		if (obs_get_video_info(&ovi)) {
 			ResizeProgram(ovi.base_width, ovi.base_height);
 		}
+		obs_display_add_draw_callback(window->GetDisplay(), OBSBasic::RenderProgram, this);
 	};
 
 	connect(program.data(), &OBSQTDisplay::DisplayCreated, this, addDisplay);
@@ -179,15 +184,25 @@ void OBSBasic::CreateProgramOptions()
 
 void OBSBasic::TogglePreviewProgramMode()
 {
-	SetPreviewProgramMode(!IsPreviewProgramMode());
+	SetPreviewProgramMode(!pendingStudioMode.value_or(IsPreviewProgramMode()));
 }
 
 void OBSBasic::SetPreviewProgramMode(bool enabled)
 {
-	if (IsPreviewProgramMode() == enabled) {
+	pendingStudioMode = enabled;
+	if (changingStudioMode)
 		return;
-	}
 
+	// Qt may deliver another click while a mode change is waiting on Android UI work.
+	const QScopedValueRollback guard(changingStudioMode, true);
+	while (auto requested = std::exchange(pendingStudioMode, std::nullopt)) {
+		if (!isClosing() && IsPreviewProgramMode() != *requested)
+			ApplyPreviewProgramMode(*requested);
+	}
+}
+
+void OBSBasic::ApplyPreviewProgramMode(bool enabled)
+{
 	os_atomic_set_bool(&previewProgramMode, enabled);
 	emit PreviewProgramModeChanged(enabled);
 
@@ -249,6 +264,18 @@ void OBSBasic::SetPreviewProgramMode(bool enabled)
 		blog(LOG_INFO, "-----------------------------"
 			       "-------------------");
 	} else {
+		if (sizeObserver) {
+			sizeObserver->stop();
+			sizeObserver->deleteLater();
+			sizeObserver.clear();
+		}
+		if (program) {
+			program->disconnect(this);
+			obs_display_set_enabled(program->GetDisplay(), false);
+		}
+		if (tBar)
+			tBar->disconnect(this);
+
 		OBSSource actualProgramScene = OBSGetStrongRef(programScene);
 		if (!actualProgramScene) {
 			actualProgramScene = GetCurrentSceneSource();
@@ -257,14 +284,29 @@ void OBSBasic::SetPreviewProgramMode(bool enabled)
 		}
 		TransitionToScene(actualProgramScene, true);
 
+		QWidget *optionsWidget = programOptions;
 #ifdef __ANDROID__
-		delete androidStudioOptionsScroll;
+		if (androidStudioOptionsScroll)
+			optionsWidget = androidStudioOptionsScroll;
+		androidStudioOptionsScroll.clear();
 #endif
-		delete programOptions;
-		delete program;
-		delete programLabel;
-		delete programWidget;
-		sizeObserver->deleteLater();
+		QWidget *oldProgramWidget = programWidget;
+		programOptions.clear();
+		programWidget.clear();
+		programLayout.clear();
+		programLabel.clear();
+		program.clear();
+		transitionButton.clear();
+		tBar = nullptr;
+
+		// A nested click can arrive while Qt is still showing these widgets.
+		for (QWidget *widget : {optionsWidget, oldProgramWidget}) {
+			if (widget) {
+				ui->previewLayout->removeWidget(widget);
+				widget->hide();
+				widget->deleteLater();
+			}
+		}
 
 		if (lastScene) {
 			OBSSource actualLastScene = OBSGetStrongRef(lastScene);
@@ -333,10 +375,11 @@ void OBSBasic::RenderProgram(void *data, uint32_t, uint32_t)
 
 void OBSBasic::ResizeProgram(uint32_t cx, uint32_t cy)
 {
-	QSize targetSize;
+	if (!program || !IsPreviewProgramMode())
+		return;
 
 	/* resize program panel to fix to the top section of the window */
-	targetSize = GetPixelSize(program);
+	const QSize targetSize = GetPixelSize(program);
 	GetScaleAndCenterPos(int(cx), int(cy), targetSize.width() - PREVIEW_EDGE_SIZE * 2,
 			     targetSize.height() - PREVIEW_EDGE_SIZE * 2, programX, programY, programScale);
 

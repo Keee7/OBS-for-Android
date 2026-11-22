@@ -119,7 +119,7 @@ void OBSStudioAPI::obs_frontend_set_tbar_position(int position)
 
 int OBSStudioAPI::obs_frontend_get_tbar_position()
 {
-	return main->tBar->value();
+	return main->GetTbarPosition();
 }
 
 void OBSStudioAPI::obs_frontend_get_scene_collections(std::vector<std::string> &strings)
@@ -555,7 +555,7 @@ bool OBSStudioAPI::obs_frontend_preview_program_mode_active()
 
 void OBSStudioAPI::obs_frontend_set_preview_program_mode(bool enable)
 {
-	main->SetPreviewProgramMode(enable);
+	QMetaObject::invokeMethod(main, enable ? &OBSBasic::EnablePreviewProgram : &OBSBasic::DisablePreviewProgram);
 }
 
 void OBSStudioAPI::obs_frontend_preview_program_trigger_transition()

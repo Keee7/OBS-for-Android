@@ -1514,6 +1514,8 @@ private:
 
 	OBSWeakSource programScene;
 	volatile bool previewProgramMode = false;
+	bool changingStudioMode = false;
+	std::optional<bool> pendingStudioMode;
 
 	obs_hotkey_pair_id togglePreviewProgramHotkeys = 0;
 
@@ -1525,6 +1527,7 @@ private:
 	void CreateProgramDisplay();
 	void CreateProgramOptions();
 	void SetPreviewProgramMode(bool enabled);
+	void ApplyPreviewProgramMode(bool enabled);
 	void ResizeProgram(uint32_t cx, uint32_t cy);
 	static void RenderProgram(void *data, uint32_t cx, uint32_t cy);
 
@@ -1601,7 +1604,7 @@ private:
 	int quickTransitionIdCounter = 1;
 	bool overridingTransition = false;
 
-	QSlider *tBar;
+	QSlider *tBar = nullptr;
 	bool tBarActive = false;
 
 	OBSSource prevFTBSource = nullptr;
