@@ -1120,6 +1120,14 @@ static bool canScrollAreaAnyDirection(const QAbstractScrollArea *area)
 	return area && (canScrollAxis(area->horizontalScrollBar()) || canScrollAxis(area->verticalScrollBar()));
 }
 
+static const QComboBox *comboBoxForPopup(const QWidget *popup)
+{
+	if (!popup || popup->windowType() != Qt::Popup)
+		return nullptr;
+	const auto *combo = qobject_cast<const QComboBox *>(popup->parentWidget());
+	return combo && combo->view()->window() == popup ? combo : nullptr;
+}
+
 static bool isAndroidScrollTargetAllowed(const QWidget *area)
 {
 	if (!area)
@@ -1132,24 +1140,23 @@ static bool isAndroidScrollTargetAllowed(const QWidget *area)
 	const QWidget *win = area->window();
 	if (!win)
 		return true;
-	const Qt::WindowFlags f = win->windowFlags();
-	if (f.testFlag(Qt::ToolTip) || win->inherits("QDockWidgetGroupWindow"))
+	if (win->windowType() == Qt::ToolTip || win->inherits("QDockWidgetGroupWindow"))
 		return false;
-	if (f.testFlag(Qt::Popup)) {
-		const auto *combo = qobject_cast<const QComboBox *>(win->parentWidget());
-		return combo && combo->view()->window() == win;
-	}
+	if (win->windowType() == Qt::Popup)
+		return comboBoxForPopup(win) != nullptr;
 	return true;
 }
 
-static bool enableFlickScrollOnArea(QAbstractScrollArea *area)
+static QScroller *flickScrollerForArea(QAbstractScrollArea *area)
 {
 	if (!isAndroidScrollTargetAllowed(area))
-		return false;
+		return nullptr;
 
 	QWidget *vp = area->viewport();
-	if (!vp || QScroller::hasScroller(vp))
-		return false;
+	if (!vp)
+		return nullptr;
+	if (QScroller::hasScroller(vp))
+		return QScroller::scroller(vp);
 
 	if (auto *itemView = qobject_cast<QAbstractItemView *>(area)) {
 		itemView->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
@@ -1158,36 +1165,14 @@ static bool enableFlickScrollOnArea(QAbstractScrollArea *area)
 
 	QScroller *scroller = QScroller::scroller(vp);
 	if (!scroller)
-		return false;
+		return nullptr;
 	QScrollerProperties props = scroller->scrollerProperties();
 	props.setScrollMetric(QScrollerProperties::DragStartDistance, 0.002);
 	props.setScrollMetric(QScrollerProperties::MousePressEventDelay, 0.0);
 	props.setScrollMetric(QScrollerProperties::HorizontalOvershootPolicy, QScrollerProperties::OvershootAlwaysOff);
 	props.setScrollMetric(QScrollerProperties::VerticalOvershootPolicy, QScrollerProperties::OvershootAlwaysOff);
 	scroller->setScrollerProperties(props);
-	return true;
-}
-
-static void enableFlickScroll(QWidget *w)
-{
-	if (!isAndroidScrollTargetAllowed(w))
-		return;
-
-	const QList<QAbstractScrollArea *> areas = w->findChildren<QAbstractScrollArea *>();
-	int grabbed = 0;
-	int itemViews = 0;
-	for (QAbstractScrollArea *area : areas) {
-		if (enableFlickScrollOnArea(area)) {
-			++grabbed;
-			if (qobject_cast<QAbstractItemView *>(area) != nullptr)
-				++itemViews;
-		}
-	}
-
-	if (grabbed > 0) {
-		obsAndroidDisplayLog("FLICK %s：滚动区 %d 个，本次开 %d 个（其中 item view %d 个）",
-				     w->metaObject()->className(), int(areas.size()), grabbed, itemViews);
-	}
+	return scroller;
 }
 
 static void fitPopupToSafeArea(QWidget *popup, const QWidget *anchor, int paddingPx, bool clampSize)
@@ -1245,7 +1230,7 @@ static void fitComboBoxPopup(QWidget *popup, const QComboBox *combo)
 	fitPopupToSafeArea(popup, combo, 8, true);
 
 	QAbstractItemView *view = combo->view();
-	enableFlickScrollOnArea(view);
+	flickScrollerForArea(view);
 	view->scrollTo(view->currentIndex());
 }
 
@@ -1291,7 +1276,7 @@ public:
 				reset();
 			return false;
 		}
-		if (type == QEvent::WindowDeactivate) {
+		if (type == QEvent::WindowDeactivate || type == QEvent::Hide) {
 			QWidget *trackedWin = activeWindow();
 			if (trackedWin && receiver == trackedWin)
 				reset();
@@ -1358,7 +1343,7 @@ private:
 				continue;
 			if (!isAndroidScrollTargetAllowed(area))
 				return nullptr;
-			if (QScroller::hasScroller(cur) && canScrollAreaAnyDirection(area)) {
+			if (canScrollAreaAnyDirection(area)) {
 				if (outArea)
 					*outArea = area;
 				return cur;
@@ -1412,8 +1397,8 @@ private:
 		if (!area || !vp)
 			return false;
 
-		QScroller *scroller = QScroller::scroller(vp);
-		if (scroller->state() != QScroller::Inactive) {
+		QScroller *scroller = QScroller::hasScroller(vp) ? QScroller::scroller(vp) : nullptr;
+		if (scroller && scroller->state() != QScroller::Inactive) {
 			const bool consumed = scroller->handleInput(QScroller::InputPress,
 								    vp->mapFromGlobal(me->globalPosition()),
 								    monotonicClock.elapsed());
@@ -1445,7 +1430,9 @@ private:
 		pressGlobalF = me->globalPosition();
 		pressElapsedMs = monotonicClock.elapsed();
 		heldPress = cloneMouseEvent(me);
-		holdTimer.start(HOLD_DELAY_MS);
+		// Keep the press pending in dropdowns so a slow drag cannot start item selection.
+		if (!comboBoxForPopup(area->window()))
+			holdTimer.start(HOLD_DELAY_MS);
 		outResult = true;
 		return true;
 	}
@@ -1561,13 +1548,16 @@ private:
 	{
 		if (!vp)
 			return false;
+		// Hidden pages and untouched controls do not need a scroller.
+		auto *scroller = flickScrollerForArea(qobject_cast<QAbstractScrollArea *>(vp->parentWidget()));
+		if (!scroller)
+			return false;
 		if (!slider) {
 			if (QWidget *child = vp->childAt(vp->mapFromGlobal(pressGlobalF.toPoint()))) {
 				if (!qobject_cast<QScrollBar *>(child))
 					slider = qobject_cast<QAbstractSlider *>(child);
 			}
 		}
-		QScroller *scroller = QScroller::scroller(vp);
 		QPointer<QAbstractSlider> sliderGuard(slider);
 		const bool wasTransparent = slider && slider->testAttribute(Qt::WA_TransparentForMouseEvents);
 		// QAbstractScrollAreaPrivate::canStartScrollingAt rejects ScrollPrepare over a QAbstractSlider.
@@ -1707,21 +1697,9 @@ protected:
 		case QEvent::Hide:
 		case QEvent::Close:
 		case QEvent::Expose: {
-			if (ev->type() == QEvent::Show) {
-				if (auto *area = qobject_cast<QAbstractScrollArea *>(watched)) {
-					QTimer::singleShot(0, area, [area] { enableFlickScrollOnArea(area); });
-				}
-			}
 			QWidget *pw = static_cast<QWidget *>(watched);
-			if (!pw->isWindow())
+			if (!pw->isWindow() || pw == static_cast<OBSApp *>(qApp)->GetMainWindow())
 				break;
-			/* 主窗不打 P8-W/CLAMP 日志：它的 Expose 每轮都来；但 Show 时要给它挂单指滑动。 */
-			if (pw == static_cast<OBSApp *>(qApp)->GetMainWindow()) {
-				if (ev->type() == QEvent::Show) {
-					QTimer::singleShot(0, pw, [pw] { enableFlickScroll(pw); });
-				}
-				break;
-			}
 			const Qt::WindowFlags flags = pw->windowFlags();
 			const QRect geo = pw->geometry();
 			const char *kind = ev->type() == QEvent::Show
@@ -1736,12 +1714,12 @@ protected:
 				int(flags.testFlag(Qt::Dialog)), int(pw->isVisible()),
 				int(qApp->activePopupWidget() == pw));
 
-			/* 等 Qt 完成布局后，约束下拉框与上下文菜单弹层位置，或调整普通对话框并启用滚动。 */
+			/* 等 Qt 完成布局后，约束下拉框、上下文菜单和普通对话框的位置。 */
 			if (ev->type() == QEvent::Show) {
 				QTimer::singleShot(0, pw, [pw] {
 					if (pw->windowType() == Qt::Popup) {
-						const auto *combo = qobject_cast<const QComboBox *>(pw->parentWidget());
-						if (combo && pw->isVisible() && combo->view()->window() == pw) {
+						const auto *combo = comboBoxForPopup(pw);
+						if (combo && pw->isVisible()) {
 							fitComboBoxPopup(pw, combo);
 						} else if (qobject_cast<QMenu *>(pw) && pw->isVisible()) {
 							fitPopupToSafeArea(pw, pw->parentWidget(), 0, false);
@@ -1749,7 +1727,6 @@ protected:
 						return;
 					}
 					clampTopLevelToScreen(pw);
-					enableFlickScroll(pw);
 				});
 			}
 			break;
@@ -1789,6 +1766,12 @@ protected:
 			if (QComboBox *cb = qobject_cast<QComboBox *>(pw)) {
 				if (!qApp->activePopupWidget())
 					comboPress = cb;
+				break;
+			}
+			if (comboBoxForPopup(pw->window())) {
+				timer.stop();
+				armed = false;
+				target.clear();
 				break;
 			}
 			target = static_cast<QWidget *>(watched);

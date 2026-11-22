@@ -41,6 +41,23 @@ target_compile_definitions(
   PRIVATE OBS_INSTALL_PREFIX="${OBS_INSTALL_PREFIX}" $<$<BOOL:${ENABLE_PORTABLE_CONFIG}>:ENABLE_PORTABLE_CONFIG>
 )
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(settings_form "${CMAKE_CURRENT_SOURCE_DIR}/forms/OBSBasicSettings.ui")
+set(settings_ui_generator "${CMAKE_CURRENT_LIST_DIR}/android-settings-ui.py")
+set(settings_ui_dir "${CMAKE_CURRENT_BINARY_DIR}/android-settings-ui")
+set(settings_ui_header "${settings_ui_dir}/android_OBSBasicSettingsUi.hpp")
+set_source_files_properties("${settings_form}" PROPERTIES SKIP_AUTOUIC ON)
+add_custom_command(
+  OUTPUT "${settings_ui_header}"
+  COMMAND
+    "${Python3_EXECUTABLE}" "${settings_ui_generator}" $<TARGET_FILE:Qt6::uic> "${settings_form}" "${settings_ui_header}"
+  DEPENDS "${settings_form}" "${settings_ui_generator}" Qt6::uic
+  VERBATIM
+)
+add_custom_target(obs-android-settings-ui DEPENDS "${settings_ui_header}")
+add_dependencies(obs-studio obs-android-settings-ui)
+target_include_directories(obs-studio PRIVATE "${settings_ui_dir}")
+
 # 链接期补两类桌面平台上会"自动带上"的依赖。实测依据 = pass-6 的 ld.lld 报错，
 # 再用 llvm-nm 逐个归档定位引用方/定义方：
 #

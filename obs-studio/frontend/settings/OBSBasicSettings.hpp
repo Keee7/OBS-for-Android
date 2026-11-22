@@ -18,7 +18,11 @@
 
 #pragma once
 
+#ifdef __ANDROID__
+#include "android_OBSBasicSettingsUi.hpp"
+#else
 #include "ui_OBSBasicSettings.h"
+#endif
 
 #include <utility/FFmpegShared.hpp>
 

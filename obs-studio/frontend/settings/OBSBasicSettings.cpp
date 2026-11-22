@@ -1126,6 +1126,7 @@ void OBSBasicSettings::LoadColorFormats()
 void OBSBasicSettings::LoadFormats()
 {
 #define FORMAT_STR(str) QTStr("Basic.Settings.Output.Format." str)
+#ifndef __ANDROID__
 	ui->advOutFFFormat->blockSignals(true);
 
 	formats = GetSupportedFormats();
@@ -1149,6 +1150,7 @@ void OBSBasicSettings::LoadFormats()
 	ui->advOutFFFormat->insertItem(0, AV_FORMAT_DEFAULT_STR);
 
 	ui->advOutFFFormat->blockSignals(false);
+#endif
 
 	/* Android（P-7 实测 + 决策 7「裁剪归口」）：`SimpleOutput.cpp:248-252` 与 `AdvancedOutput.cpp:112-116`
 	 * 那两处映射一模一样 —— `hybrid_mp4 → mp4_output`、`hybrid_mov → mov_output`、**其余全部**
@@ -2371,7 +2373,9 @@ void OBSBasicSettings::LoadOutputSettings()
 	if (!SetComboByValue(ui->advOutRecAEncoder, type)) {
 		ui->advOutRecAEncoder->setCurrentIndex(-1);
 	}
+#ifndef __ANDROID__
 	LoadAdvOutputFFmpegSettings();
+#endif
 	LoadAdvOutputAudioSettings();
 
 	if (obs_video_active()) {
@@ -3681,6 +3685,7 @@ void OBSBasicSettings::SaveOutputSettings()
 
 	config_set_int(main->Config(), "AdvOut", "FLVTrack", CurrentFLVTrack());
 
+#ifndef __ANDROID__
 	config_set_bool(main->Config(), "AdvOut", "FFOutputToFile",
 			ui->advOutFFType->currentIndex() == 0 ? true : false);
 	SaveEdit(ui->advOutFFRecPath, "AdvOut", "FFFilePath");
@@ -3705,6 +3710,7 @@ void OBSBasicSettings::SaveOutputSettings()
 			       (ui->advOutFFTrack4->isChecked() ? (1 << 3) : 0) |
 			       (ui->advOutFFTrack5->isChecked() ? (1 << 4) : 0) |
 			       (ui->advOutFFTrack6->isChecked() ? (1 << 5) : 0));
+#endif
 	SaveCombo(ui->advOutTrack1Bitrate, "AdvOut", "Track1Bitrate");
 	SaveCombo(ui->advOutTrack2Bitrate, "AdvOut", "Track2Bitrate");
 	SaveCombo(ui->advOutTrack3Bitrate, "AdvOut", "Track3Bitrate");
