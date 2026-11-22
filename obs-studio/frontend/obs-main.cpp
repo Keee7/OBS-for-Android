@@ -204,7 +204,8 @@ static void do_log(int log_level, const char *msg, va_list args, void *param)
 	va_copy(args2, args);
 #endif
 
-	vsnprintf(str, sizeof(str), msg, args);
+	if (vsnprintf(str, sizeof(str), msg, args) < 0)
+		str[0] = '\0';
 
 #ifdef _WIN32
 	if (IsDebuggerPresent()) {
@@ -229,10 +230,13 @@ static void do_log(int log_level, const char *msg, va_list args, void *param)
 #endif
 
 	if (log_level <= LOG_INFO || log_verbose) {
-#if !defined(_WIN32) && !defined(_DEBUG)
+#if !defined(_WIN32) && !defined(_DEBUG) && !defined(__ANDROID__)
 		def_log_handler(log_level, msg, args2, nullptr);
 #endif
 		if (!too_many_repeated_entries(logFile, msg, str)) {
+#if defined(__ANDROID__) && !defined(_DEBUG)
+			def_log_handler(log_level, msg, args2, nullptr);
+#endif
 			LogStringChunk(logFile, str, log_level);
 		}
 	}

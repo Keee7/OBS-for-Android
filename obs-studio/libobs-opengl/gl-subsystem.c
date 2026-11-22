@@ -158,8 +158,8 @@ static bool gl_init_extensions(struct gs_device *device)
 #if defined(__ANDROID__)
 	if (!GLAD_GL_EXT_sRGB_write_control)
 		blog(LOG_WARNING,
-		     "GL_EXT_sRGB_write_control 不在位：sRGB 附件的 linear->sRGB 编码无法关闭，"
-		     "gs_enable_framebuffer_srgb(false) 包住的绘制会与桌面不一致（偏亮）");
+		     "GL_EXT_sRGB_write_control 不可用：无法关闭 sRGB 附件的 linear->sRGB 编码，"
+		     "gs_enable_framebuffer_srgb(false) 包裹的绘制结果可能与桌面端存在亮度差异");
 #endif
 
 	return true;

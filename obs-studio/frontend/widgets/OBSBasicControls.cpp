@@ -102,17 +102,17 @@ OBSBasicControls::OBSBasicControls(OBSBasic *main) : QFrame(nullptr), ui(new Ui:
 			[sub, menuButton] {
 				const QPoint at = menuButton->mapToGlobal(QPoint(0, menuButton->height()));
 				QTimer::singleShot(0, menuButton, [sub, at] {
-					obsAndroidDisplayLog("3-4 ☰ 展开子菜单 %s（%d 项）@(%d,%d)",
-							     sub->title().toUtf8().constData(),
-							     int(sub->actions().size()), at.x(), at.y());
+					blog(LOG_DEBUG, "OBSBasicControls: 展开子菜单 '%s'（%d 项）@(%d,%d)",
+					     sub->title().toUtf8().constData(), int(sub->actions().size()), at.x(),
+					     at.y());
 					sub->exec(at);
 				});
 			});
 	}
 	menuButton->setMenu(androidMenu);
 	ui->buttonsVLayout->insertWidget(0, menuButton);
-	obsAndroidDisplayLog("3-4 ☰ 菜单入口：菜单栏 %d 项 → 镜像出 %d 个子菜单", int(barActions.size()),
-			     int(androidMenu->actions().size()));
+	blog(LOG_INFO, "OBSBasicControls: 菜单入口初始化完成（菜单栏 %d 项 -> 子菜单 %d 项）",
+	     int(barActions.size()), int(androidMenu->actions().size()));
 
 	/* P-17-e 一键前后置。不塞进 ☰：手机上这是最高频的单一动作（自拍↔拍桌面来回翻），走菜单要两下。
 	 * 这里也不缓存"现在是前还是后" —— 那份真相唯一存在的地方是源的 settings.facing（插件在

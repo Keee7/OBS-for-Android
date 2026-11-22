@@ -40,14 +40,14 @@ static QString callDescribe(const QJniObject &ctx)
 	const QJniObject s = QJniObject::callStaticObjectMethod(kPermissionClass, "describe",
 								"(Landroid/content/Context;)Ljava/lang/String;",
 								ctx.object<jobject>());
-	return s.isValid() ? s.toString() : QStringLiteral("describe 调不到（类没进 APK？）");
+	return s.isValid() ? s.toString() : QStringLiteral("无法调用 describe（目标类可能未打入 APK）");
 }
 
 bool obsAndroidPermissionsRequestStartup(QString *detail)
 {
 	const QJniObject act = hostActivity();
 	if (!act.isValid()) {
-		const QString line = QStringLiteral("权限申请没起来：拿不到 QtNative.activity()");
+		const QString line = QStringLiteral("无法发起权限申请：获取 QtNative.activity() 失败");
 		if (detail)
 			*detail = line;
 		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: %s", line.toUtf8().constData());
@@ -256,14 +256,14 @@ static bool screenDisplaySize(void *param, uint32_t *width, uint32_t *height, ui
 	(void)param;
 	const QJniObject ctx = hostContext();
 	if (!ctx.isValid()) {
-		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 屏幕尺寸问不到：拿不到 QtNative.getContext()");
+		blog(LOG_WARNING, "OBSAndroidPermissions: 无法获取屏幕尺寸：QtNative.getContext() 返回空");
 		return false;
 	}
 
 	const QJniObject arr = QJniObject::callStaticObjectMethod(kProjectionClass, "captureSize",
 							   "(Landroid/content/Context;)[I", ctx.object<jobject>());
 	if (!arr.isValid()) {
-		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 屏幕尺寸问不到：captureSize 返回空数组，Java 侧=%s",
+		blog(LOG_WARNING, "OBSAndroidPermissions: 无法获取屏幕尺寸：captureSize 返回空，Java=%s",
 		     screenDescribe().toUtf8().constData());
 		return false;
 	}
@@ -273,7 +273,7 @@ static bool screenDisplaySize(void *param, uint32_t *width, uint32_t *height, ui
 	const jsize n = env->GetArrayLength(ja);
 	jint *els = (n >= 4) ? (jint *)env->GetIntArrayElements(ja, nullptr) : nullptr;
 	if (!els) {
-		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 屏幕尺寸读不到（数组长度=%d，Java 侧=%s）", (int)n,
+		blog(LOG_WARNING, "OBSAndroidPermissions: 读取屏幕尺寸失败（数组长度=%d，Java=%s）", (int)n,
 		     screenDescribe().toUtf8().constData());
 		return false;
 	}
@@ -283,7 +283,7 @@ static bool screenDisplaySize(void *param, uint32_t *width, uint32_t *height, ui
 	env->ReleaseIntArrayElements(ja, els, JNI_ABORT); // 只读，JNI_ABORT = 不把改动写回去
 
 	if (w <= 0 || h <= 0) {
-		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 屏幕尺寸不成立 %dx%d（Java 侧=%s）", (int)w, (int)h,
+		blog(LOG_WARNING, "OBSAndroidPermissions: 无效的屏幕尺寸 %dx%d（Java=%s）", (int)w, (int)h,
 		     screenDescribe().toUtf8().constData());
 		return false;
 	}
@@ -299,12 +299,12 @@ static bool screenStartDisplay(void *param, void *native_window)
 {
 	(void)param;
 	if (!native_window) {
-		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 接面失败：native 传上来的窗口指针是空的");
+		blog(LOG_WARNING, "OBSAndroidPermissions: 启动屏幕采集失败：ANativeWindow 为空");
 		return false;
 	}
 	const QJniObject ctx = hostContext();
 	if (!ctx.isValid()) {
-		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 接面失败：拿不到 QtNative.getContext()");
+		blog(LOG_WARNING, "OBSAndroidPermissions: 启动屏幕采集失败：QtNative.getContext() 返回空");
 		return false;
 	}
 
@@ -316,7 +316,7 @@ static bool screenStartDisplay(void *param, void *native_window)
 	ANativeWindow *window = static_cast<ANativeWindow *>(native_window);
 	jobject surface = ANativeWindow_toSurface(env.jniEnv(), window);
 	if (!surface) {
-		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: ANativeWindow_toSurface 返回空（窗口=%p）",
+		blog(LOG_WARNING, "OBSAndroidPermissions: ANativeWindow_toSurface 返回空（window=%p）",
 		     native_window);
 		return false;
 	}
@@ -339,7 +339,8 @@ static bool screenStartDisplay(void *param, void *native_window)
 	 * 全局引用。所以不猜 —— 拿 GetObjectRefType 现问，并把答案打进日志（1=local 2=global
 	 * 3=weak global）：这一轮先看真机给什么，之后再按它收拾。 */
 	const jint ref_type = env->GetObjectRefType(surface);
-	blog(LOG_INFO, "OBSAndroidPermissions[Android]: 接面 %dx%d@%ddpi 结果=%d Surface 引用类型=%d Java 侧=%s",
+	blog(ok ? LOG_INFO : LOG_WARNING,
+	     "OBSAndroidPermissions: 绑定屏幕采集表面 %dx%d@%ddpi，result=%d，SurfaceRefType=%d，Java=%s",
 	     (int)w, (int)h, (int)dpi, (int)ok, (int)ref_type, screenDescribe().toUtf8().constData());
 
 	if (ref_type == JNILocalRefType)
@@ -350,7 +351,7 @@ static bool screenStartDisplay(void *param, void *native_window)
 static void screenStopDisplay(void *param)
 {
 	(void)param;
-	const QJniObject why = QJniObject::fromString(QStringLiteral("native 侧收面（源 deactivate）"));
+	const QJniObject why = QJniObject::fromString(QStringLiteral("采集源停用，停止屏幕采集输出"));
 	QJniObject::callStaticMethod<void>(kProjectionClass, "stopCapture", "(Ljava/lang/String;)V",
 					   why.object<jstring>());
 }
@@ -364,11 +365,11 @@ static void screenStopDisplay(void *param)
 static void screenReleaseConsent(void *param)
 {
 	(void)param;
-	const QJniObject why = QJniObject::fromString(QStringLiteral("native 侧交还（最后一颗采集源销毁）"));
+	const QJniObject why = QJniObject::fromString(QStringLiteral("最后一个屏幕采集源已销毁"));
 	const jboolean did = QJniObject::callStaticMethod<jboolean>(kProjectionClass, "stopProjection",
 							    "(Ljava/lang/String;)Z", why.object<jstring>());
 	if (did)
-		blog(LOG_INFO, "OBSAndroidPermissions[Android]: 投影令牌已交还，Java 侧=%s",
+		blog(LOG_INFO, "OBSAndroidPermissions: 已释放 MediaProjection 授权，Java=%s",
 		     screenDescribe().toUtf8().constData());
 }
 
@@ -405,7 +406,7 @@ static bool screenStartAudio(void *param, uint32_t *sample_rate, uint32_t *chann
 	(void)param;
 	const QJniObject arr = QJniObject::callStaticObjectMethod(kProjectionClass, "startAudio", "()[I");
 	if (!arr.isValid()) {
-		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 内录起不来（startAudio 返回 null），Java 侧=%s",
+		blog(LOG_WARNING, "OBSAndroidPermissions: 启动系统音频内录失败（startAudio 返回空），Java=%s",
 		     screenDescribe().toUtf8().constData());
 		return false;
 	}
@@ -415,7 +416,7 @@ static bool screenStartAudio(void *param, uint32_t *sample_rate, uint32_t *chann
 	const jsize n = env->GetArrayLength(ja);
 	jint *els = (n >= 2) ? env->GetIntArrayElements(ja, nullptr) : nullptr;
 	if (!els) {
-		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 内录格式读不到（数组长度=%d），Java 侧=%s", (int)n,
+		blog(LOG_WARNING, "OBSAndroidPermissions: 读取系统音频格式失败（数组长度=%d），Java=%s", (int)n,
 		     screenDescribe().toUtf8().constData());
 		return false;
 	}
@@ -424,7 +425,7 @@ static bool screenStartAudio(void *param, uint32_t *sample_rate, uint32_t *chann
 	env->ReleaseIntArrayElements(ja, els, JNI_ABORT); // 只读，不把改动写回去
 
 	if (rate <= 0 || ch <= 0) {
-		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 内录格式不成立 %dHz×%d，Java 侧=%s", (int)rate,
+		blog(LOG_WARNING, "OBSAndroidPermissions: 无效的系统音频格式 %dHz×%d，Java=%s", (int)rate,
 		     (int)ch, screenDescribe().toUtf8().constData());
 		return false;
 	}
@@ -441,7 +442,7 @@ static bool screenStartAudio(void *param, uint32_t *sample_rate, uint32_t *chann
 			/* 缓冲给不出来就别把 AudioRecord 留在场上：那一头已经起了读线程，
 			 * 让它跟着这一格一起回去，两侧才还是一致的。 */
 			QJniObject::callStaticMethod<void>(kProjectionClass, "stopAudio", "()V");
-			blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 内录缓冲建不出来（%d 个 short）", (int)need);
+			blog(LOG_WARNING, "OBSAndroidPermissions: 分配系统音频采集缓冲区失败（%d 个样本）", (int)need);
 			return false;
 		}
 		g_audioScratch = (jshortArray)env->NewGlobalRef(fresh);
@@ -502,7 +503,7 @@ static uint32_t screenReadAudio(void *param, int16_t *out, uint32_t max_frames)
 		static bool warned = false;
 		if (!warned) {
 			warned = true;
-			blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 内录取不到帧：这条线程拿不到 JNIEnv");
+			blog(LOG_WARNING, "OBSAndroidPermissions: 读取系统音频失败：当前线程无法获取 JNIEnv");
 		}
 		return 0;
 	}
@@ -510,7 +511,7 @@ static uint32_t screenReadAudio(void *param, int16_t *out, uint32_t max_frames)
 	const jsize shorts = (jsize)got * (jsize)g_audioScratchChannels;
 	jshort *els = env->GetShortArrayElements(g_audioScratch, nullptr); // 不写 const：Release 那一格入参是 jshort*
 	if (!els) {
-		blog(LOG_WARNING, "OBSAndroidPermissions[Android]: 内录取到的 short 数组读不到（%d 帧）", (int)got);
+		blog(LOG_WARNING, "OBSAndroidPermissions: 读取系统音频样本数组失败（%d 帧）", (int)got);
 		return 0;
 	}
 	memcpy(out, els, (size_t)shorts * sizeof(int16_t));

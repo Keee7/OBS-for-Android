@@ -37,10 +37,12 @@
 #include <fstream>
 #include <string>
 
-/* 这个函数跑在 OBSApp 构造之前，那时 libobs 的 blog 还没有 Qt 日志接管，
- * 所以直接写 logcat —— 判据要能在 adb logcat 里看到。 */
-#define PKG_TAG "32-PKG"
-#define PKG(...) __android_log_print(ANDROID_LOG_INFO, PKG_TAG, __VA_ARGS__)
+/* 这个函数跑在 OBSApp 构造之前，那时 libobs 尚未安装前端日志处理器，
+ * 因此直接输出到 logcat 便于启动阶段排查。 */
+#define BOOT_TAG "OBS-Bootstrap"
+#define BOOT_LOGI(...) __android_log_print(ANDROID_LOG_INFO, BOOT_TAG, __VA_ARGS__)
+#define BOOT_LOGW(...) __android_log_print(ANDROID_LOG_WARN, BOOT_TAG, __VA_ARGS__)
+#define BOOT_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, BOOT_TAG, __VA_ARGS__)
 
 using namespace std;
 
@@ -57,17 +59,17 @@ QString privateFilesDir()
 {
 	const QString appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
 	if (!appData.isEmpty()) {
-		PKG("私有目录来自 QStandardPaths::AppDataLocation");
+		BOOT_LOGI("应用私有目录来自 QStandardPaths::AppDataLocation");
 		return appData;
 	}
 
-	PKG("QStandardPaths::AppDataLocation 返回空（此时还没有 QCoreApplication 实例）→ 改走 /proc/self/cmdline");
+	BOOT_LOGI("QStandardPaths::AppDataLocation 返回空，回退从 /proc/self/cmdline 解析包名");
 
 	ifstream cmdline("/proc/self/cmdline", ios::binary);
 	string pkg;
 	getline(cmdline, pkg, '\0');
 	if (pkg.empty()) {
-		PKG("/proc/self/cmdline 也读不出包名 —— 数据无处可解");
+		BOOT_LOGE("无法从 /proc/self/cmdline 读取包名，跳过资源解包");
 		return QString();
 	}
 	return QStringLiteral("/data/user/0/%1/files").arg(QString::fromStdString(pkg));
@@ -80,7 +82,7 @@ bool extractTree(const QString &resRoot, const QString &dstRoot, int *count)
 {
 	QDir(dstRoot).removeRecursively();
 	if (!QDir().mkpath(dstRoot)) {
-		PKG("建不出目录 %s", dstRoot.toUtf8().constData());
+		BOOT_LOGE("创建目录失败: %s", dstRoot.toUtf8().constData());
 		return false;
 	}
 
@@ -92,7 +94,7 @@ bool extractTree(const QString &resRoot, const QString &dstRoot, int *count)
 		QDir().mkpath(QFileInfo(dst).absolutePath());
 		QFile::remove(dst);
 		if (!QFile::copy(src, dst)) {
-			PKG("拷贝失败 %s -> %s", src.toUtf8().constData(), dst.toUtf8().constData());
+			BOOT_LOGE("复制资源文件失败: %s -> %s", src.toUtf8().constData(), dst.toUtf8().constData());
 			return false;
 		}
 		++n;
@@ -105,7 +107,10 @@ void unpack(const char *label, const QString &resRoot, const QString &dstRoot)
 {
 	int files = 0;
 	const bool ok = extractTree(resRoot, dstRoot, &files);
-	PKG("%s：%s，%d 个文件 -> %s", label, ok ? "解包成功" : "解包失败", files, dstRoot.toUtf8().constData());
+	if (ok)
+		BOOT_LOGI("%s：解包成功（%d 个文件 -> %s）", label, files, dstRoot.toUtf8().constData());
+	else
+		BOOT_LOGE("%s：解包失败（已处理 %d 个文件 -> %s）", label, files, dstRoot.toUtf8().constData());
 }
 
 } // namespace
@@ -114,7 +119,7 @@ void PrepareAndroidRuntimePaths()
 {
 	const QString files = privateFilesDir();
 	if (files.isEmpty()) {
-		PKG("FAIL 拿不到应用私有目录，OBS_ROOT_PATH 未设置");
+		BOOT_LOGE("获取应用私有目录失败，未设置 OBS_ROOT_PATH");
 		return;
 	}
 
@@ -124,14 +129,14 @@ void PrepareAndroidRuntimePaths()
 	 *   $ROOT/share/obs/obs-plugins/<模块>/ 插件数据（本轮还没打插件，见 os-android.cmake）
 	 *   $ROOT/lib/                          插件 .so（同上） */
 	const QString root = files + "/obsroot";
-	PKG("OBS_ROOT_PATH = %s", root.toUtf8().constData());
+	BOOT_LOGI("OBS_ROOT_PATH = %s", root.toUtf8().constData());
 
 	if (!QDir().mkpath(root + "/lib"))
-		PKG("FAIL 建不出 %s/lib", root.toUtf8().constData());
+		BOOT_LOGE("创建插件目录失败: %s/lib", root.toUtf8().constData());
 
-	unpack("libobs 数据 :/obsdata", QStringLiteral(":/obsdata"), root + "/share/libobs");
-	unpack("前端数据 :/obsfrontenddata", QStringLiteral(":/obsfrontenddata"), root + "/share/obs/obs-studio");
-	unpack("插件数据 :/obsplugindata", QStringLiteral(":/obsplugindata"), root + "/share/obs/obs-plugins");
+	unpack("libobs 资源 :/obsdata", QStringLiteral(":/obsdata"), root + "/share/libobs");
+	unpack("前端资源 :/obsfrontenddata", QStringLiteral(":/obsfrontenddata"), root + "/share/obs/obs-studio");
+	unpack("插件资源 :/obsplugindata", QStringLiteral(":/obsplugindata"), root + "/share/obs/obs-plugins");
 
 	setenv("OBS_ROOT_PATH", root.toUtf8().constData(), 1);
 
@@ -141,13 +146,16 @@ void PrepareAndroidRuntimePaths()
 		const char *rel;
 	};
 	static const Probe probes[] = {
-		{"libobs 渲染要的第一张 effect", "share/libobs/default.effect"},
-		{"前端 locale 清单", "share/obs/obs-studio/locale.ini"},
-		{"默认语言翻译", "share/obs/obs-studio/locale/en-US.ini"},
+		{"libobs 默认着色器", "share/libobs/default.effect"},
+		{"前端语言列表", "share/obs/obs-studio/locale.ini"},
+		{"默认语言文件", "share/obs/obs-studio/locale/en-US.ini"},
 	};
 	for (const Probe &p : probes) {
 		const QString path = root + '/' + p.rel;
-		PKG("探针 %s：%s → %s", p.what, path.toUtf8().constData(), QFile::exists(path) ? "在" : "缺失");
+		if (QFile::exists(path))
+			BOOT_LOGI("资源校验 [%s]：%s（存在）", p.what, path.toUtf8().constData());
+		else
+			BOOT_LOGW("资源校验 [%s]：%s（缺失）", p.what, path.toUtf8().constData());
 	}
 
 	/* 插件数据没有写死的文件名可探（哪些插件在包里由 plugins/CMakeLists.txt 的白名单决定），
@@ -159,8 +167,8 @@ void PrepareAndroidRuntimePaths()
 	for (const QString &mod : plugRoot.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
 		const QDir m(plugRoot.filePath(mod));
 		const QStringList files = m.entryList(QDir::Files, QDir::Name);
-		PKG("探针插件数据 %s → %d 个顶层文件：%s", m.absolutePath().toUtf8().constData(), int(files.size()),
-		    files.join(' ').toUtf8().constData());
+		BOOT_LOGI("插件数据目录 %s（%d 个顶层文件：%s）", m.absolutePath().toUtf8().constData(),
+			  int(files.size()), files.join(' ').toUtf8().constData());
 	}
 }
 
@@ -249,7 +257,7 @@ bool EnsureAndroidPluginBinaries()
 			return false;
 		for (const auto &plugin : plugins) {
 			if (!extractPlugin(plugin, staging.path())) {
-				PKG("Cannot extract or verify bundled plugin %s", qPrintable(plugin.name));
+				BOOT_LOGE("Cannot extract or verify bundled plugin %s", qPrintable(plugin.name));
 				return false;
 			}
 		}
@@ -288,6 +296,6 @@ bool EnsureAndroidPluginBinaries()
 			return false;
 	}
 
-	PKG("Bundled plugins ready: %s (%d)", qPrintable(digest), int(plugins.size()));
+	BOOT_LOGI("Bundled plugins ready: %s (%d)", qPrintable(digest), int(plugins.size()));
 	return setenv("OBS_ANDROID_BUNDLED_PLUGIN_DIR", directory.toUtf8().constData(), 1) == 0;
 }

@@ -165,7 +165,8 @@ static bool gl_init_platform_egl(struct gl_platform *plat)
 	const char *exts = eglQueryString(plat->display, EGL_EXTENSIONS);
 	plat->has_gl_colorspace = exts && strstr(exts, "EGL_KHR_gl_colorspace");
 	blog(LOG_INFO, "EGL_KHR_gl_colorspace：%s",
-	     plat->has_gl_colorspace ? "支持，窗口面将请求 sRGB 编码" : "不支持，窗口面只能是线性（预览会偏暗）");
+	     plat->has_gl_colorspace ? "支持（窗口表面将请求 sRGB 编码）"
+				     : "不支持（窗口表面将使用线性色彩空间，预览可能偏暗）");
 
 	if (!eglChooseConfig(plat->display, config_attribs, &plat->config, 1, &num_config) || num_config < 1) {
 		blog(LOG_ERROR, "eglChooseConfig found no matching config (%d): %s", num_config, egl_error_str());
@@ -282,7 +283,7 @@ bool gl_platform_init_swapchain(struct gs_swap_chain *swap)
 		static const EGLint srgb_attribs[] = {EGL_GL_COLORSPACE_KHR, EGL_GL_COLORSPACE_SRGB_KHR, EGL_NONE};
 		swap->wi->surface = eglCreateWindowSurface(plat->display, plat->config, swap->wi->window, srgb_attribs);
 		if (swap->wi->surface == EGL_NO_SURFACE)
-			blog(LOG_WARNING, "sRGB 窗口面被驱动拒绝（%s），退回线性面", egl_error_str());
+			blog(LOG_WARNING, "驱动不支持 sRGB 窗口表面（%s），已回退到线性色彩空间", egl_error_str());
 	}
 	if (swap->wi->surface == EGL_NO_SURFACE)
 		swap->wi->surface = eglCreateWindowSurface(plat->display, plat->config, swap->wi->window, NULL);
@@ -296,10 +297,11 @@ bool gl_platform_init_swapchain(struct gs_swap_chain *swap)
 	 * 上一版把 "(0x3089=sRGB)" 写在同一行，线性面也能被 grep 命中 ⇒ 判据假绿。 */
 	if (eglQuerySurface(plat->display, swap->wi->surface, EGL_GL_COLORSPACE, &colorspace)) {
 		const bool srgb = (colorspace == EGL_GL_COLORSPACE_SRGB);
-		blog(LOG_INFO, "Android 窗口面色彩空间=0x%04x ⇒ %s", (unsigned)colorspace,
-		     srgb ? "sRGB，写入默认帧缓冲会硬件编码" : "线性，GL_FRAMEBUFFER_SRGB 对它空转（预览会偏暗）");
+		blog(LOG_INFO, "Android 窗口表面色彩空间=0x%04x（%s）", (unsigned)colorspace,
+		     srgb ? "sRGB，默认帧缓冲将执行硬件编码"
+			  : "线性，GL_FRAMEBUFFER_SRGB 不生效，预览可能偏暗");
 	} else {
-		blog(LOG_INFO, "Android 窗口面色彩空间查不到: %s", egl_error_str());
+		blog(LOG_INFO, "无法查询 Android 窗口表面色彩空间: %s", egl_error_str());
 	}
 
 	return true;

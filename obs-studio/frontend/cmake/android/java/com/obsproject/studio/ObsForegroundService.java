@@ -204,17 +204,17 @@ public final class ObsForegroundService extends Service {
     public static void retypeIfNeeded() {
         final ObsForegroundService svc = instance;
         if (svc == null) {
-            Log.i(TAG, "重算类型跳过：保活服务没在跑，下一次 start 时自会按当时的投影态算");
+            Log.i(TAG, "跳过更新前台服务类型：保活服务未运行");
             return;
         }
         new Handler(Looper.getMainLooper()).post(new Runnable() {
             @Override
             public void run() {
                 if (instance != svc) {
-                    Log.i(TAG, "重算类型跳过：服务已换新实例，旧的那个不再碰");
+                    Log.i(TAG, "跳过更新前台服务类型：服务实例已变更");
                     return;
                 }
-                Log.i(TAG, "投影态变了，重算前台服务类型 " + describe());
+                Log.i(TAG, "屏幕采集状态变化，重新评估前台服务类型 " + describe());
                 svc.promoteToForeground();
             }
         });
@@ -250,10 +250,10 @@ public final class ObsForegroundService extends Service {
         final Runnable pending = pendingAfterPromote;
         pendingAfterPromote = null;
         if (pending != null && promoted) {
-            Log.i(TAG, "投影档已落定，放行等它的令牌交换");
+            Log.i(TAG, "前台服务已切换为 MEDIA_PROJECTION 类型，继续获取授权");
             pending.run();
         } else if (pending != null) {
-            Log.e(TAG, "改档失败，等它的令牌交换直接作废");
+            Log.e(TAG, "切换为 MEDIA_PROJECTION 前台服务类型失败，授权流程中止");
             releaseProjectionForeground(getApplicationContext());
         }
         return START_STICKY;
@@ -374,7 +374,7 @@ public final class ObsForegroundService extends Service {
                     if (svc.promoteToForeground())
                         after.run();
                     else {
-                        Log.e(TAG, "改投影档失败，令牌不换了：" + lastError);
+                        Log.e(TAG, "切换为 MEDIA_PROJECTION 类型失败，中止获取投影：" + lastError);
                         releaseProjectionForeground(svc.getApplicationContext());
                     }
                 }
@@ -388,7 +388,7 @@ public final class ObsForegroundService extends Service {
                startedForProjection 跟着落回去 —— 服务根本没起来，没有要回滚的通知。 */
             pendingAfterPromote = null;
             startedForProjection = false;
-            Log.e(TAG, "为投影起保活服务失败，令牌不换了：" + lastError);
+            Log.e(TAG, "启动投影前台服务失败，中止获取投影：" + lastError);
             releaseProjectionForeground(ctx);
         }
     }
@@ -419,7 +419,7 @@ public final class ObsForegroundService extends Service {
         startedForProjection = false;
         pendingAfterPromote = null;
         if (wasOurs && instance != null && ctx != null) {
-            Log.i(TAG, "投影档服务是我们起的，令牌没换成 ⇒ 停掉，不留常驻通知");
+            Log.i(TAG, "未获取投影授权，正在停止临时启动的前台服务");
             stop(ctx);
             return;
         }
@@ -489,7 +489,7 @@ public final class ObsForegroundService extends Service {
                 pf |= PendingIntent.FLAG_IMMUTABLE; // API 31+ 不显式给可变性会崩
             pi = PendingIntent.getActivity(this, 0, open, pf);
         } catch (Throwable t) {
-            Log.w(TAG, "点按 PendingIntent 建失败（通知照样能显示）: " + t);
+            Log.w(TAG, "创建通知点击 PendingIntent 失败（不影响通知展示）: " + t);
         }
 
         final Context lctx = localizedContext();
@@ -518,9 +518,9 @@ public final class ObsForegroundService extends Service {
             wakeLock.setReferenceCounted(false);
             wakeLock.acquire();
             wakeLockHeld = true;
-            Log.i(TAG, "PARTIAL_WAKE_LOCK 已持有");
+            Log.i(TAG, "已获取 PARTIAL_WAKE_LOCK");
         } catch (Throwable t) {
-            lastError = "拿 wakelock 失败: " + t;
+            lastError = "获取 WakeLock 失败: " + t;
             Log.e(TAG, lastError, t);
         }
     }
@@ -533,7 +533,7 @@ public final class ObsForegroundService extends Service {
             if (wakeLock.isHeld())
                 wakeLock.release();
         } catch (Throwable t) {
-            Log.w(TAG, "放 wakelock 失败: " + t);
+            Log.w(TAG, "释放 WakeLock 失败: " + t);
         }
         wakeLock = null;
     }

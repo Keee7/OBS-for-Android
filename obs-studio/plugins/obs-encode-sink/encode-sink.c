@@ -36,9 +36,9 @@ static void *encode_sink_create(obs_data_t *settings, obs_output_t *output)
 	if (path && path[0]) {
 		sink->fp = os_fopen(path, "wb");
 		if (!sink->fp)
-			blog(LOG_ERROR, "encode-sink: 无法创建码流文件 %s", path);
+			blog(LOG_ERROR, "encode-sink: 无法创建输出文件 %s", path);
 		else
-			blog(LOG_INFO, "encode-sink: 码流写到 %s", path);
+			blog(LOG_INFO, "encode-sink: 正在将编码数据写入 %s", path);
 	}
 
 	return sink;
@@ -108,9 +108,9 @@ static void encode_sink_packet(void *data, struct encoder_packet *packet)
 
 	if (sink->packets == 1 || sink->packets % 30 == 0)
 		blog(LOG_INFO,
-		     "encode-sink: packet #%u (%s, %zu 字节, pts=%lld) 累计 %llu 字节 / %u 个关键帧", sink->packets,
-		     packet->keyframe ? "IDR" : "非关键帧", packet->size, (long long) packet->pts,
-		     (unsigned long long) sink->bytes, sink->keyframes);
+		     "encode-sink: 数据包 #%u（%s，%zu 字节，pts=%lld），累计 %llu 字节 / %u 个关键帧",
+		     sink->packets, packet->keyframe ? "IDR" : "非关键帧", packet->size,
+		     (long long) packet->pts, (unsigned long long) sink->bytes, sink->keyframes);
 }
 
 struct obs_output_info encode_sink_info = {

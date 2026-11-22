@@ -19,11 +19,11 @@
 #include <QWidget>
 
 #ifdef __ANDROID__
-#include "widgets/OBSAndroidDisplay.hpp"
+#include <util/base.h>
 
 #include <QString>
 
-// 探针标签：优先 objectName（UI 文件里那些名字），没名字的裸控件退回类名，免得日志里全是空引号。
+// 日志标识：优先 objectName，无 objectName 时回退至类名。
 inline QString OBSMenuPosAnchorName(const QWidget *anchor)
 {
 	const QString name = anchor->objectName();
@@ -36,11 +36,12 @@ inline QPoint OBSMenuPos(const QPoint &androidGlobalPos)
 #ifdef __ANDROID__
 	if (androidGlobalPos.x() >= 0) {
 		const QPoint cursor = QCursor::pos();
-		obsAndroidDisplayLog("3-4 菜单定位：采用(%d,%d)（光标缓存在(%d,%d)，不用它）", androidGlobalPos.x(), androidGlobalPos.y(),
-				     cursor.x(), cursor.y());
+		blog(LOG_DEBUG, "OBSMenuPos: 使用事件位置 (%d,%d)（忽略 QCursor 缓存位置 (%d,%d)）",
+		     androidGlobalPos.x(), androidGlobalPos.y(), cursor.x(), cursor.y());
 		return androidGlobalPos;
 	}
-	obsAndroidDisplayLog("3-4 菜单定位：调用点没量到 ⇒ 退回光标缓存(%d,%d)", QCursor::pos().x(), QCursor::pos().y());
+	blog(LOG_DEBUG, "OBSMenuPos: 未提供有效坐标，回退使用 QCursor 位置 (%d,%d)", QCursor::pos().x(),
+	     QCursor::pos().y());
 #else
 	Q_UNUSED(androidGlobalPos);
 #endif
@@ -55,7 +56,8 @@ inline QPoint OBSMenuPosBelow(const QWidget *anchor)
 		const QPoint pos = anchor->mapToGlobal(QPoint(0, anchor->height()));
 #ifdef __ANDROID__
 		const QString name = OBSMenuPosAnchorName(anchor);
-		obsAndroidDisplayLog("3-4 菜单定位：锚「%s」下缘 → (%d,%d)", name.toUtf8().constData(), pos.x(), pos.y());
+		blog(LOG_DEBUG, "OBSMenuPos: 锚定控件 '%s' 下方 -> (%d,%d)", name.toUtf8().constData(), pos.x(),
+		     pos.y());
 #endif
 		return pos;
 	}
@@ -69,7 +71,8 @@ inline QPoint OBSMenuPosCenter(const QWidget *anchor)
 		const QPoint pos = anchor->mapToGlobal(anchor->rect().center());
 #ifdef __ANDROID__
 		const QString name = OBSMenuPosAnchorName(anchor);
-		obsAndroidDisplayLog("3-4 菜单定位：锚「%s」中心 → (%d,%d)", name.toUtf8().constData(), pos.x(), pos.y());
+		blog(LOG_DEBUG, "OBSMenuPos: 锚定控件 '%s' 中心 -> (%d,%d)", name.toUtf8().constData(), pos.x(),
+		     pos.y());
 #endif
 		return pos;
 	}

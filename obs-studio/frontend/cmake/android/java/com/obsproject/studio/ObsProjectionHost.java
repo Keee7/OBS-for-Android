@@ -103,7 +103,7 @@ public final class ObsProjectionHost extends Activity {
      */
     public static synchronized int requestConsent(Context ctx) {
         if (projection != null) {
-            lastAction = "投影令牌本来就有，不再弹第二次框";
+            lastAction = "已持有 MediaProjection 授权，无需重复请求";
             Log.i(TAG, lastAction);
             return 0;
         }
@@ -117,7 +117,7 @@ public final class ObsProjectionHost extends Activity {
             Intent it = new Intent(ctx.getApplicationContext(), ObsProjectionHost.class);
             it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             ctx.getApplicationContext().startActivity(it);
-            lastAction = "已拉起透明代理 Activity（下一步才是系统同意框）";
+            lastAction = "已启动授权代理 Activity，等待系统确认";
             Log.i(TAG, lastAction);
             return 1;
         } catch (Throwable t) {
@@ -174,7 +174,7 @@ public final class ObsProjectionHost extends Activity {
     private static int[] measureCapture(Context ctx) {
         final android.view.Display d = defaultDisplay(ctx);
         if (d == null) {
-            lastError = "measureCapture：拿不到默认显示（DISPLAY_SERVICE 为空）";
+            lastError = "measureCapture：获取默认显示设备失败（DISPLAY_SERVICE 为空）";
             Log.e(TAG, lastError);
             return new int[] { 0, 0, 0, 0 };
         }
@@ -213,8 +213,8 @@ public final class ObsProjectionHost extends Activity {
         final int dpi = dm.densityDpi;
         if (w != lastMeasured[0] || h != lastMeasured[1] || dpi != lastMeasured[2] || rot != lastMeasured[3]) {
             lastMeasured = new int[] { w, h, dpi, rot };
-            Log.i(TAG, "屏幕量取：mode=" + mw + "x" + mh + " 旋转=" + rot + " ⇒ " + w + "x" + h + " @" + dpi +
-                               "（getRealSize=" + rs.x + "x" + rs.y + "）");
+            Log.i(TAG, "屏幕采集参数测量：mode=" + mw + "x" + mh + "，旋转=" + rot + " -> " + w + "x" + h + "@" + dpi
+                               + "dpi（getRealSize=" + rs.x + "x" + rs.y + "）");
         }
         return new int[] { w, h, dpi, rot };
     }
@@ -269,7 +269,7 @@ public final class ObsProjectionHost extends Activity {
             return false;
         }
         lastError = "<none>";
-        lastAction = "投影面已建 " + w + "x" + h + "@" + dpi;
+        lastAction = "VirtualDisplay 已创建 " + w + "x" + h + "@" + dpi;
         Log.i(TAG, lastAction);
         return true;
     }
@@ -334,7 +334,7 @@ public final class ObsProjectionHost extends Activity {
         }
         projection = null;
         wantProjection = false; // 意图位跟着一起落，否则保活服务会一直白占 mediaProjection 那一档
-        lastAction = "投影已交还（" + why + "）";
+        lastAction = "MediaProjection 投影已释放（" + why + "）";
         Log.i(TAG, lastAction);
         ObsForegroundService.retypeIfNeeded(); // 前台服务里 mediaProjection 那一位要跟着落
         return true;
@@ -374,7 +374,7 @@ public final class ObsProjectionHost extends Activity {
             return new int[] { audioRate, audioChannels };
         }
         if (projection == null) {
-            lastError = "startAudio：没有令牌，内录起不来（先走同意框）";
+            lastError = "startAudio：缺少 MediaProjection 授权令牌，无法启动系统内录";
             Log.e(TAG, lastError);
             return null;
         }
@@ -421,7 +421,7 @@ public final class ObsProjectionHost extends Activity {
                 rec = null;
             }
             if (rec == null) {
-                lastError = "startAudio：AudioRecord 建不起来（48k/44.1k 两回都不成立，最后一发 getMinBufferSize=" +
+                lastError = "startAudio：AudioRecord 创建失败（48k/44.1k 采样率均初始化失败，最终 getMinBufferSize=" +
                             minBuf + "）";
                 Log.e(TAG, lastError);
                 return null;
@@ -433,7 +433,7 @@ public final class ObsProjectionHost extends Activity {
             if (rec.getRecordingState() == AudioRecord.RECORDSTATE_STOPPED)
                 rec.startRecording();
             if (rec.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
-                lastError = "startAudio：AudioRecord 建起来了但没进 RECORDING 态（rate=" + rec.getSampleRate() +
+                lastError = "startAudio：AudioRecord 创建成功但未能进入 RECORDING 状态（rate=" + rec.getSampleRate() +
                             " ch=" + rec.getChannelCount() + " state=" + rec.getState() + "）";
                 Log.e(TAG, lastError);
                 rec.release();
@@ -445,7 +445,7 @@ public final class ObsProjectionHost extends Activity {
             audioRate = rec.getSampleRate();
             audioChannels = rec.getChannelCount();
             if (audioRate <= 0 || audioChannels <= 0) {
-                lastError = "startAudio：实到格式不成立 rate=" + audioRate + " ch=" + audioChannels;
+                lastError = "startAudio：实际音频格式参数无效，rate=" + audioRate + " ch=" + audioChannels;
                 Log.e(TAG, lastError);
                 rec.release();
                 return null;
@@ -468,7 +468,7 @@ public final class ObsProjectionHost extends Activity {
                 }
             }, "obs-screen-audio");
             audioThread.start();
-            lastAction = "系统内录已起 " + audioRate + "Hz×" + audioChannels;
+            lastAction = "系统内录已启动（" + audioRate + "Hz, " + audioChannels + "ch）";
             Log.i(TAG, lastAction);
             return new int[] { audioRate, audioChannels };
         } catch (Throwable t) {
@@ -492,7 +492,7 @@ public final class ObsProjectionHost extends Activity {
             if (n < 0) {
                 /* ERROR_DEAD_OBJECT 与"令牌没了"同义；这里只停自己这一圈，
                  * 格子的清理留给 stopAudio（native 那一侧发现令牌走了会调它）。 */
-                Log.w(TAG, "内录读线程遇到 read()=" + n + "，退出循环");
+                Log.w(TAG, "内录读取线程返回 read()=" + n + "，退出读取循环");
                 break;
             }
             synchronized (AUDIO_LOCK) {
@@ -505,7 +505,7 @@ public final class ObsProjectionHost extends Activity {
                     audioFilled -= drop;
                     audioDropped += drop;
                     if ((audioDropped % (audioRate * audioChannels)) < n)
-                        Log.w(TAG, "内录缓冲溢出，已丢旧帧累计 " + audioDropped + " short（消费方太慢）");
+                        Log.w(TAG, "内录环形缓冲区溢出，已丢弃较旧采样累计 " + audioDropped + " samples（消费速率过慢）");
                 }
                 final int first = Math.min(n, audioRing.length - audioHead);
                 System.arraycopy(buf, 0, audioRing, audioHead, first);
@@ -538,7 +538,7 @@ public final class ObsProjectionHost extends Activity {
                 if (rec.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING)
                     rec.stop();
             } catch (Throwable e) {
-                Log.e(TAG, "AudioRecord.stop() 抛异常: " + e, e);
+                Log.e(TAG, "AudioRecord.stop() 发生异常: " + e, e);
             }
         }
         final Thread t = audioThread;
@@ -550,7 +550,7 @@ public final class ObsProjectionHost extends Activity {
                 Thread.currentThread().interrupt();
             }
             if (t.isAlive())
-                Log.w(TAG, "内录读线程 join(2000) 之后还在，AudioRecord 仍要释放（可能造成一次 read 失败）");
+                Log.w(TAG, "内录读取线程在 join(2000) 超时后仍未退出，将继续释放 AudioRecord");
         }
         synchronized (AUDIO_LOCK) {
             /* 放在 join 之后：读线程退出前还要读 audioRing，先清它就得靠 audioRing==null
@@ -562,10 +562,10 @@ public final class ObsProjectionHost extends Activity {
             try {
                 rec.release();
             } catch (Throwable e) {
-                Log.e(TAG, "AudioRecord.release() 抛异常: " + e, e);
+                Log.e(TAG, "AudioRecord.release() 发生异常: " + e, e);
             }
         }
-        Log.i(TAG, "系统内录已停（累计丢 " + audioDropped + " short）");
+        Log.i(TAG, "系统内录已停止（累计丢弃 " + audioDropped + " samples）");
     }
 
     /**
@@ -636,7 +636,7 @@ public final class ObsProjectionHost extends Activity {
             sMpm = (MediaProjectionManager) getApplicationContext().getSystemService(
                 Context.MEDIA_PROJECTION_SERVICE);
             if (sMpm == null) {
-                lastError = "拿不到 MediaProjectionManager（这台没有屏幕采集？）";
+                lastError = "获取 MediaProjectionManager 失败，当前设备可能不支持屏幕采集";
                 wantProjection = false;
                 Log.e(TAG, lastError);
                 finish();
@@ -644,9 +644,9 @@ public final class ObsProjectionHost extends Activity {
             }
             Intent ask = sMpm.createScreenCaptureIntent();
             startActivityForResult(ask, REQUEST_CODE);
-            Log.i(TAG, "createScreenCaptureIntent 已发起 startActivityForResult");
+            Log.i(TAG, "已通过 createScreenCaptureIntent 发起系统录屏授权请求");
         } catch (Throwable t) {
-            lastError = "发起同意框抛异常: " + t;
+            lastError = "发起系统录屏授权请求时发生异常: " + t;
             wantProjection = false;
             Log.e(TAG, lastError, t);
             finish();
@@ -664,7 +664,7 @@ public final class ObsProjectionHost extends Activity {
          * RESULT_OK 不受此限：它手里是真令牌，收下比丢掉好。 */
         final boolean stale = (myGen != consentGen);
         if (req != REQUEST_CODE) {
-            lastError = "收到一个不是本类的 requestCode=" + req + "，忽略";
+            lastError = "收到未知 requestCode=" + req + " 的授权回调，已忽略";
             Log.w(TAG, lastError);
             if (!stale) {
                 wantProjection = false;
@@ -675,8 +675,8 @@ public final class ObsProjectionHost extends Activity {
         }
         if (result != RESULT_OK || data == null) {
             // 用户点了"取消"或直接关掉 —— 这不是错误，报成"用户没同意"而不是抛异常
-            lastAction = "用户没同意录屏（resultCode=" + result + "，data=" + (data == null ? "null" : "有") + "）"
-                         + (stale ? "，且来自旧一代代理 Activity，不动状态" : "");
+            lastAction = "用户取消或拒绝了屏幕采集授权（resultCode=" + result + "，data=" + (data == null ? "null" : "non-null") + "）"
+                         + (stale ? "，且属于过期授权会话，保持当前状态不变" : "");
             Log.i(TAG, lastAction);
             /* 拒绝这一条路上服务是我们叫起的还是本来就在跑，到这一步还没起过（起服务只发生在 RESULT_OK
              * 那条分支），所以这里只需把意图位落回去，没有要回滚的服务。 */
@@ -690,7 +690,7 @@ public final class ObsProjectionHost extends Activity {
         /* 顺序是这一条腿的全部内容，而且是量出来的（见 takeToken 上面那段）：
          * 先把保活服务推成 mediaProjection 档，推成功了才去换令牌。服务可能已经在跑（正在推流/录制），
          * 也可能根本没跑 —— 两种情况都由 ensureProjectionForeground 收敛，它跑完续体时类型一定已经落定。 */
-        Log.i(TAG, "用户已同意，先把保活服务推成投影档，再换令牌");
+        Log.i(TAG, "已获取屏幕录制授权，正在更新前台服务类型以创建投影对象");
         final Context app = getApplicationContext();
         ObsForegroundService.ensureProjectionForeground(app, new Runnable() {
             @Override
@@ -719,7 +719,7 @@ public final class ObsProjectionHost extends Activity {
         try {
             MediaProjection p = sMpm.getMediaProjection(resultCode, data);
             if (p == null) {
-                lastError = "getMediaProjection 返回 null（RESULT_OK 却没有令牌）";
+                lastError = "getMediaProjection 返回 null";
                 Log.e(TAG, lastError);
                 giveUpToken(app, "getMediaProjection 返回 null");
                 return;
@@ -753,7 +753,7 @@ public final class ObsProjectionHost extends Activity {
                             releaseDisplay();
                             projection = null;
                             wantProjection = false;
-                            lastAction = "系统收回了投影令牌（onStop）";
+                            lastAction = "系统已停止 MediaProjection 会话（onStop）";
                             line = lastAction;
                         } else {
                             line = "这份 onStop 不是现在手里那一份令牌 ⇒ 忽略，不动现在的态"
@@ -779,7 +779,7 @@ public final class ObsProjectionHost extends Activity {
                 };
             });
             projection = p;
-            lastAction = "已拿到投影令牌（" + Build.VERSION.SDK_INT + " 档系统）";
+            lastAction = "已获取 MediaProjection 授权（API " + Build.VERSION.SDK_INT + "）";
             Log.i(TAG, lastAction + " " + describe());
             /* 令牌到手，"为投影空手起服务"这面旗子的使命到此为止。不落回 false 的话，
              * 之后任何一次投影失败收尾都会把整个保活服务停掉 —— 那时若正在推流/录制，
@@ -796,7 +796,7 @@ public final class ObsProjectionHost extends Activity {
     private static synchronized void giveUpToken(Context app, String why) {
         projection = null;
         wantProjection = false;
-        Log.w(TAG, "投影作废（" + why + "），交回保活服务的处置权");
+        Log.w(TAG, "屏幕投影已中止（" + why + "），已更新前台服务状态");
         ObsForegroundService.releaseProjectionForeground(app);
     }
 }

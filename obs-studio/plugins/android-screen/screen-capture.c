@@ -156,7 +156,7 @@ static void drop_frame(struct screen_source *c, const char *why, int32_t a, int3
 {
 	c->frames_dropped++;
 	if (c->frames_dropped == 1 || (c->frames_dropped % 300) == 0)
-		blog(LOG_WARNING, "android-screen: 丢帧（%s）参数=%d,%d 已累计 %llu 帧", why, (int)a, (int)b,
+		blog(LOG_WARNING, "android-screen: 丢帧（%s，参数=%d,%d，累计丢弃=%llu 帧）", why, (int)a, (int)b,
 		     (unsigned long long)c->frames_dropped);
 }
 
@@ -462,13 +462,15 @@ static bool audio_pump_start(void)
 
 	uint32_t rate = 0, ch = 0;
 	if (!obs_android_screen_start_audio(&rate, &ch)) {
-		blog(LOG_WARNING, "android-screen: 系统内录没起来（原因见上一条总线日志），只影响伴音、不影响画面");
+		blog(LOG_WARNING,
+		     "android-screen: 系统音频内录启动失败（详见宿主接口日志），本次采集将不包含系统声音");
 		return false;
 	}
 	if (ch != 1 && ch != 2) {
 		/* 交织的 1/2 声道能直接映射进 obs 的 planar 之外的路（S16 交织 = 一个平面），
 		 * 3 声道以上没有现成的 layout 可对应，硬按立体声解释就是把声相弄错。宁可不采。 */
-		blog(LOG_WARNING, "android-screen: 内录实到 %u 声道，本插件只映射 1/2 声道，这一路不起", (unsigned)ch);
+		blog(LOG_WARNING, "android-screen: 系统内录返回 %u 声道，当前仅支持单声道或立体声，已跳过内录",
+		     (unsigned)ch);
 		obs_android_screen_stop_audio();
 		return false;
 	}
@@ -477,18 +479,18 @@ static bool audio_pump_start(void)
 	audio_ch = ch;
 	audio_buf = bmalloc((size_t)AUDIO_READ_FRAMES * ch * sizeof(int16_t));
 	if (os_event_init(&audio_stop, OS_EVENT_TYPE_MANUAL) != 0) {
-		blog(LOG_ERROR, "android-screen: os_event_init 失败，内录不起");
+		blog(LOG_ERROR, "android-screen: os_event_init 失败，无法启动系统音频内录");
 		goto fail;
 	}
 	if (pthread_create(&audio_thread, NULL, audio_pump_thread, NULL) != 0) {
-		blog(LOG_ERROR, "android-screen: 创建内录线程失败");
+		blog(LOG_ERROR, "android-screen: 创建系统内录线程失败");
 		os_event_destroy(audio_stop);
 		audio_stop = NULL;
 		goto fail;
 	}
 	audio_thread_started = true;
-	blog(LOG_INFO, "android-screen: 系统内录泵已起 %uHz×%u（一次最多取 %d 帧，前端复用缓冲）", (unsigned)rate,
-	     (unsigned)ch, AUDIO_READ_FRAMES);
+	blog(LOG_INFO, "android-screen: 系统音频内录已启动（%uHz，%u 声道，单次读取上限=%d 帧）",
+	     (unsigned)rate, (unsigned)ch, AUDIO_READ_FRAMES);
 	return true;
 
 fail:
@@ -508,7 +510,8 @@ static void audio_pump_stop(void)
 		os_event_signal(audio_stop);
 		pthread_join(audio_thread, NULL);
 		audio_thread_started = false;
-		blog(LOG_INFO, "android-screen: 内录泵已停（共推送 %llu 次 / %llu 帧 ≈ %.2f 秒；本场峰值 %d/32767）",
+		blog(LOG_INFO,
+		     "android-screen: 系统音频内录已停止（共推送 %llu 次 / %llu 帧，约 %.2f 秒，历史峰值=%d/32767）",
 		     (unsigned long long)audio_pushes, (unsigned long long)audio_frames_total,
 		     (double)audio_frames_total / (double)(audio_rate ? audio_rate : 1), audio_peak_all);
 	}
@@ -587,7 +590,7 @@ static void audio_state_line(struct dstr *out)
 
 static void close_capture(struct screen_source *c, const char *why)
 {
-	blog(LOG_INFO, "android-screen: 关掉采集（%s）", why);
+	blog(LOG_INFO, "android-screen: 停止屏幕采集（原因=%s）", why);
 	c->cpu_active = false;
 	os_atomic_set_long(&c->shutting_down, 1);
 
@@ -765,7 +768,7 @@ static bool open_capture(struct screen_source *c)
 	 * 属性页那一行会把"没音"说清楚。 */
 	audio_pump_acquire(c);
 
-	blog(LOG_INFO, "android-screen: 采集已开 %ux%u（已向系统要的尺寸），等第一帧", w, h);
+	blog(LOG_INFO, "android-screen: 屏幕采集已启动（目标尺寸=%ux%u），等待首帧数据", w, h);
 	return true;
 }
 
@@ -809,7 +812,7 @@ static void try_start(struct screen_source *c)
 				const char *args[] = {result};
 				set_error_key(c, "Err.ConsentFailed", args, 1);
 			} else
-				blog(LOG_INFO, "android-screen: 还没有投影令牌，已发起同意框（返回 %d）", r);
+				blog(LOG_INFO, "android-screen: 尚未获取投影授权，已发起系统授权请求（返回值=%d）", r);
 		}
 		return;
 	}
@@ -923,7 +926,7 @@ static void screen_destroy(void *data)
 	 * 可能根本轮不到跑（进程直接被杀），那种情况下令牌随进程一起没，系统自己收回。
 	 * 放在下面那个提前返回之前：泄漏 data 是一回事，把令牌留在手上是另一回事，别连带着漏。 */
 	if (os_atomic_dec_long(&live_sources) == 0) {
-		blog(LOG_INFO, "android-screen: 最后一颗采集源已销毁，把投影令牌交还系统");
+		blog(LOG_INFO, "android-screen: 最后一个屏幕采集源已销毁，正在释放投影授权");
 		obs_android_screen_release_consent();
 	}
 
@@ -1229,11 +1232,11 @@ bool obs_module_load(void)
 	 * "libobs 已拒绝、模块谎报成功"的假账（A2 实测过那条坑）。 */
 	const uint32_t flags = obs_get_source_output_flags("android_screen_capture");
 	if (!flags) {
-		blog(LOG_ERROR, "android-screen: 'android_screen_capture' 注册被拒，见上一条 libobs 报错");
+		blog(LOG_ERROR, "android-screen: 注册源类型 'android_screen_capture' 失败，请查看 libobs 错误日志");
 		return false;
 	}
 
-	blog(LOG_INFO, "android-screen: 已注册源类型 'android_screen_capture'（flags=0x%x，总线 ready=%d）",
+	blog(LOG_INFO, "android-screen: 已注册源类型 'android_screen_capture'（flags=0x%x，宿主接口就绪=%d）",
 	     (unsigned)flags, (int)obs_android_screen_ready());
 	return true;
 }

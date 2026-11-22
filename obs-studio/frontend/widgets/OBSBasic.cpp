@@ -232,7 +232,7 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 		const QString now = QString::fromUtf8(state);
 		if (now != lastState) {
 			lastState = now;
-			blog(LOG_INFO, "OBSBasic[Android]: 3-5 保活复核（%s）→ %s", why, detail.toUtf8().constData());
+			blog(LOG_INFO, "OBSBasic: 前台保活状态更新（触发=%s）-> %s", why, detail.toUtf8().constData());
 		}
 		if (!keepAliveWatchdog->isActive())
 			keepAliveWatchdog->start();
@@ -905,7 +905,7 @@ bool OBSBasic::InitBasicConfigDefaults()
 		if (strcmp(cur, "hybrid_mp4") == 0 || strcmp(cur, "hybrid_mov") == 0) {
 			return;
 		}
-		blog(LOG_WARNING, "Android 配置纠正：[%s] RecFormat2='%s' 本平台不可用（ffmpeg_muxer 未随包）⇒ 改用 '%s'",
+		blog(LOG_WARNING, "Android 配置修正：[%s] RecFormat2='%s' 在 Android 上不可用（未包含 ffmpeg_muxer），已重置为 '%s'",
 		     section, cur, DEFAULT_CONTAINER);
 		config_set_string(activeConfiguration, section, "RecFormat2", DEFAULT_CONTAINER);
 	};
@@ -914,8 +914,8 @@ bool OBSBasic::InitBasicConfigDefaults()
 
 	const char *qual = config_get_string(activeConfiguration, "SimpleOutput", "RecQuality");
 	if (strcmp(qual, "Lossless") == 0) {
-		blog(LOG_WARNING, "Android 配置纠正：SimpleOutput RecQuality='Lossless' 会把容器硬写成 avi"
-				  "（SimpleOutput.cpp:49-58）⇒ 改用 'Stream'");
+		blog(LOG_WARNING, "Android 配置修正：SimpleOutput RecQuality='Lossless' 在 Android 上不可用"
+				  "（该档位强制输出 avi），已重置为 'Stream'");
 		config_set_string(activeConfiguration, "SimpleOutput", "RecQuality", "Stream");
 	}
 
@@ -926,7 +926,7 @@ bool OBSBasic::InitBasicConfigDefaults()
 	 * 挡不住从桌面拷来的 profile ⇒ 与 `clampContainer` 同一层纠正。 */
 	const char *recType = config_get_string(activeConfiguration, "AdvOut", "RecType");
 	if (strcmp(recType, "Standard") != 0) {
-		blog(LOG_WARNING, "Android 配置纠正：AdvOut RecType='%s' 本平台不可用（ffmpeg_muxer 未随包）⇒ 改用 'Standard'",
+		blog(LOG_WARNING, "Android 配置修正：AdvOut RecType='%s' 在 Android 上不可用（未包含 ffmpeg_muxer），已重置为 'Standard'",
 		     recType);
 		config_set_string(activeConfiguration, "AdvOut", "RecType", "Standard");
 	}
@@ -1171,10 +1171,9 @@ void OBSBasic::OBSInit()
 		throw "Failed to initialize service";
 	}
 #ifdef __ANDROID__
-	/* 判据：装了 rtmp-services 之后这条应恒为 rtmp_common/rtmp。 */
 	if (obs_service_t *svc = GetService()) {
-		obsAndroidDisplayLog("P-2 服务态：'%s' 类型=%s 协议=%s", obs_service_get_name(svc), obs_service_get_id(svc),
-				     obs_service_get_protocol(svc));
+		blog(LOG_INFO, "OBSBasic: 当前流服务 '%s'（type=%s，protocol=%s）", obs_service_get_name(svc),
+		     obs_service_get_id(svc), obs_service_get_protocol(svc));
 	}
 #endif
 

@@ -60,7 +60,7 @@ static void mmapResolveOnce(void)
 	 * 是同一个库的句柄，只是用来按名字问"有没有这几个 API 36 的入口"。 */
 	void *h = dlopen("libaaudio.so", RTLD_NOW | RTLD_LOCAL);
 	if (!h) {
-		blog(LOG_WARNING, "aaudio: dlopen(\"libaaudio.so\") 失败 —— MMAP 状态无从查询");
+		blog(LOG_WARNING, "aaudio: 无法加载 libaaudio.so，MMAP 状态查询不可用");
 		return;
 	}
 
@@ -69,9 +69,9 @@ static void mmapResolveOnce(void)
 	g_mmap.platform = (fn_aaudio_platform_mmap_policy) dlsym(h, "AAudio_getPlatformMMapPolicy");
 	g_mmap.used = (fn_aaudio_stream_is_mmap_used) dlsym(h, "AAudioStream_isMMapUsed");
 
-	blog(LOG_INFO, "aaudio: MMAP 接口（API 36 起才有）解析结果 —— set=%p get=%p platform=%p isUsed=%p%s",
+	blog(LOG_INFO, "aaudio: MMAP 接口解析完成 (API 36+)：set=%p，get=%p，platform=%p，isUsed=%p%s",
 	     (void *) g_mmap.set, (void *) g_mmap.get, (void *) g_mmap.platform, (void *) g_mmap.used,
-	     (g_mmap.set || g_mmap.used) ? "" : "：这台系统上全为 NULL，MMAP 无法由本插件控制");
+	     (g_mmap.set || g_mmap.used) ? "" : "（当前系统未提供相关符号，MMAP 控制不可用）");
 }
 
 static inline void mmapResolve(void)
@@ -246,7 +246,7 @@ static void aaudio_settings_apply(struct aaudio_source *data, obs_data_t *settin
 	data->mmap_policy = parse_mmap_policy(obs_data_get_string(settings, "mmap_policy"));
 
 	if (data->channels < 1 || data->channels > 2) {
-		blog(LOG_WARNING, "aaudio: 声道数 %d 超出 1~2，按 2 处理", (int) data->channels);
+		blog(LOG_WARNING, "aaudio: 请求的声道数 %d 不在 1~2 范围内，已回退为 2 声道", (int) data->channels);
 		data->channels = 2;
 	}
 	if (data->sample_rate < 8000 || data->sample_rate > 192000)
@@ -284,7 +284,7 @@ static void aaudio_resolve_device(struct aaudio_source *data, int32_t *out_id)
 	data->resolved_type = -1;
 
 	if (data->device_id <= 0) {
-		blog(LOG_INFO, "aaudio: 设备选择=系统默认输入（不 setDeviceId，由 AAudio 自己挑）");
+		blog(LOG_INFO, "aaudio: 音频输入设备使用系统默认设备");
 		return;
 	}
 
@@ -293,8 +293,7 @@ static void aaudio_resolve_device(struct aaudio_source *data, int32_t *out_id)
 
 	if (n < 0) {
 		blog(LOG_WARNING,
-		     "aaudio: 音频总线不可用（宿主没注册，或快照协议解析失败：enum 返回 -1）—— "
-		     "没法核对请求的 id=%d，原样交给 AAudio，由它接受或改派",
+		     "aaudio: 音频宿主接口不可用（未注册或设备枚举失败），无法校验设备 id=%d，将直接交由 AAudio 选择",
 		     (int) data->device_id);
 		*out_id = data->device_id;
 		return;
@@ -311,7 +310,7 @@ static void aaudio_resolve_device(struct aaudio_source *data, int32_t *out_id)
 		blog(LOG_INFO, "aaudio: 已通过总线确认设备 id=%d type=%d（%s），当前清单共 %d 台", (int) devs[i].id,
 		     (int) devs[i].type, devs[i].label[0] ? devs[i].label : devs[i].product, n);
 		if (!devs[i].is_source)
-			blog(LOG_WARNING, "aaudio: 这台设备清单里标的是 is_source=false，AAudio 大概打不开采集流");
+			blog(LOG_WARNING, "aaudio: 所选设备在清单中标记为 is_source=false，可能无法打开采集流");
 		return;
 	}
 
@@ -331,7 +330,7 @@ static void aaudio_resolve_device(struct aaudio_source *data, int32_t *out_id)
 		}
 	}
 
-	blog(LOG_WARNING, "aaudio: 请求的 id=%d 不在当前音频输入清单里（共 %d 台）→ 回落到系统默认输入",
+	blog(LOG_WARNING, "aaudio: 请求的设备 id=%d 不在当前音频输入设备列表中（共 %d 台），已回退到系统默认设备",
 	     (int) data->device_id, n);
 }
 
@@ -381,8 +380,7 @@ static bool aaudio_stream_open(struct aaudio_source *data)
 			     mmap_policy_text(data->mmap_policy), (int) mres, AAudio_convertResultToText(mres));
 		} else {
 			blog(LOG_WARNING,
-			     "aaudio: 想要 mmap_policy=%s，但这台系统没有 AAudio_setMMapPolicy 这个入口（API 36 起才有）"
-			     "—— 只能按系统默认路径开流",
+			     "aaudio: 请求的 mmap_policy=%s 不受当前系统支持（需要 Android API 36+），将使用系统默认路径",
 			     mmap_policy_text(data->mmap_policy));
 		}
 	}
@@ -425,15 +423,15 @@ static bool aaudio_stream_open(struct aaudio_source *data)
 	if (mmap_armed) {
 		aaudio_result_t rres = g_mmap.set(AAUDIO_UNSPECIFIED);
 		if (rres != AAUDIO_OK)
-			blog(LOG_WARNING, "aaudio: 还原 MMAP 策略失败 %d（%s）—— 本进程后面的流仍按 %s 走", (int) rres,
-			     AAudio_convertResultToText(rres), mmap_policy_text(data->mmap_policy));
+			blog(LOG_WARNING, "aaudio: 恢复默认 MMAP 策略失败 %d（%s），后续新建流仍可能沿用 %s",
+			     (int) rres, AAudio_convertResultToText(rres), mmap_policy_text(data->mmap_policy));
 	}
 
 	if (res != AAUDIO_OK || !data->stream) {
 		data->stream = NULL;
 		blog(LOG_ERROR,
-		     "aaudio: 打开输入流失败 %d (%s)：rate=%d ch=%d preset=%s sharing=%s perf=%s mmap=%s "
-		     "device_id 请求=%d（settings 里是 %d）",
+		     "aaudio: 打开输入流失败 %d (%s)：rate=%d，ch=%d，preset=%s，sharing=%s，perf=%s，mmap=%s，"
+		     "目标设备=%d（配置值=%d）",
 		     (int) res, AAudio_convertResultToText(res), (int) data->sample_rate, (int) data->channels,
 		     preset_name(data->preset), sharing_mode_text(data->sharing_mode), perf_mode_text(data->perf_mode),
 		     mmap_policy_text(data->mmap_policy), (int) want_id, (int) data->device_id);
@@ -446,8 +444,8 @@ static bool aaudio_stream_open(struct aaudio_source *data)
 		int32_t pv = g_mmap.platform(data->resolved_type, AAUDIO_DIRECTION_INPUT);
 		char note[96] = "";
 		if (pv < 0)
-			snprintf(note, sizeof(note), "，即错误 %s", AAudio_convertResultToText(pv));
-		blog(LOG_INFO, "aaudio: AAudio_getPlatformMMapPolicy(type=%d, INPUT) = %d%s（1=never 2=auto 3=always）",
+			snprintf(note, sizeof(note), "，错误=%s", AAudio_convertResultToText(pv));
+		blog(LOG_INFO, "aaudio: AAudio_getPlatformMMapPolicy(type=%d, INPUT) = %d%s (1=never, 2=auto, 3=always)",
 		     (int) data->resolved_type, (int) pv, note);
 	}
 
@@ -466,7 +464,7 @@ static bool aaudio_stream_open(struct aaudio_source *data)
 		data->obf = AUDIO_FORMAT_16BIT;
 		break;
 	default:
-		blog(LOG_ERROR, "aaudio: 设备给了不支持的格式 %d，只有 float32/s16 能送进 libobs", (int) fmt);
+		blog(LOG_ERROR, "aaudio: 设备返回了不支持的音频格式 %d（仅支持 float32 与 s16）", (int) fmt);
 		aaudio_stream_close(data);
 		return false;
 	}
@@ -476,7 +474,7 @@ static bool aaudio_stream_open(struct aaudio_source *data)
 	else if (data->nch == 2)
 		data->layout = SPEAKERS_STEREO;
 	else {
-		blog(LOG_ERROR, "aaudio: 设备给了 %d 声道，本插件只映射 1/2 声道", (int) data->nch);
+		blog(LOG_ERROR, "aaudio: 设备返回了不支持的声道数 %d（仅支持 1 或 2 声道）", (int) data->nch);
 		aaudio_stream_close(data);
 		return false;
 	}
@@ -511,8 +509,8 @@ static bool aaudio_stream_open(struct aaudio_source *data)
 	int32_t got_perf = AAudioStream_getPerformanceMode(data->stream);
 
 	blog(LOG_INFO,
-	     "aaudio: 输入流已打开 —— 请求 rate=%d ch=%d preset=%s sharing=%s perf=%s mmap=%s device=%d / "
-	     "实得 rate=%d ch=%d format=%s sharing=%s perf=%d device_id=%d xrun=%d mmap=%s burst=%d read=%d buf=%d/%d",
+	     "aaudio: 输入流已打开（请求：rate=%d，ch=%d，preset=%s，sharing=%s，perf=%s，mmap=%s，device=%d；"
+	     "实际：rate=%d，ch=%d，format=%s，sharing=%s，perf=%d，device_id=%d，xrun=%d，mmap=%s，burst=%d，read=%d，buf=%d/%d）",
 	     (int) data->sample_rate, (int) data->channels, preset_name(data->preset),
 	     sharing_mode_text(data->sharing_mode), perf_mode_text(data->perf_mode), mmap_policy_text(data->mmap_policy),
 	     (int) want_id, (int) data->rate, (int) data->nch, (fmt == AAUDIO_FORMAT_PCM_FLOAT) ? "float32" : "s16",
@@ -807,9 +805,9 @@ static obs_properties_t *aaudio_properties(void *unused)
 			obs_property_list_add_string(dev_list, devs[i].label, id_str);
 		}
 		if (hidden)
-			blog(LOG_INFO, "aaudio: 总线给了 %d 台，其中 %d 台没进下拉框（id<=0 或 is_source=false）", n, hidden);
+			blog(LOG_INFO, "aaudio: 音频宿主枚举到 %d 台设备，已过滤 %d 台无效或非输入设备", n, hidden);
 		if (!obs_android_audio_has_permission())
-			blog(LOG_WARNING, "aaudio: 刷新属性页时 RECORD_AUDIO 未授予 —— 设备名可能读不到，清单也可能不完整");
+			blog(LOG_WARNING, "aaudio: 缺少 RECORD_AUDIO 权限，可能无法读取设备名称或获取完整设备列表");
 	}
 
 	obs_properties_add_int(props, "sample_rate", obs_module_text("SampleRate"), 0, 192000, 100);
@@ -870,7 +868,7 @@ bool obs_module_load(void)
 	obs_register_source(&aaudio_input_info);
 
 	if (!obs_get_source_output_flags("android_audio_input")) {
-		blog(LOG_ERROR, "android-audio: 'android_audio_input' 注册被拒，见上一条 libobs 报错");
+		blog(LOG_ERROR, "android-audio: 注册源类型 'android_audio_input' 失败，请查看 libobs 错误日志");
 		return false;
 	}
 

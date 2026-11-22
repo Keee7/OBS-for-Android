@@ -204,7 +204,7 @@ static void usb_recover(struct nikon_cam *c, bool with_cancel)
 	}
 	bfree(scratch);
 	if (drained)
-		blog(LOG_WARNING, "nikon: 从 Bulk-In 放掉了上一轮残留的 %u 字节", (unsigned) drained);
+		blog(LOG_WARNING, "nikon: 已清空 Bulk-In 端点残留的 %u 字节数据", (unsigned) drained);
 
 	/* 2) 清两个 bulk 端点的 halt（§3.1 确认支持 ClearFeature(ENDPOINT_HALT)），
 	 *    再按需发类请求 Cancel(0x64) 取消当前事务、DeviceReset(0x66) 让设备回 idle。 */
@@ -220,7 +220,7 @@ static void usb_recover(struct nikon_cam *c, bool with_cancel)
 
 	libusb_control_transfer(c->h, 0x21, 0x66, 0, 0, NULL, 0, 1000);
 
-	blog(LOG_WARNING, "nikon: USB 错误恢复已执行（放空 Bulk-In + ClearFeature halt%s + DeviceReset）",
+	blog(LOG_WARNING, "nikon: 已执行 USB 错误恢复（清空 Bulk-In + 清除端点 Halt%s + DeviceReset）",
 	     with_cancel ? " + Cancel" : "");
 }
 
@@ -401,7 +401,7 @@ static void find_endpoints(struct nikon_cam *c)
 	if (r != 0)
 		r = libusb_get_config_descriptor(dev, 0, &cfg);
 	if (r != 0 || !cfg) {
-		blog(LOG_WARNING, "nikon: 读不到配置描述符（%d），端点用回退值 0x%02X/0x%02X/0x%02X", r,
+		blog(LOG_WARNING, "nikon: 无法读取配置描述符（r=%d），使用默认端点 0x%02X/0x%02X/0x%02X", r,
 		     c->ep_out, c->ep_in, c->ep_int);
 		return;
 	}
@@ -432,8 +432,8 @@ static void find_endpoints(struct nikon_cam *c)
 	}
 	libusb_free_config_descriptor(cfg);
 
-	blog(LOG_INFO, "nikon: %s，接口 %d，端点 out=0x%02X in=0x%02X int=0x%02X",
-	     found ? "描述符匹配到 PTP 成像接口" : "描述符里没有 06/01/01 接口，用回退端点", c->iface, c->ep_out,
+	blog(LOG_INFO, "nikon: %s，接口=%d，端点 out=0x%02X，in=0x%02X，int=0x%02X",
+	     found ? "已匹配 PTP 成像接口" : "未找到 06/01/01 接口，使用回退端点", c->iface, c->ep_out,
 	     c->ep_in, c->ep_int);
 }
 
@@ -454,11 +454,11 @@ static bool drain_events(struct nikon_cam *c)
 			const uint16_t code = get_u16le(buf + 6);
 			const uint32_t param = xfer >= 16 ? get_u32le(buf + 12) : 0;
 			if (code == PTP_EVENT_LV_STATE_CHANGED) {
-				blog(LOG_WARNING, "nikon: 事件 LiveViewStateChanged → %s", param ? "ON" : "OFF");
+				blog(LOG_WARNING, "nikon: 收到事件 LiveViewStateChanged -> %s", param ? "ON" : "OFF");
 				if (param == 0)
 					lv_off = true;
 			} else {
-				blog(LOG_INFO, "nikon: 丢弃事件 0x%04X param=%u", (unsigned) code, (unsigned) param);
+				blog(LOG_INFO, "nikon: 忽略事件 0x%04X，param=%u", (unsigned) code, (unsigned) param);
 			}
 		}
 	}
@@ -475,7 +475,7 @@ static int start_liveview(struct nikon_source *s, struct nikon_cam *c)
 
 	int r = ptp_simple(c, PTP_OP_StartLiveView, 0, 0, &resp, NULL);
 	if (r != 0) {
-		blog(LOG_WARNING, "nikon: StartLiveView 失败 r=%d resp=0x%04X", r, (unsigned) resp);
+		blog(LOG_WARNING, "nikon: StartLiveView 失败（r=%d，resp=0x%04X）", r, (unsigned) resp);
 		return r;
 	}
 
@@ -486,14 +486,14 @@ static int start_liveview(struct nikon_source *s, struct nikon_cam *c)
 			return 0;
 		if (r == NK_ERR_NOT_OK && resp == PTP_RESP_DEVICE_BUSY) {
 			if (os_gettime_ns() >= deadline) {
-				blog(LOG_WARNING, "nikon: DeviceReady 轮询 %d ms 仍是 Busy，放弃",
+				blog(LOG_WARNING, "nikon: DeviceReady 轮询超过 %d ms 仍处于 Busy 状态，已超时退出",
 				     DEVICE_READY_TIMEOUT_MS);
 				return NK_ERR_NOT_OK;
 			}
 			sleep_check(s, DEVICE_READY_POLL_MS);
 			continue;
 		}
-		blog(LOG_WARNING, "nikon: DeviceReady 失败 r=%d resp=0x%04X", r, (unsigned) resp);
+		blog(LOG_WARNING, "nikon: DeviceReady 失败（r=%d，resp=0x%04X）", r, (unsigned) resp);
 		return r;
 	}
 	return LIBUSB_ERROR_INTERRUPTED;
@@ -599,11 +599,12 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 		if (sr < 0)
 			sr = libusb_control_transfer(c.h, 0xA1, 0x66, 0, 0, st, sizeof(st), 1000);
 		if (sr == 4)
-			blog(LOG_INFO, "nikon: GetDeviceStatus 探针：code=0x%04X（0x2001=OK 0x2019=Busy）",
+			blog(LOG_INFO, "nikon: GetDeviceStatus 状态检测：code=0x%04X（0x2001=OK，0x2019=Busy）",
 			     (unsigned) get_u16le(st + 2));
 		else
-			blog(LOG_WARNING, "nikon: GetDeviceStatus 探针失败 r=%d（控制端点也不答，"
-					  "相机固件可能已挂，只能断电/拔线重启相机）", sr);
+			blog(LOG_WARNING,
+			     "nikon: GetDeviceStatus 状态检测失败（r=%d），控制端点无响应（相机固件可能无响应，请尝试重连或重启相机）",
+			     sr);
 	}
 
 	/* 连续失败 >=2 轮后的硬恢复，逐级加重：
@@ -615,7 +616,7 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 	 *     下一轮要能在清单里找到"新"设备才走得下去（节点名可能变，比如 001/002 → 001/003）。 */
 	if (fail_count >= 2 && c.config_value > 0) {
 		const int cr = libusb_set_configuration(c.h, c.config_value);
-		blog(LOG_WARNING, "nikon: 连续失败 %d 轮，试 SET_CONFIGURATION(%d) 硬恢复：r=%d", fail_count,
+		blog(LOG_WARNING, "nikon: 连续失败 %d 轮，尝试 SET_CONFIGURATION(%d) 恢复：r=%d", fail_count,
 		     c.config_value, cr);
 	}
 	if (fail_count >= 3) {
@@ -654,12 +655,12 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 	c.tid = 0xFFFFFFFF;
 	r = ptp_simple(&c, PTP_OP_OpenSession, 1, 1, &resp, &rparam);
 	if (r == NK_ERR_NOT_OK && resp == PTP_RESP_SESSION_ALREADY_OPEN) {
-		blog(LOG_INFO, "nikon: 会话已开着（上次没关干净），接着用");
+		blog(LOG_INFO, "nikon: 检测到会话已处于打开状态，将直接复用");
 	} else if (r != 0) {
 		char rb[16];
 		snprintf(rb, sizeof(rb), "0x%04X", (unsigned) resp);
 		const char *args[] = {rb};
-		blog(LOG_ERROR, "nikon: OpenSession 失败 r=%d resp=0x%04X", r, (unsigned) resp);
+		blog(LOG_ERROR, "nikon: OpenSession 失败（r=%d，resp=0x%04X）", r, (unsigned) resp);
 		set_status_key(s, "Status.OpenSessionFailed", args, 1);
 		goto out;
 	}
@@ -697,7 +698,7 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 		char rb[16];
 		snprintf(rb, sizeof(rb), "0x%04X", (unsigned) resp);
 		const char *args[] = {rb};
-		blog(LOG_WARNING, "nikon: 设 LiveViewImageSize=%d 失败 r=%d resp=0x%04X", s->lv_size, r,
+		blog(LOG_WARNING, "nikon: 设置 LiveViewImageSize=%d 失败（r=%d，resp=0x%04X）", s->lv_size, r,
 		     (unsigned) resp);
 		set_status_key(s, "Status.SetLvSizeFailed", args, 1);
 		goto out;
@@ -708,7 +709,7 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 		char rb[16];
 		snprintf(rb, sizeof(rb), "0x%04X", (unsigned) resp);
 		const char *args[] = {rb};
-		blog(LOG_WARNING, "nikon: 设 LiveViewImageCompression=%d 失败 r=%d resp=0x%04X", s->lv_quality, r,
+		blog(LOG_WARNING, "nikon: 设置 LiveViewImageCompression=%d 失败（r=%d，resp=0x%04X）", s->lv_quality, r,
 		     (unsigned) resp);
 		set_status_key(s, "Status.SetLvQualityFailed", args, 1);
 		goto out;
@@ -738,7 +739,7 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 		goto out;
 	}
 	rx = bmalloc(max_size);
-	blog(LOG_INFO, "nikon: 会话已建立，LiveViewObject 上限 %u 字节", (unsigned) max_size);
+	blog(LOG_INFO, "nikon: PTP 会话已建立，LiveViewObject 缓冲区上限=%u 字节", (unsigned) max_size);
 
 	/* ---- 4. 进 Live View ---- */
 	set_status_key(s, "Status.StartingLv", NULL, 0);
@@ -748,7 +749,7 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 		goto out;
 	}
 	lv_started = true;
-	blog(LOG_INFO, "nikon: 已进入 remote live view（尺寸档 %d，质量档 %d）", s->lv_size, s->lv_quality);
+	blog(LOG_INFO, "nikon: 已进入 Remote Live View（分辨率档位=%d，质量档位=%d）", s->lv_size, s->lv_quality);
 
 	/* ---- 5. 取帧循环 ---- */
 	uint32_t last_len = 0;
@@ -786,19 +787,19 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 				continue;
 			}
 			if (resp == PTP_RESP_INCOMPLETE_TRANSFER || resp == PTP_RESP_ACCESS_DENIED) {
-				blog(LOG_INFO, "nikon: GetLiveViewImageEx resp=0x%04X，重试", (unsigned) resp);
+				blog(LOG_INFO, "nikon: GetLiveViewImageEx 返回 resp=0x%04X，重试中", (unsigned) resp);
 				sleep_check(s, 50);
 				continue;
 			}
-			blog(LOG_WARNING, "nikon: GetLiveViewImageEx 未处理的 resp=0x%04X，放弃本次会话",
+			blog(LOG_WARNING, "nikon: GetLiveViewImageEx 未处理响应 resp=0x%04X，结束当前会话",
 			     (unsigned) resp);
 			break;
 		}
 		if (r != 0) {
-			blog(LOG_WARNING, "nikon: GetLiveViewImageEx USB/协议错误 %d（第 %d 次）", r, usb_errs + 1);
+			blog(LOG_WARNING, "nikon: GetLiveViewImageEx USB/协议错误（r=%d，第 %d 次）", r, usb_errs + 1);
 			usb_recover(&c, true);
 			if (++usb_errs > MAX_CONSEC_USB_ERR) {
-				blog(LOG_ERROR, "nikon: 连续 USB 错误超过 %d 次，拆除本次会话", MAX_CONSEC_USB_ERR);
+				blog(LOG_ERROR, "nikon: 连续 USB 错误超过 %d 次，终止当前会话", MAX_CONSEC_USB_ERR);
 				break;
 			}
 			continue;
@@ -812,7 +813,7 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 		if (frame_payload < LVO_HEADER_SIZE + 2 || obj[0] != 0x00 || obj[1] != 0x02) {
 			s->frames_dropped++;
 			if (s->frames_dropped <= 5 || s->frames_dropped % 300 == 0)
-				blog(LOG_WARNING, "nikon: LiveViewObject 头不对（payload=%u，版本=%02X %02X），丢帧",
+				blog(LOG_WARNING, "nikon: LiveViewObject 头部异常（payload=%u，版本=%02X %02X），已丢弃该帧",
 				     (unsigned) frame_payload, obj[0], obj[1]);
 			continue;
 		}
@@ -898,7 +899,7 @@ out:
 		uint16_t eresp = 0;
 		const int er = ptp_simple(&c, PTP_OP_EndLiveView, 0, 0, &eresp, NULL);
 		if (er != 0)
-			blog(LOG_INFO, "nikon: EndLiveView r=%d resp=0x%04X（CloseSession 仍会兜底）", er,
+			blog(LOG_INFO, "nikon: EndLiveView 返回 r=%d，resp=0x%04X（后续由 CloseSession 关闭会话）", er,
 			     (unsigned) eresp);
 	}
 	if (session_open) {
@@ -920,7 +921,7 @@ out:
 	if (bgra)
 		bfree(bgra);
 
-	blog(LOG_INFO, "nikon: 本轮采集结束（送出 %llu 帧，丢弃 %llu 帧）", (unsigned long long) s->frames_out,
+	blog(LOG_INFO, "nikon: 本轮采集结束（已输出 %llu 帧，丢弃 %llu 帧）", (unsigned long long) s->frames_out,
 	     (unsigned long long) s->frames_dropped);
 	return lv_started;
 }
@@ -932,7 +933,7 @@ static void *nikon_thread_main(void *arg)
 	bool perm_requested = false;
 	int fail_count = 0;
 
-	blog(LOG_INFO, "nikon: 采集线程启动（设备 '%s'，尺寸档 %d，质量档 %d）", s->usb_device, s->lv_size,
+	blog(LOG_INFO, "nikon: 采集线程已启动（设备 '%s'，分辨率档位=%d，质量档位=%d）", s->usb_device, s->lv_size,
 	     s->lv_quality);
 
 	while (!os_atomic_load_long(&s->shutting_down)) {
@@ -1015,7 +1016,7 @@ static void *nikon_create(obs_data_t *settings, obs_source_t *source)
 	/* 与 camera2-input.c 同：PTHREAD_MUTEX_INITIALIZER 过不了 windows pthread 移植层 */
 	pthread_mutex_init_value(&s->mtx);
 	if (pthread_mutex_init(&s->mtx, NULL) != 0)
-		blog(LOG_ERROR, "nikon: 建锁失败，状态文本没有互斥了");
+		blog(LOG_ERROR, "nikon: 初始化互斥锁失败，状态文本更新将不受互斥保护");
 	nikon_settings_apply(s, settings);
 	return s;
 }
@@ -1067,14 +1068,14 @@ static bool on_request_permission(obs_properties_t *props, obs_property_t *prope
 	struct nikon_source *s = data;
 
 	if (!s || !s->usb_device[0]) {
-		blog(LOG_INFO, "nikon: 属性页点【申请授权】但还没选设备，先选设备再点");
+		blog(LOG_INFO, "nikon: 尚未选择 USB 设备，请先选择设备再申请授权");
 		return false;
 	}
 	const int r = obs_android_usb_request_permission(s->usb_device);
-	blog(LOG_INFO, "nikon: 属性页对 '%s' 点【申请授权】，总线返回 %d（%s）", s->usb_device, r,
-	     r == 1 ? "弹窗中，用户选完后重新激活本源生效"
-	     : r == 0 ? "其实已有权限"
-		      : "失败（拿不到 Activity 或被永久拒绝）");
+	blog(LOG_INFO, "nikon: 对设备 '%s' 请求 USB 授权（返回码=%d，状态=%s）", s->usb_device, r,
+	     r == 1 ? "已弹出授权窗口，确认后请重新激活本源"
+	     : r == 0 ? "已具备权限"
+		      : "请求失败（缺少 Activity 或已被永久拒绝）");
 	return false;
 }
 
@@ -1161,7 +1162,7 @@ bool obs_module_load(void)
 
 	const uint32_t flags = obs_get_source_output_flags("nikon_webcam_input");
 	if (!flags) {
-		blog(LOG_ERROR, "nikon-source: 'nikon_webcam_input' 注册被拒，见上一条 libobs 报错");
+		blog(LOG_ERROR, "nikon-source: 注册源类型 'nikon_webcam_input' 失败，请查看 libobs 错误日志");
 		return false;
 	}
 

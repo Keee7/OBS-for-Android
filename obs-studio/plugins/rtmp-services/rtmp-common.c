@@ -341,8 +341,8 @@ static void add_services(obs_property_t *list, json_t *root, bool show_all, cons
 			pass++;
 	}
 	blog(LOG_WARNING,
-	     "rtmp-common.c: [add_services] JSON 条目=%zu 协议闸门放行=%zu 入列=%zu "
-	     "RTMP=%d RTMPS=%d show_all=%d",
+	     "rtmp-common.c: [add_services] 服务列表为空（JSON 总条目=%zu，可用协议匹配=%zu，已添加=%zu，"
+	     "RTMP=%d，RTMPS=%d，show_all=%d）",
 	     total, pass, obs_property_list_item_count(list), (int)obs_is_output_protocol_registered("RTMP"),
 	     (int)obs_is_output_protocol_registered("RTMPS"), (int)show_all);
 #endif
@@ -426,8 +426,8 @@ static json_t *open_services_file(void)
 		char *dc = pc ? os_quick_read_utf8_file(pc) : NULL;
 		char *dm = pm ? os_quick_read_utf8_file(pm) : NULL;
 		blog(LOG_WARNING,
-		     "rtmp-common.c: [open_services_file] 服务列表读不到 config='%s'(在=%d,读出=%lld) "
-		     "module='%s'(在=%d,读出=%lld)",
+		     "rtmp-common.c: [open_services_file] 无法读取服务列表文件 config='%s'（存在=%d，字节数=%lld）"
+		     "module='%s'（存在=%d，字节数=%lld）",
 		     pc ? pc : "(NULL)", pc ? (int)os_file_exists(pc) : 0, (long long)(dc ? strlen(dc) : -1),
 		     pm ? pm : "(NULL)", pm ? (int)os_file_exists(pm) : 0, (long long)(dm ? strlen(dm) : -1));
 		bfree(dc);

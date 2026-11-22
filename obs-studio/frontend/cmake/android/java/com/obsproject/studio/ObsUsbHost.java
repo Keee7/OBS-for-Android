@@ -80,13 +80,13 @@ public final class ObsUsbHost {
     /** native 在 obs_startup 前后各调一次都行；重复调用是幂等的。 */
     public static synchronized boolean install(Context ctx) {
         if (ctx == null) {
-            Log.e(TAG, "install(null) —— 拿不到 Context，USB 总线不会接通");
+            Log.e(TAG, "install(null) 失败：无法获取 Context");
             return false;
         }
         context = ctx.getApplicationContext();
         manager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
         if (manager == null) {
-            Log.e(TAG, "getSystemService(USB_SERVICE) 返回 null —— 该设备不支持 USB Host?");
+            Log.e(TAG, "获取 USB_SERVICE 失败（设备可能不支持 USB Host）");
             return false;
         }
         if (!receiverRegistered) {
@@ -196,7 +196,7 @@ public final class ObsUsbHost {
     public static synchronized int requestPermission(String name) {
         UsbDevice d = find(name);
         if (d == null) {
-            Log.w(TAG, "requestPermission(" + name + ")：设备不在清单里，多半已经拔了");
+            Log.w(TAG, "requestPermission(" + name + ")：未在设备列表中找到该设备（可能已拔出）");
             return -1;
         }
         if (manager.hasPermission(d))
@@ -212,11 +212,11 @@ public final class ObsUsbHost {
     public static synchronized int openFd(String name) {
         UsbDevice d = find(name);
         if (d == null) {
-            Log.w(TAG, "openFd(" + name + ")：设备不在清单里");
+            Log.w(TAG, "openFd(" + name + ")：未在设备列表中找到该设备");
             return -1;
         }
         if (!manager.hasPermission(d)) {
-            Log.w(TAG, "openFd(" + name + ")：还没有 USB 权限，先 requestPermission");
+            Log.w(TAG, "openFd(" + name + ")：尚未获得 USB 访问授权");
             return -1;
         }
         if (connections.containsKey(name)) {
@@ -235,7 +235,7 @@ public final class ObsUsbHost {
         }
         int fd = conn.getFileDescriptor();
         if (fd < 0) {
-            Log.e(TAG, "openDevice(" + name + ") 成功但 getFileDescriptor()=" + fd);
+            Log.e(TAG, "openDevice(" + name + ") 成功，但 getFileDescriptor() 返回无效值 " + fd);
             conn.close();
             return -1;
         }

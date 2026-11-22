@@ -50,7 +50,7 @@ public final class ObsPermissionHost {
     /** 起一次申请：把缺的都并进一个系统弹窗。返回 true = 已经在跑（或本来就全给齐了）。 */
     public static synchronized boolean requestStartup(final Activity act) {
         if (act == null) {
-            lastError = "requestStartup(null activity) —— 拿不到 QtNative.activity()";
+            lastError = "requestStartup 失败：QtNative.activity() 返回 null";
             Log.e(TAG, lastError);
             return false;
         }
@@ -61,7 +61,7 @@ public final class ObsPermissionHost {
                 cameraAsked = true; // 首启这一发也要记账，否则 requestCamera 的"问过一次"判据会漏
         }
         if (missing.length == 0) {
-            lastAction = "首启那一批权限已齐，无需申请";
+            lastAction = "启动所需权限已全部授予，无需重复申请";
             Log.i(TAG, lastAction);
             return true;
         }
@@ -71,7 +71,7 @@ public final class ObsPermissionHost {
             public void run() {
                 try {
                     act.requestPermissions(missing, REQUEST_CODE);
-                    lastAction = "弹出系统申请框：" + join(missing);
+                    lastAction = "已请求系统权限：" + join(missing);
                     Log.i(TAG, lastAction);
                 } catch (Throwable t) {
                     lastError = "requestPermissions 抛异常: " + t;
@@ -103,19 +103,19 @@ public final class ObsPermissionHost {
      */
     public static synchronized int requestCamera(final Activity act) {
         if (act == null) {
-            lastError = "requestCamera(null activity) —— 拿不到 QtNative.activity()";
+            lastError = "requestCamera 失败：QtNative.activity() 返回 null";
             Log.e(TAG, lastError);
             return -1;
         }
         if (act.checkSelfPermission(PERM_CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            lastAction = "CAMERA 本来就有，无需申请";
+            lastAction = "已拥有 CAMERA 权限，无需申请";
             Log.i(TAG, lastAction);
             return 0;
         }
         final boolean dead = cameraAsked && !act.shouldShowRequestPermissionRationale(PERM_CAMERA);
         cameraAsked = true;
         if (dead) {
-            lastAction = "CAMERA 已被永久拒绝：发起也不会有框，请去【设置 > 应用 > OBS Studio > 权限】里手动开";
+            lastAction = "CAMERA 权限已被永久拒绝，请在系统设置 > 应用 > OBS Studio > 权限中手动开启";
             Log.w(TAG, lastAction);
             return -1;
         }
@@ -125,7 +125,7 @@ public final class ObsPermissionHost {
             public void run() {
                 try {
                     act.requestPermissions(new String[] {PERM_CAMERA}, REQUEST_CODE);
-                    lastAction = "弹出系统申请框：android.permission.CAMERA";
+                    lastAction = "已请求系统权限：android.permission.CAMERA";
                     Log.i(TAG, lastAction);
                 } catch (Throwable t) {
                     lastError = "requestPermissions(CAMERA) 抛异常: " + t;

@@ -258,8 +258,8 @@ static const struct obs_android_usb_host *usb_host;
 void obs_android_set_usb_host(const struct obs_android_usb_host *host)
 {
 	usb_host = host;
-	blog(LOG_INFO, "obs-android: USB 总线%s（回调 %s）", host ? "已注册" : "已注销",
-	     host ? "就位" : "无");
+	blog(LOG_INFO, "obs-android: USB 宿主接口%s（回调%s）", host ? "已注册" : "已注销",
+	     host ? "已就绪" : "未就绪");
 }
 
 bool obs_android_usb_ready(void)
@@ -329,7 +329,7 @@ static const struct obs_android_audio_host *audio_host;
 void obs_android_set_audio_host(const struct obs_android_audio_host *host)
 {
 	audio_host = host;
-	blog(LOG_INFO, "obs-android: 音频总线%s", host ? "已注册" : "已注销");
+	blog(LOG_INFO, "obs-android: 音频宿主接口%s", host ? "已注册" : "已注销");
 }
 
 bool obs_android_audio_ready(void)
@@ -389,7 +389,7 @@ static const struct obs_android_camera_host *camera_host;
 void obs_android_set_camera_host(const struct obs_android_camera_host *host)
 {
 	camera_host = host;
-	blog(LOG_INFO, "obs-android: 相机总线%s", host ? "已注册" : "已注销");
+	blog(LOG_INFO, "obs-android: 相机宿主接口%s", host ? "已注册" : "已注销");
 }
 
 bool obs_android_camera_ready(void)
@@ -438,7 +438,7 @@ static const struct obs_android_screen_host *screen_host;
 void obs_android_set_screen_host(const struct obs_android_screen_host *host)
 {
 	screen_host = host;
-	blog(LOG_INFO, "obs-android: 屏幕总线%s", host ? "已注册" : "已注销");
+	blog(LOG_INFO, "obs-android: 屏幕采集宿主接口%s", host ? "已注册" : "已注销");
 }
 
 bool obs_android_screen_ready(void)

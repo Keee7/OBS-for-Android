@@ -369,7 +369,7 @@ void OBSBasic::FlipAndroidCamera()
 {
 	OBSSourceAutoRelease cam = firstAndroidCamera(GetCurrentScene());
 	if (!cam) {
-		blog(LOG_WARNING, "android-camera: 一键前后置点了，但当前场景里没有相机源");
+		blog(LOG_WARNING, "android-camera: 触发切换摄像头，但当前场景中未找到相机源");
 		return;
 	}
 
@@ -384,7 +384,7 @@ void OBSBasic::FlipAndroidCamera()
 	obs_source_update(cam, s);
 	obs_data_release(s);
 
-	blog(LOG_INFO, "android-camera: 一键前后置 —— 源 '%s' 朝向 %lld → %lld（0=前置 1=后置 2=外接 -1=自动）",
+	blog(LOG_INFO, "android-camera: 切换相机朝向，源 '%s'：%lld -> %lld（0=前置，1=后置，2=外接，-1=自动）",
 	     obs_source_get_name(cam), cur, next);
 
 	/* 按钮上刻意不显示"现在是前还是后"：facing 只是"想要哪一面"，真正开成哪颗要等视频线程跑完

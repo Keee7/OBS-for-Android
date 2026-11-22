@@ -288,7 +288,7 @@ static int enum_cameras(ACameraManager *manager, struct camera2_info *out, int m
 	ACameraIdList *ids = NULL;
 	const camera_status_t st = ACameraManager_getCameraIdList(manager, &ids);
 	if (st != ACAMERA_OK || !ids) {
-		blog(LOG_WARNING, "android-camera: 取相机清单失败（camera_status=%d）", (int) st);
+		blog(LOG_WARNING, "android-camera: 获取相机列表失败（camera_status=%d）", (int) st);
 		return -1;
 	}
 
@@ -300,7 +300,8 @@ static int enum_cameras(ACameraManager *manager, struct camera2_info *out, int m
 
 		ACameraMetadata *md = NULL;
 		if (ACameraManager_getCameraCharacteristics(manager, raw_id, &md) != ACAMERA_OK || !md) {
-			blog(LOG_WARNING, "android-camera: 相机 '%s' 读不到静态特性，仍列进清单（朝向按未知）", safe_id);
+			blog(LOG_WARNING, "android-camera: 无法读取相机 '%s' 的静态特性，仍保留在列表中（朝向=未知）",
+			     safe_id);
 		}
 
 		struct camera2_info *c = &out[n];
@@ -310,15 +311,15 @@ static int enum_cameras(ACameraManager *manager, struct camera2_info *out, int m
 			c->raw[sizeof(c->raw) - 1] = 0;
 			if (strlen(raw_id) >= sizeof(c->raw))
 				blog(LOG_WARNING,
-				     "android-camera: 相机 id 长度超过 %d，被截断 —— 这个 id 开不了设备，"
-				     "只能换台相机（CAMERA_ID_LEN 加大即可，不是设备问题）", CAMERA_ID_LEN);
+				     "android-camera: 相机 ID 长度超过上限 %d，已被截断，无法打开该设备",
+				     CAMERA_ID_LEN);
 		} else {
 			c->raw[0] = 0;
 		}
 		c->facing = md ? get_byte_tag(md, ACAMERA_LENS_FACING) : -1;
 		c->orientation = md ? get_int32_tag(md, ACAMERA_SENSOR_ORIENTATION) : -1;
 
-		blog(LOG_INFO, "android-camera: 相机[%d] id='%s' %s（LENS_FACING=%d）传感器转角=%d°", n, c->id,
+		blog(LOG_INFO, "android-camera: 相机[%d] id='%s'，%s（LENS_FACING=%d），传感器方向=%d°", n, c->id,
 		     facing_name(c->facing), c->facing, c->orientation);
 
 		if (md)
@@ -334,12 +335,11 @@ static void log_camera_bus_state(const char *when)
 {
 	if (!obs_android_camera_ready()) {
 		blog(LOG_WARNING,
-		     "android-camera: %s —— 相机权限总线未注册（宿主 App 没调 obs_android_set_camera_host），"
-		     "所以问不到 CAMERA 授予态",
+		     "android-camera: %s 时相机权限宿主接口未注册（未调用 obs_android_set_camera_host），无法查询权限状态",
 		     when);
 		return;
 	}
-	blog(LOG_INFO, "android-camera: %s CAMERA 权限=%s", when,
+	blog(LOG_INFO, "android-camera: %s 时 CAMERA 权限=%s", when,
 	     obs_android_camera_has_permission() ? "已授予" : "未授予");
 }
 
@@ -439,7 +439,7 @@ static bool read_camera_caps(ACameraManager *manager, const struct camera2_info 
 
 	ACameraMetadata *md = NULL;
 	if (ACameraManager_getCameraCharacteristics(manager, cam->raw, &md) != ACAMERA_OK || !md) {
-		blog(LOG_WARNING, "android-camera: 相机 '%s' 读不到静态特性，尺寸/帧率两张表都拿不到", cam->id);
+		blog(LOG_WARNING, "android-camera: 无法读取相机 '%s' 的静态特性，无法获取分辨率和帧率列表", cam->id);
 		return false;
 	}
 
@@ -462,14 +462,14 @@ static bool read_camera_caps(ACameraManager *manager, const struct camera2_info 
 					caps_add_size(caps, w, h);
 			}
 			if (overflowed)
-				blog(LOG_WARNING, "android-camera: 相机 '%s' 有 %d 档尺寸超出 MAX_SIZES=%d，只列出前 %d 档",
-				     cam->id, overflowed, MAX_SIZES, MAX_SIZES);
+				blog(LOG_WARNING, "android-camera: 相机 '%s' 有 %d 种分辨率超出上限 MAX_SIZES=%d，已截断",
+				     cam->id, overflowed, MAX_SIZES);
 		} else {
-			blog(LOG_WARNING, "android-camera: 相机 '%s' 的流配置类型不对（type=%d count=%u）", cam->id, (int) e.type,
-			     (unsigned) e.count);
+			blog(LOG_WARNING, "android-camera: 相机 '%s' 的流配置元数据格式异常（type=%d，count=%u）",
+			     cam->id, (int) e.type, (unsigned) e.count);
 		}
 	} else {
-		blog(LOG_WARNING, "android-camera: 相机 '%s' 没有 SCALER_AVAILABLE_STREAM_CONFIGURATIONS", cam->id);
+		blog(LOG_WARNING, "android-camera: 相机 '%s' 缺少 SCALER_AVAILABLE_STREAM_CONFIGURATIONS", cam->id);
 	}
 
 	/* 面积从大到小排：自动档要的就是"最大的那一档"，属性页把高像素放前面也符合直觉。
@@ -492,7 +492,7 @@ static bool read_camera_caps(ACameraManager *manager, const struct camera2_info 
 			for (uint32_t i = 0; i + 1 < e.count; i += 2)
 				caps_add_fps(caps, e.data.i32[i], e.data.i32[i + 1]);
 		} else {
-			blog(LOG_WARNING, "android-camera: 相机 '%s' 的 AE 帧率表类型不对（type=%d count=%u）", cam->id,
+			blog(LOG_WARNING, "android-camera: 相机 '%s' 的 AE 帧率表格式异常（type=%d，count=%u）", cam->id,
 			     (int) e.type, (unsigned) e.count);
 		}
 	}
@@ -521,10 +521,11 @@ static bool read_camera_caps(ACameraManager *manager, const struct camera2_info 
 
 	ACameraMetadata_free(md);
 
-	blog(LOG_INFO, "android-camera: 相机 '%s' 能力：%d 档 YUV_420_888 尺寸（最大 %dx%d）、%d 条 AE 帧率区间，"
-		       "AE_TARGET_FPS_RANGE %s会话参数清单",
+	blog(LOG_INFO,
+	     "android-camera: 相机 '%s' 支持 %d 种 YUV_420_888 分辨率（最大 %dx%d）、%d 组 AE 帧率范围，"
+	     "AE_TARGET_FPS_RANGE %s会话参数",
 	     cam->id, caps->num_sizes, caps->num_sizes ? (int) caps->w[0] : 0, caps->num_sizes ? (int) caps->h[0] : 0,
-	     caps->num_fps, caps->fps_is_session_key ? "在" : "不在");
+	     caps->num_fps, caps->fps_is_session_key ? "支持" : "不支持");
 	return true;
 }
 
@@ -541,13 +542,13 @@ static bool caps_pick_auto_size(const struct camera2_info *cam, const struct cam
 		}
 	}
 	if (caps->num_sizes > 0) {
-		blog(LOG_WARNING, "android-camera: 相机 '%s' 在 %dx%d 以内没有受支持的 YUV_420_888 尺寸，改用表里最大的 %dx%d",
+		blog(LOG_WARNING, "android-camera: 相机 '%s' 在 %dx%d 以内无可用 YUV_420_888 分辨率，回退到最大分辨率 %dx%d",
 		     cam->id, CAP_MAX_WIDTH, CAP_MAX_HEIGHT, (int) caps->w[0], (int) caps->h[0]);
 		*out_w = caps->w[0];
 		*out_h = caps->h[0];
 		return true;
 	}
-	blog(LOG_WARNING, "android-camera: 相机 '%s' 的表里一个 YUV_420_888 输出尺寸都没有", cam->id);
+	blog(LOG_WARNING, "android-camera: 相机 '%s' 未提供任何 YUV_420_888 输出分辨率", cam->id);
 	return false;
 }
 
@@ -596,8 +597,8 @@ static bool resolve_capture_size(const struct camera2_info *cam, const struct ca
 			*out_h = want_h;
 			return true;
 		}
-		blog(LOG_WARNING, "android-camera: 属性里挑的 %dx%d 不在相机 '%s' 这张表里（换过相机、或场景是从别的机型拷来的）"
-				  "，改用自动档",
+		blog(LOG_WARNING,
+		     "android-camera: 配置的分辨率 %dx%d 不在相机 '%s' 支持列表中，已回退为自动选择",
 		     (int) want_w, (int) want_h, cam->id);
 	}
 	return caps_pick_auto_size(cam, caps, out_w, out_h);
@@ -612,7 +613,7 @@ static bool resolve_fps_range(const struct camera2_info *cam, const struct camer
 			*out_hi = want_hi;
 			return true;
 		}
-		blog(LOG_WARNING, "android-camera: 属性里挑的 %d-%d fps 不在相机 '%s' 那张 AE 帧率表里，改用自动档",
+		blog(LOG_WARNING, "android-camera: 配置的帧率范围 %d-%d fps 不在相机 '%s' 支持列表中，已回退为自动选择",
 		     (int) want_lo, (int) want_hi, cam->id);
 	}
 	return caps_pick_auto_fps(caps, out_lo, out_hi);
@@ -637,8 +638,9 @@ static bool choose_camera(struct camera2_source *c, struct camera2_info *out)
 				return true;
 			}
 		}
-		blog(LOG_WARNING, "android-camera: 设置里的相机 '%s' 不在当前 NDK 清单里（换过设备，"
-				  "或它被归成了 NDK 不支持的 legacy 硬件），改用朝向偏好",
+		blog(LOG_WARNING,
+		     "android-camera: 配置的相机 '%s' 不在当前 NDK 相机列表中（设备已变更或仅支持 Legacy 级别），"
+		     "将按朝向偏好选择",
 		     c->camera_id);
 	}
 
@@ -649,7 +651,7 @@ static bool choose_camera(struct camera2_source *c, struct camera2_info *out)
 		}
 	}
 
-	blog(LOG_WARNING, "android-camera: 清单里没有朝向=%d 的相机，退回第一台 '%s'", c->facing_pref, cams[0].id);
+	blog(LOG_WARNING, "android-camera: 未找到朝向=%d 的相机，已回退到首台相机 '%s'", c->facing_pref, cams[0].id);
 	*out = cams[0];
 	return true;
 }
@@ -816,7 +818,7 @@ static void push_frame(struct camera2_source *c, obs_source_t *src, AImage *imag
 	if (!video_format_get_parameters_for_format((enum video_colorspace) c->color_space_pref, VIDEO_RANGE_PARTIAL,
 						    out.format, out.color_matrix, out.color_range_min,
 						    out.color_range_max))
-		blog(LOG_WARNING, "android-camera: 色彩矩阵取不到（cs=%d fmt=0x%x），这一次按 601 兜底",
+		blog(LOG_WARNING, "android-camera: 无法获取色彩矩阵（cs=%d，fmt=0x%x），已回退为 BT.601",
 		     c->color_space_pref, (unsigned) out.format);
 
 	/* src 是回调在进入工作区时取的强引用，不是 c->source：c->source 只在源存活期间有效，
@@ -836,8 +838,8 @@ static void push_frame(struct camera2_source *c, obs_source_t *src, AImage *imag
 	if (c->frames_out == 1 || (c->frames_out % 300) == 0) {
 		uint8_t ymn, ymx, umn, umx, vmn, vmx;
 		double yavg, uavg, vavg;
-		blog(LOG_INFO, "android-camera: 第 %llu 帧 出图 %dx%d fmt=%s 行距 Y=%d U=%d 裁剪=(%d,%d,%d,%d) "
-			       "源给 %dx%d",
+		blog(LOG_INFO,
+		     "android-camera: 第 %llu 帧（输出=%ux%u，fmt=%s，行距 Y=%d/U=%d，裁剪=(%d,%d,%d,%d)，原始=%dx%d）",
 		     (unsigned long long) c->frames_out, (unsigned) cw, (unsigned) ch,
 		     planar ? "I420" : "NV12", y_row, u_row, crop.left, crop.top, crop.right, crop.bottom, fw, fh);
 
@@ -847,8 +849,8 @@ static void push_frame(struct camera2_source *c, obs_source_t *src, AImage *imag
 		scan_plane(out.data[1], u_row, half_cw, half_ch, planar ? 1 : 2, &umn, &umx, &uavg);
 		scan_plane(planar ? out.data[2] : out.data[1] + 1, planar ? v_row : u_row, half_cw, half_ch,
 			   planar ? 1 : 2, &vmn, &vmx, &vavg);
-		blog(LOG_INFO, "android-camera: 第 %llu 帧 内容 Y %u~%u 均%.1f | U %u~%u 均%.1f | V %u~%u 均%.1f"
-			       "（Y 的 min==max 就是这台设备给的是纯色帧，不是转换的问题）",
+		blog(LOG_INFO,
+		     "android-camera: 第 %llu 帧像素统计：Y=[%u,%u] 均值=%.1f | U=[%u,%u] 均值=%.1f | V=[%u,%u] 均值=%.1f",
 		     (unsigned long long) c->frames_out, (unsigned) ymn, (unsigned) ymx, yavg, (unsigned) umn,
 		     (unsigned) umx, uavg, (unsigned) vmn, (unsigned) vmx, vavg);
 	}
@@ -908,8 +910,9 @@ static void on_device_disconnected(void *context, ACameraDevice *device)
 {
 	UNUSED_PARAMETER(context);
 	UNUSED_PARAMETER(device);
-	blog(LOG_WARNING, "android-camera: 相机设备已断开（被别的应用抢走/策略变化）—— 本次采集作废，"
-			  "失联看门狗会在 %u ms 内自己重开", (unsigned)(FRAME_STALL_NS / 1000000ULL));
+	blog(LOG_WARNING,
+	     "android-camera: 相机设备已断开（可能被其他应用占用或受系统策略限制），看门狗将在 %u ms 内尝试重连",
+	     (unsigned)(FRAME_STALL_NS / 1000000ULL));
 }
 
 /* error 的取值：NdkCameraDevice.h:119-125 只给了五个 @see，指向 Java 的
@@ -920,8 +923,9 @@ static void on_device_error(void *context, ACameraDevice *device, int error)
 {
 	UNUSED_PARAMETER(context);
 	UNUSED_PARAMETER(device);
-	blog(LOG_WARNING, "android-camera: 相机设备报错 error=%d（1=被占 2=数量上限 3=被禁用 "
-			  "4=设备致命 5=服务致命）", error);
+	blog(LOG_WARNING,
+	     "android-camera: 相机设备发生错误 error=%d（1=被占用，2=超出并发上限，3=被系统禁用，4=设备错误，5=相机服务错误）",
+	     error);
 }
 
 static void on_session_closed(void *context, ACameraCaptureSession *session)
@@ -1039,7 +1043,7 @@ static void close_capture_locked(struct camera2_source *c, const char *why)
 	c->next_retry_ns = 0;
 	c->retry_ms = 0;
 
-	blog(LOG_INFO, "android-camera: 采集已拆除（%s）—— 送出 %llu 帧，丢弃 %llu 帧", why,
+	blog(LOG_INFO, "android-camera: 采集已停止（原因=%s，已输出 %llu 帧，丢弃 %llu 帧）", why,
 	     (unsigned long long) c->frames_out, (unsigned long long) c->frames_dropped);
 }
 
@@ -1094,8 +1098,7 @@ static bool open_capture_locked(struct camera2_source *c)
 	int32_t flo = 0, fhi = 0;
 	const bool have_fps = resolve_fps_range(&cam, &caps, c->fps_lo_pref, c->fps_hi_pref, &flo, &fhi);
 	if (!have_fps)
-		blog(LOG_WARNING, "android-camera: 相机 '%s' 没给 AE 帧率表，这次不下发 CONTROL_AE_TARGET_FPS_RANGE，"
-				  "按设备默认帧率跑", cam.id);
+		blog(LOG_WARNING, "android-camera: 相机 '%s' 未提供 AE 帧率列表，将使用设备默认帧率", cam.id);
 
 	bool ok = true;
 	ACameraDevice_StateCallbacks dev_cb = {NULL, on_device_disconnected, on_device_error, NULL};
@@ -1182,14 +1185,14 @@ static bool open_capture_locked(struct camera2_source *c)
 		    s->session_params) {
 			if (ACaptureRequest_setEntry_i32(s->session_params, ACAMERA_CONTROL_AE_TARGET_FPS_RANGE, 2, init_pair) !=
 			    ACAMERA_OK) {
-				blog(LOG_WARNING, "android-camera: 把 %d-%d fps 写进会话参数失败，这次只当普通请求下发",
+				blog(LOG_WARNING, "android-camera: 设置会话参数帧率 %d-%d fps 失败，将回退到普通请求配置",
 					 (int) flo, (int) fhi);
 				ACaptureRequest_free(s->session_params);
 				s->session_params = NULL;
 			}
 		} else {
 			s->session_params = NULL;
-			blog(LOG_WARNING, "android-camera: 建会话参数用的请求失败，这次只当普通请求下发帧率");
+			blog(LOG_WARNING, "android-camera: 创建会话参数请求失败，将回退到普通请求配置帧率");
 		}
 	}
 
@@ -1233,7 +1236,7 @@ static bool open_capture_locked(struct camera2_source *c)
 		const camera_status_t fst =
 			ACaptureRequest_setEntry_i32(s->request, ACAMERA_CONTROL_AE_TARGET_FPS_RANGE, 2, pair);
 		if (fst != ACAMERA_OK)
-			blog(LOG_WARNING, "android-camera: 往重复请求里下发 %d-%d fps 失败：%s（这次按设备默认帧率跑）",
+			blog(LOG_WARNING, "android-camera: 设置重复请求帧率 %d-%d fps 失败：%s（将使用设备默认帧率）",
 				 (int) flo, (int) fhi, camera_status_text(fst));
 	}
 
@@ -1359,10 +1362,10 @@ static void camera2_video_tick(void *data, float seconds)
 	if (capture_is_open(c) && now - c->last_alive_ns > FRAME_STALL_NS) {
 		const unsigned silent_ms = (unsigned)((now - c->last_alive_ns) / 1000000ULL);
 		if (c->stall_count < 3)
-			blog(LOG_WARNING, "android-camera: 源 '%s' 已 %u ms 没吐新帧（第 %u 次），按失联拆掉重开",
+			blog(LOG_WARNING, "android-camera: 源 '%s' 已 %u ms 未收到新帧（第 %u 次），正在重启采集",
 			     obs_source_get_name(c->source), silent_ms, c->stall_count + 1);
 		else if (c->stall_count == 3)
-			blog(LOG_WARNING, "android-camera: 源 '%s' 还在同一个失联循环里，后面不再一条条报",
+			blog(LOG_WARNING, "android-camera: 源 '%s' 持续超时无新帧，后续将抑制重复告警",
 			     obs_source_get_name(c->source));
 		c->stall_count++;
 		close_capture(c, "失联");
@@ -1384,8 +1387,8 @@ static void camera2_video_tick(void *data, float seconds)
 											       : c->retry_ms * 2ULL)
 						  : RETRY_BACKOFF_MIN_MS;
 			c->next_retry_ns = now + c->retry_ms * 1000000ULL;
-			blog(LOG_INFO, "android-camera: 源 '%s' 开不起来（%s），%llu ms 后再试",
-			     obs_source_get_name(c->source), c->last_error[0] ? c->last_error : "(没记下原因)",
+			blog(LOG_INFO, "android-camera: 源 '%s' 启动采集失败（%s），%llu ms 后重试",
+			     obs_source_get_name(c->source), c->last_error[0] ? c->last_error : "(未知原因)",
 			     (unsigned long long) c->retry_ms);
 		}
 	}
@@ -1454,7 +1457,7 @@ static void *camera2_create(obs_data_t *settings, obs_source_t *source)
 	 * 过不了初始化器（threading.h 就是为这件事提供 init_value 的）。 */
 	pthread_mutex_init_value(&data->mtx);
 	if (pthread_mutex_init(&data->mtx, NULL) != 0)
-		blog(LOG_ERROR, "android-camera: 建锁失败，开/拆采集就没有互斥了");
+		blog(LOG_ERROR, "android-camera: 初始化互斥锁失败，采集状态同步将受影响");
 	camera2_load_settings(data, settings);
 
 	/* 回调上下文独立于 data 分配：data 会被 bfree，而"已决定派发"的回调仍会来读它。 */
@@ -1471,14 +1474,14 @@ static void *camera2_create(obs_data_t *settings, obs_source_t *source)
 
 	data->manager = ACameraManager_create();
 	if (!data->manager) {
-		blog(LOG_ERROR, "android-camera: ACameraManager_create() 失败 —— 这台没有 Camera2？");
+		blog(LOG_ERROR, "android-camera: ACameraManager_create() 失败（设备可能不支持 Camera2 API）");
 		return data;
 	}
 
 	/* 建源就数一遍：b 腿的全部产品行为就是"数得出、报得清"，属性页也拿这份清单。 */
 	struct camera2_info cams[MAX_CAMERAS];
 	const int n = enum_cameras(data->manager, cams, MAX_CAMERAS);
-	blog(LOG_INFO, "android-camera: 源 '%s' 建起来，NDK 侧数到 %d 台相机", obs_source_get_name(source), n);
+	blog(LOG_INFO, "android-camera: 源 '%s' 已创建，检测到 %d 台相机", obs_source_get_name(source), n);
 
 	log_camera_bus_state("建源");
 	return data;
@@ -1514,19 +1517,19 @@ static void camera2_destroy(void *data)
 static void camera2_activate(void *data)
 {
 	struct camera2_source *c = data;
-	blog(LOG_INFO, "android-camera: 源 '%s' activate，选中相机='%s'（朝向偏好=%d）",
+	blog(LOG_INFO, "android-camera: 源 '%s' 已激活，目标相机='%s'（朝向偏好=%d）",
 	     obs_source_get_name(c->source), c->camera_id[0] ? c->camera_id : "(未指定)", c->facing_pref);
 	log_camera_bus_state("activate");
 
 	if (!open_capture(c))
-		blog(LOG_ERROR, "android-camera: 源 '%s' activate 后开不起来：%s", obs_source_get_name(c->source),
-		     c->last_error[0] ? c->last_error : "(没记下原因)");
+		blog(LOG_ERROR, "android-camera: 源 '%s' 激活后启动采集失败：%s", obs_source_get_name(c->source),
+		     c->last_error[0] ? c->last_error : "(未知原因)");
 }
 
 static void camera2_deactivate(void *data)
 {
 	struct camera2_source *c = data;
-	blog(LOG_INFO, "android-camera: 源 '%s' deactivate", obs_source_get_name(c->source));
+	blog(LOG_INFO, "android-camera: 源 '%s' 已停用", obs_source_get_name(c->source));
 	close_capture(c, "deactivate");
 }
 
@@ -1559,18 +1562,19 @@ static void camera2_update(void *data, obs_data_t *settings)
 	/* 换相机要换那台独占设备，换尺寸要重配流（reader 和 session 都是按尺寸建的），换帧率虽然在
 	 * 重复请求里就能改、但**会话参数**只有重开会话才谈得上 —— 三件并成一条"拆了重开"，日志里那句
 	 * 变了什么写全，别只报相机名。 */
-	blog(LOG_INFO, "android-camera: 采集设置变了：相机 '%s'→'%s' 朝向 %d→%d 尺寸 %dx%d→%dx%d 帧率 %d-%d→%d-%d"
-		       "（0/空 = 自动）", old_id, c->camera_id, old_facing, c->facing_pref, (int) old_w, (int) old_h,
-		       (int) c->cap_w_pref, (int) c->cap_h_pref, (int) old_flo, (int) old_fhi, (int) c->fps_lo_pref,
-		       (int) c->fps_hi_pref);
+	blog(LOG_INFO,
+	     "android-camera: 采集配置已变更：相机 '%s'->'%s'，朝向 %d->%d，分辨率 %dx%d->%dx%d，帧率 %d-%d->%d-%d"
+	     "（0/空 = 自动）",
+	     old_id, c->camera_id, old_facing, c->facing_pref, (int) old_w, (int) old_h, (int) c->cap_w_pref,
+	     (int) c->cap_h_pref, (int) old_flo, (int) old_fhi, (int) c->fps_lo_pref, (int) c->fps_hi_pref);
 
 	/* 换相机 = 换独占设备，只能拆了重开；正在采集才要重开，没 activate 的时候留着不动，
 	 * 让 activate 那条路径去开（否则会出现"没在预览里却占着相机"这种谁也看不见的占用）。 */
 	if (obs_source_active(c->source)) {
 		close_capture(c, "update");
 		if (!open_capture(c))
-			blog(LOG_ERROR, "android-camera: 源 '%s' 改设置后重开失败：%s", obs_source_get_name(c->source),
-			     c->last_error[0] ? c->last_error : "(没记下原因)");
+			blog(LOG_ERROR, "android-camera: 源 '%s' 更新配置后重启采集失败：%s",
+			     obs_source_get_name(c->source), c->last_error[0] ? c->last_error : "(未知原因)");
 	}
 }
 
@@ -1780,7 +1784,7 @@ bool obs_module_load(void)
 	 * "libobs 已拒绝、模块谎报成功"的假账（A2 实测过那条坑）。 */
 	const uint32_t flags = obs_get_source_output_flags("android_camera_input");
 	if (!flags) {
-		blog(LOG_ERROR, "android-camera: 'android_camera_input' 注册被拒，见上一条 libobs 报错");
+		blog(LOG_ERROR, "android-camera: 注册源类型 'android_camera_input' 失败，请查看 libobs 错误日志");
 		return false;
 	}
 
@@ -1792,10 +1796,10 @@ bool obs_module_load(void)
 	if (m) {
 		struct camera2_info cams[MAX_CAMERAS];
 		const int n = enum_cameras(m, cams, MAX_CAMERAS);
-		blog(LOG_INFO, "android-camera: 模块加载时数到 %d 台相机", n);
+		blog(LOG_INFO, "android-camera: 模块加载时检测到 %d 台相机", n);
 		ACameraManager_delete(m);
 	} else {
-		blog(LOG_ERROR, "android-camera: ACameraManager_create() 失败，模块加载时数不到相机");
+		blog(LOG_ERROR, "android-camera: ACameraManager_create() 失败，模块加载时无法枚举相机");
 	}
 	log_camera_bus_state("模块加载");
 

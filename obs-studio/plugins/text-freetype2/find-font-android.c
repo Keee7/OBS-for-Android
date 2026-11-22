@@ -21,18 +21,16 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include <obs-module.h>
 
-#include <android/log.h>
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <util/base.h>
 #include <util/dstr.h>
 #include <util/platform.h>
 
 #include "find-font.h"
 #include "text-freetype2.h"
-
-#define FT2LOG(...) __android_log_print(ANDROID_LOG_INFO, "FT2FONT", __VA_ARGS__)
 
 static DARRAY(struct font_path_info) font_list;
 static bool font_list_scanned = false;
@@ -140,12 +138,13 @@ void load_os_font_list(void)
 		os_closedir(dir);
 	}
 
-	FT2LOG("字体扫描：文件 %u 个，登记 %u 条 face 记录，打不开 %u 个，耗时 %llu ms（目录 %zu 个，缓存关闭）", files, faces,
-	       failed, (unsigned long long)((os_gettime_ns() - t_start) / 1000000ULL),
-	       sizeof(font_dirs) / sizeof(*font_dirs));
+	blog(LOG_INFO,
+	     "text-freetype2: 字体扫描完成：共扫描 %u 个文件，注册 %u 条字体记录，打开失败 %u 个，耗时 %llu ms（目录数=%zu，缓存已禁用）",
+	     files, faces, failed, (unsigned long long)((os_gettime_ns() - t_start) / 1000000ULL),
+	     sizeof(font_dirs) / sizeof(*font_dirs));
 
 	if (!font_list.num)
-		FT2LOG("字体列表为空：/system/fonts 读不到，文本源会一个也渲不出来");
+		blog(LOG_WARNING, "text-freetype2: 系统字体目录扫描结果为空，文本源可能无法正常渲染");
 }
 
 static void create_bitmap_sizes(struct font_path_info *info, FT_Face face)
@@ -352,11 +351,13 @@ const char *get_font_path(const char *family, uint16_t size, const char *style, 
 		if (!path)
 			continue;
 
-		FT2LOG("字体兜底：'%s' 未安装 → %s (face=%u)", family, path, (unsigned)*idx);
+		blog(LOG_INFO, "text-freetype2: 未找到字体 '%s'，已回退到 %s（face=%u）", family, path,
+		     (unsigned)*idx);
 		return path;
 	}
 
-	FT2LOG("字体未找到且无兜底：'%s'（列表 %u 条）", family, (unsigned)font_list.num);
+	blog(LOG_WARNING, "text-freetype2: 未找到字体 '%s' 且无可用回退字体（已索引 %u 条）", family,
+	     (unsigned)font_list.num);
 	return NULL;
 }
 

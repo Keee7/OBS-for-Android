@@ -538,13 +538,13 @@ static bool uvc_scan_device(struct uvc_dev *d)
 	     d->vs_iface, d->ep_in, (unsigned)d->uvc_version, d->n_modes);
 
 	if (d->vs_iface < 0 || d->ep_in == 0 || d->n_modes == 0) {
-		blog(LOG_ERROR, "uvc: 没找到可用的 UVC 流接口/模式（设备可能不是标准 UVC）");
+		blog(LOG_ERROR, "uvc: 未找到可用的 UVC 流接口或视频模式（设备可能不符合标准 UVC 规范）");
 		return false;
 	}
 
 	for (int i = 0; i < d->n_modes; i++) {
 		const struct uvc_mode *m = &d->modes[i];
-		blog(LOG_INFO, "uvc:   模式[%d] %s fmt=%u frame=%u %ux%u 间隔=%u(100ns) 档数=%d 最大帧长=%u", i,
+		blog(LOG_INFO, "uvc:   模式[%d] %s fmt=%u frame=%u %ux%u 帧间隔=%u(100ns) 帧率档数=%d 最大帧长=%u", i,
 		     mode_kind_name(m->kind), (unsigned)m->fmt_index, (unsigned)m->frame_index, (unsigned)m->w,
 		     (unsigned)m->h, (unsigned)m->def_interval, m->n_intervals, (unsigned)m->max_frame_size);
 	}
@@ -806,7 +806,7 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 		probe[3] = m->frame_index;
 		put_u32le(probe + 4, want_iv);
 	} else {
-		blog(LOG_WARNING, "uvc: GET_DEF probe 失败 r=%d，回退手填版", r);
+		blog(LOG_WARNING, "uvc: GET_DEF probe 失败（r=%d），已回退使用构造默认值", r);
 		memcpy(probe, hand, sizeof(probe));
 	}
 
@@ -828,7 +828,7 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 			return r;
 		got = r == (int)d->probe_len;
 		if (!got)
-			blog(LOG_WARNING, "uvc: GET probe 第 %d/3 次失败 r=%d", t + 1, r);
+			blog(LOG_WARNING, "uvc: GET probe 第 %d/3 次尝试失败（r=%d）", t + 1, r);
 	}
 
 	if (!got && raw_low_latency(s)) {
@@ -849,9 +849,9 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 		    r == LIBUSB_ERROR_NOT_SUPPORTED)
 			return r;
 		if (r != (int)d->probe_len)
-			blog(LOG_WARNING, "uvc: 二次 SET probe 失败 r=%d，照样试 commit", r);
+			blog(LOG_WARNING, "uvc: 二次 SET probe 失败（r=%d），仍尝试提交 commit", r);
 	} else {
-		blog(LOG_WARNING, "uvc: GET probe 3 次都失败 —— 跳过 readback，直接 SET+commit 期望值");
+		blog(LOG_WARNING, "uvc: GET probe 连续 3 次失败，跳过回读并直接尝试 SET+commit");
 		memcpy(back, probe, sizeof(back));
 		d->frame_interval = want_iv;
 		d->frame_buf_size = m->kind == MODE_MJPEG ? m->max_frame_size : raw_frame_bytes(m);
@@ -861,13 +861,13 @@ static int negotiate_try(struct uvc_dev *d, struct uvc_source *s)
 		    r == LIBUSB_ERROR_NOT_SUPPORTED)
 			return r;
 		if (r != (int)d->probe_len)
-			blog(LOG_WARNING, "uvc: 跳过 readback 路径的二次 SET 失败 r=%d，照样试 commit", r);
+			blog(LOG_WARNING, "uvc: 回退路径二次 SET probe 失败（r=%d），仍尝试提交 commit", r);
 	}
 
 	r = libusb_control_transfer(d->h, 0x21, UVC_SET_CUR, UVC_VS_COMMIT_CONTROL << 8, (uint16_t)d->vs_iface, back,
 				    (uint16_t)d->probe_len, 1000);
 	if (r != (int)d->probe_len) {
-		blog(LOG_ERROR, "uvc: SET commit 失败 r=%d", r);
+		blog(LOG_ERROR, "uvc: SET commit 失败（r=%d）", r);
 		return r < 0 ? r : LIBUSB_ERROR_IO;
 	}
 
@@ -891,7 +891,7 @@ static int uvc_negotiate(struct uvc_dev *d, struct uvc_source *s)
 	if (d->vs_iface < 0 || (r != LIBUSB_ERROR_IO && r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_PIPE))
 		return r;
 
-	blog(LOG_WARNING, "uvc: 协商失败（%d），SET_INTERFACE alt0→alt%d 踢一脚再试", r, d->vs_alt);
+	blog(LOG_WARNING, "uvc: 协商失败（r=%d），尝试切换接口备用设置 alt0 -> alt%d 后重试", r, d->vs_alt);
 	const int s0 = libusb_set_interface_alt_setting(d->h, d->vs_iface, 0);
 	if (s0 != 0)
 		return s0;
@@ -1139,7 +1139,7 @@ static void dump_diag(struct uvc_stream *st)
 	line[0] = '\0'; /* n==0 时 loop 不跑，没这行 blog("%s") 读未初始化栈 */
 	for (size_t i = 0; i < n; i++)
 		snprintf(line + i * 3, 4, "%02x ", st->input.data[i]);
-	blog(LOG_WARNING, "uvc: 失步诊断，流位置前 %zu 字节：%s", n, line);
+		blog(LOG_WARNING, "uvc: 同步异常，缓冲区起始 %zu 字节：%s", n, line);
 
 	const size_t fn = st->frame_len < 32 ? st->frame_len : 32;
 	char fline[32 * 3 + 1];
@@ -1157,8 +1157,8 @@ static void stream_resync(struct uvc_stream *st, const char *why)
 	st->resync_streak++;
 	const bool relearn = st->resync_streak % 5 == 0;
 	if (log_allow(&st->ll_resync))
-		blog(LOG_WARNING, "uvc: 重同步（%s），丢弃半帧（已攒 %zu 字节）%s", why, st->frame_len,
-		     relearn ? "——连假 5 次，头长也重学" : "");
+		blog(LOG_WARNING, "uvc: 触发流重同步（原因=%s），丢弃半帧（已累积 %zu 字节）%s", why, st->frame_len,
+		     relearn ? "，连续失败已达阈值，重置包头长度识别" : "");
 	if (relearn)
 		st->hle = 0;
 	st->scan_off = 0;
@@ -1336,7 +1336,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	if (sel < 0 && s->usb_id[0]) {
 		for (int i = 0; i < ndev; i++) {
 			if (strncmp(devs[i].label, s->usb_id, strlen(s->usb_id)) == 0) {
-				blog(LOG_INFO, "uvc: 路径 '%s' 不在清单，按 %s 认出同一台设备换到了 '%s'",
+				blog(LOG_INFO, "uvc: 原设备路径 '%s' 不可用，已根据标识 %s 匹配到新路径 '%s'",
 				     s->usb_device, s->usb_id, devs[i].name);
 				sel = i;
 				break;
@@ -1425,10 +1425,10 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		libusb_device *ld = libusb_get_device(d.h);
 		const int sp = ld ? libusb_get_device_speed(ld) : LIBUSB_SPEED_UNKNOWN;
 		d.usb_speed = sp;
-		blog(LOG_INFO, "uvc: 链路速率 speed=%d（%s）", sp,
+		blog(LOG_INFO, "uvc: USB 链路速率 speed=%d（%s）", sp,
 		     sp == LIBUSB_SPEED_SUPER        ? "SuperSpeed 5Gbps"
 		     : sp == LIBUSB_SPEED_SUPER_PLUS ? "SuperSpeed+ 10Gbps"
-		     : sp == LIBUSB_SPEED_HIGH       ? "HighSpeed 480Mbps——不是 SS，带宽够呛"
+		     : sp == LIBUSB_SPEED_HIGH       ? "HighSpeed 480 Mbps（非 SuperSpeed）"
 		     : sp == LIBUSB_SPEED_FULL       ? "FullSpeed 12Mbps"
 		     : sp == LIBUSB_SPEED_LOW        ? "LowSpeed 1.5Mbps"
 						     : "未知");
@@ -1471,12 +1471,12 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	if (d.vc_iface >= 0) {
 		const int kd = libusb_kernel_driver_active(d.h, d.vc_iface);
 		const int dr = libusb_detach_kernel_driver(d.h, d.vc_iface);
-		blog(LOG_INFO, "uvc: VC 接口 %d 内核驱动=%d，显式 detach r=%d", d.vc_iface, kd, dr);
+		blog(LOG_INFO, "uvc: VC 接口 %d 内核驱动=%d，显式解绑 r=%d", d.vc_iface, kd, dr);
 	}
 	{
 		const int kd = libusb_kernel_driver_active(d.h, d.vs_iface);
 		const int dr = libusb_detach_kernel_driver(d.h, d.vs_iface);
-		blog(LOG_INFO, "uvc: VS 接口 %d 内核驱动=%d，显式 detach r=%d", d.vs_iface, kd, dr);
+		blog(LOG_INFO, "uvc: VS 接口 %d 内核驱动=%d，显式解绑 r=%d", d.vs_iface, kd, dr);
 	}
 
 	r = libusb_claim_interface(d.h, d.vs_iface);
@@ -1498,10 +1498,10 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		uint8_t cur_alt = 0xFF;
 		const int gr = libusb_control_transfer(d.h, 0x81, LIBUSB_REQUEST_GET_INTERFACE, 0, (uint16_t)d.vs_iface,
 						       &cur_alt, 1, 1000);
-		blog(LOG_INFO, "uvc: GET_INTERFACE r=%d 当前 alt=%u（工作 alt=%d）", gr,
+		blog(LOG_INFO, "uvc: GET_INTERFACE r=%d，当前 alt=%u（目标 alt=%d）", gr,
 		     gr == 1 ? (unsigned)cur_alt : 0xFFU, d.vs_alt);
 		const int si = libusb_set_interface_alt_setting(d.h, d.vs_iface, d.vs_alt);
-		blog(LOG_INFO, "uvc: 开流前置 SET_INTERFACE alt%d r=%d", d.vs_alt, si);
+		blog(LOG_INFO, "uvc: 设置工作接口替代模式 alt%d r=%d", d.vs_alt, si);
 	}
 
 	/* ---- 5. probe/commit 协商 ---- */
@@ -1751,7 +1751,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		 * 误同步防护 = 帧内 FID 一致 + PTS 一致（随机数据撞 PTS 约 2^-32） */
 		if (st.input.size >= SBUF_HIGH_WATER) {
 			if (log_allow(&st.ll_highwater))
-				blog(LOG_WARNING, "uvc: 流缓冲到高水位（%zu 字节）还定不了下一个头，丢前半重扫",
+				blog(LOG_WARNING, "uvc: 流缓冲区达到高水位（%zu 字节）仍未定位到帧头，丢弃前半部分重新扫描",
 				     st.input.size);
 			dump_diag(&st);
 			sbuf_consume(&st, st.input.size / 2);
@@ -1898,7 +1898,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			if (flen == 0) {
 				s->frames_dropped++;
 				if (log_allow(&st.ll_badframe))
-					blog(LOG_INFO, "uvc: 空帧跳过（stray EOF 产物）");
+					blog(LOG_INFO, "uvc: 跳过空帧（孤立 EOF 标记）");
 				continue;
 			}
 
@@ -1911,12 +1911,12 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				if (eoi == 0) {
 					s->frames_dropped++;
 					if (log_allow(&st.ll_badframe))
-						blog(LOG_WARNING, "uvc: 坏帧丢弃（%u 字节，%s）", flen,
+						blog(LOG_WARNING, "uvc: 丢弃损坏帧（%u 字节，%s）", flen,
 						     flen >= 2 && st.frame_buf[0] == 0xFF && st.frame_buf[1] == 0xD8
-							     ? "帧尾找不到 FFD9"
-							     : "帧首非 FFD8");
+							     ? "帧尾缺少 FFD9"
+							     : "帧头缺少 FFD8");
 					if (++st.bad_streak >= BADFRAME_RESYNC) {
-						stream_resync(&st, "连续坏帧到上限");
+						stream_resync(&st, "连续损坏帧达到阈值");
 						st.bad_streak = 0;
 					}
 					continue;
@@ -1926,7 +1926,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				if (flen < st.frame_total) {
 					s->frames_dropped++;
 					if (log_allow(&st.ll_badframe))
-						blog(LOG_WARNING, "uvc: 坏帧丢弃（%u 字节 < 定长 %u）", flen,
+						blog(LOG_WARNING, "uvc: 丢弃不完整帧（%u 字节 < 期望 %u 字节）", flen,
 						     (unsigned)st.frame_total);
 					if (++st.bad_streak >= BADFRAME_RESYNC) {
 						stream_resync(&st, "连续坏帧到上限");
@@ -1946,7 +1946,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				    jw <= 0 || jh <= 0) {
 					s->frames_dropped++;
 					if (s->frames_dropped <= 5 || s->frames_dropped % 300 == 0)
-						blog(LOG_WARNING, "uvc: MJPEG 头解析失败（%u 字节）：%s",
+						blog(LOG_WARNING, "uvc: MJPEG 帧头解析失败（%u 字节）：%s",
 						     (unsigned)flen, tjGetErrorStr());
 					continue;
 				}
@@ -1962,7 +1962,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				if (jw > 8192 || jh > 8192 || need > MAX_FRAME_BYTES * 4) {
 					s->frames_dropped++;
 					if (s->frames_dropped <= 5 || s->frames_dropped % 300 == 0)
-						blog(LOG_WARNING, "uvc: MJPEG 头尺寸 %dx%d 离谱，丢帧", jw, jh);
+						blog(LOG_WARNING, "uvc: MJPEG 帧头尺寸异常（%dx%d），已丢弃该帧", jw, jh);
 					continue;
 				}
 				if (need > bgra_size) {
@@ -1972,7 +1972,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				}
 				if (!bgra) {
 					s->frames_dropped++;
-					blog(LOG_WARNING, "uvc: BGRA 缓冲分配失败（%zu 字节），丢帧", need);
+					blog(LOG_WARNING, "uvc: 分配 BGRA 缓冲区失败（%zu 字节），已丢弃该帧", need);
 					continue;
 				}
 				if (tjDecompress2(tj, st.frame_buf, flen, bgra, jw, jw * 4, jh, TJPF_BGRA, 0) != 0) {
@@ -1982,7 +1982,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 					continue;
 				}
 				if (s->frames_out == 0)
-					blog(LOG_INFO, "uvc: 首帧 tjDecompress2 返回 0（%dx%d → BGRA %zu 字节）", jw,
+					blog(LOG_INFO, "uvc: 首帧 JPEG 解码成功（%dx%d -> BGRA %zu 字节）", jw,
 					     jh, need);
 				push_frame_bgra(s, bgra, jw, jh, received_ns);
 				s->cur_w = (uint32_t)jw;
@@ -2032,11 +2032,11 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 						}
 						if (yi < 0) {
 							blog(LOG_WARNING,
-							     "uvc: 检测到黑场输出（3 秒 %u 帧全黑），但设备没有同分辨率 YUYV 档，无法自降级",
+							     "uvc: 检测到持续黑屏输出（3 秒内 %u 帧全黑），且设备无同分辨率 YUYV 模式可切换",
 							     black_checked);
 						} else {
 							blog(LOG_WARNING,
-							     "uvc: 检测到黑场输出（3 秒 %u 帧全黑），自动切换 %s → YUYV 并重新协商",
+							     "uvc: 检测到持续黑屏输出（3 秒内 %u 帧全黑），自动从 %s 切换为 YUYV 并重新协商",
 							     black_checked, mode_kind_name(mode->kind));
 							d.chosen = yi;
 							mode = &d.modes[yi];
@@ -2085,7 +2085,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				set_capture_status(s, "Status.CapturingFps", mode_kind_name(mode->kind), (unsigned)s->cur_w, (unsigned)s->cur_h, s->cur_fps_x100 / 100.0);
 			}
 			if (s->frames_out == 1 || s->frames_out % 300 == 0)
-				blog(LOG_INFO, "uvc: 第 %llu 帧 %ux%u %s（载荷 %u 字节，累计丢弃 %llu）",
+				blog(LOG_INFO, "uvc: 采集第 %llu 帧 %ux%u %s（载荷=%u 字节，累计丢弃=%llu）",
 				     (unsigned long long)s->frames_out, (unsigned)s->cur_w, (unsigned)s->cur_h,
 				     mode_kind_name(mode->kind), (unsigned)flen, (unsigned long long)s->frames_dropped);
 		}
@@ -2145,7 +2145,7 @@ out:
 		tjDestroy(tj);
 	if (d.h) {
 		if (streaming)
-			blog(LOG_INFO, "uvc: 离开 bulk 流循环");
+			blog(LOG_INFO, "uvc: 已退出 bulk 数据流循环");
 		if (vs_claimed)
 			libusb_release_interface(d.h, d.vs_iface);
 		libusb_close(d.h); /* auto_detach 开着时内核驱动会在这里重新绑回去 */
@@ -2283,20 +2283,20 @@ static void uvc_settings_apply(struct uvc_source *s, obs_data_t *settings)
 	obs_source_set_async_unbuffered(s->source, raw_low_latency(s) && obs_data_get_bool(settings, "yuv_unbuffered"));
 
 	if (s->width < 16 || s->width > 7680 || s->height < 16 || s->height > 4320) {
-		blog(LOG_WARNING, "uvc: 分辨率 %dx%d 不合理，回落到 1920x1080", s->width, s->height);
+		blog(LOG_WARNING, "uvc: 配置分辨率 %dx%d 超出支持范围，已回退为 1920x1080", s->width, s->height);
 		s->width = 1920;
 		s->height = 1080;
 	}
 	/* 属性页是自由数字输入，步进 2 也能攒出奇数怪值（真机见过 1920x1082）——夹成偶数 */
 	if ((s->width & 1) || (s->height & 1)) {
-		blog(LOG_WARNING, "uvc: 分辨率 %dx%d 不是偶数，夹到 %dx%d", s->width, s->height, s->width & ~1,
+		blog(LOG_WARNING, "uvc: 配置分辨率 %dx%d 非偶数，已对齐为 %dx%d", s->width, s->height, s->width & ~1,
 		     s->height & ~1);
 		s->width &= ~1;
 		s->height &= ~1;
 	}
 	s->usb_id[0] = 0; /* 设置变了，旧设备的 vid:pid 记忆作废（防认错成上一台） */
 	if (s->fps < 1 || s->fps > 240) {
-		blog(LOG_WARNING, "uvc: 帧率 %d 不合理，回落到 60", s->fps);
+		blog(LOG_WARNING, "uvc: 配置帧率 %d 超出有效范围，已回退为 60", s->fps);
 		s->fps = 60;
 	}
 }
@@ -2307,7 +2307,7 @@ static void *uvc_create(obs_data_t *settings, obs_source_t *source)
 	s->source = source;
 	pthread_mutex_init_value(&s->mtx);
 	if (pthread_mutex_init(&s->mtx, NULL) != 0)
-		blog(LOG_ERROR, "uvc: 建锁失败，状态文本没有互斥了");
+		blog(LOG_ERROR, "uvc: 初始化互斥锁失败，状态文本更新将不受互斥保护");
 	uvc_settings_apply(s, settings);
 	return s;
 }
@@ -2362,7 +2362,7 @@ static bool on_request_permission(obs_properties_t *props, obs_property_t *prope
 	struct uvc_source *s = data;
 
 	if (!s || !s->usb_device[0]) {
-		blog(LOG_INFO, "uvc: 属性页点【申请授权】但还没选设备，先选设备再点");
+		blog(LOG_INFO, "uvc: 尚未选择 USB 设备，请先选择设备再申请授权");
 		return false;
 	}
 	const int r = obs_android_usb_request_permission(s->usb_device);
@@ -2397,7 +2397,7 @@ static obs_properties_t *uvc_properties(void *data)
 			obs_property_list_add_string(dev_list, text, devs[i].name);
 		}
 		obs_property_list_add_string(dev_list, obs_module_text("UsbDevice.Disabled"), "");
-		blog(LOG_INFO, "uvc: 属性页列出 %d 个 USB 设备", n);
+		blog(LOG_INFO, "uvc: 属性页枚举到 %d 台 USB 设备", n);
 	}
 
 	obs_properties_add_button2(props, "request_perm", obs_module_text("RequestPerm"), on_request_permission, s);
@@ -2469,7 +2469,7 @@ bool obs_module_load(void)
 
 	const uint32_t flags = obs_get_source_output_flags("android_video_input");
 	if (!flags) {
-		blog(LOG_ERROR, "android-capture: 'android_video_input' 注册被拒，见上一条 libobs 报错");
+		blog(LOG_ERROR, "android-capture: 注册源类型 'android_video_input' 失败，请查看 libobs 错误日志");
 		return false;
 	}
 

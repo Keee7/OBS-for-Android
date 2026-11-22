@@ -127,7 +127,7 @@ bool obsAndroidUsbRegisterBus(QString *detail)
 
 	const QJniObject ctx = appContext();
 	if (!ctx.isValid()) {
-		const QString line = QStringLiteral("USB 宿主未安装：QtNative.getContext()/activity() 都拿不到 Context");
+		const QString line = QStringLiteral("USB 宿主接口初始化失败：无法获取 Android Context");
 		if (detail)
 			*detail = line;
 		blog(LOG_WARNING, "OBSAndroidUsb[Android]: %s", line.toUtf8().constData());
@@ -163,7 +163,7 @@ bool obsAndroidUsbRegisterBus(QString *detail)
 				     .arg(lines.isEmpty() ? QStringLiteral("") : QStringLiteral("：") + lines.join(QStringLiteral("，")));
 	if (detail)
 		*detail = line;
-	blog(n < 0 ? LOG_WARNING : LOG_INFO, "OBSAndroidUsb[Android]: %s", line.toUtf8().constData());
+	blog(n < 0 ? LOG_WARNING : LOG_INFO, "OBSAndroidUsb: %s", line.toUtf8().constData());
 	return true;
 }
 

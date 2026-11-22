@@ -72,7 +72,7 @@ bool obsAndroidKeepAliveSetRunning(bool running, const char *state, QString *det
 		std::lock_guard<std::mutex> lk(g_keepAliveMutex);
 		if (!running && !g_running) {
 			if (detail)
-				*detail = QStringLiteral("本来就没在跑，忽略 stop");
+				*detail = QStringLiteral("未在运行，跳过停止请求");
 			return true;
 		}
 		/* 3-5 看门狗每秒复核一次：状态没变就别再惊动 Java（重复 startForeground 会每秒重刷通知）。 */
@@ -81,16 +81,17 @@ bool obsAndroidKeepAliveSetRunning(bool running, const char *state, QString *det
 
 	if (repeat) {
 		if (detail)
-			*detail = QStringLiteral("已在跑(%1)，忽略重复").arg(what);
+			*detail = QStringLiteral("已在运行 (%1)，跳过重复启动").arg(what);
 		return true;
 	}
 
 	const QJniObject act = hostActivity();
 	if (!act.isValid()) {
 		if (detail)
-			*detail = QStringLiteral("拿不到 QtNative.activity() —— 前台服务没起来");
+			*detail = QStringLiteral("无法获取 QtNative.activity()，前台服务启动失败");
 		jstatus = obsAndroidKeepAliveStatus();
-		blog(LOG_WARNING, "OBSAndroidKeepAlive[Android]: %s", jstatus.toUtf8().constData());
+		blog(LOG_WARNING, "OBSAndroidKeepAlive: 无法获取 Activity，当前状态: %s",
+		     jstatus.toUtf8().constData());
 		return false;
 	}
 
@@ -116,14 +117,14 @@ bool obsAndroidKeepAliveSetRunning(bool running, const char *state, QString *det
 	}
 
 	jstatus = obsAndroidKeepAliveStatus();
-	const QString verb = running ? QStringLiteral("起前台服务(%1)").arg(what) : QStringLiteral("停前台服务");
-	const QString line = QStringLiteral("%1 %2：%3")
+	const QString verb = running ? QStringLiteral("启动前台服务(%1)").arg(what) : QStringLiteral("停止前台服务");
+	const QString line = QStringLiteral("%1%2：%3")
 				     .arg(verb)
 				     .arg(ok ? QStringLiteral("成功") : QStringLiteral("失败"))
 				     .arg(jstatus);
 	if (detail)
 		*detail = line;
-	blog(ok ? LOG_INFO : LOG_WARNING, "OBSAndroidKeepAlive[Android]: %s", line.toUtf8().constData());
+	blog(ok ? LOG_INFO : LOG_WARNING, "OBSAndroidKeepAlive: %s", line.toUtf8().constData());
 	return ok;
 }
 
@@ -134,7 +135,7 @@ QString obsAndroidKeepAliveStatus()
 		return desc;
 	/* describe() 调不到（类没进 APK / 静态方法没搜到）时至少把 native 侧的意图报出来，
 	 * 与"服务在跑但 describe 返回空"是两回事。 */
-	return QStringLiteral("describe 空；native 侧期望 running=%1").arg(g_running);
+	return QStringLiteral("Java 状态不可用（describe 返回空，native 期望状态 running=%1）").arg(g_running);
 }
 
 #endif // __ANDROID__

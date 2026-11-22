@@ -167,7 +167,7 @@ UncleanLaunchAction handleUncleanShutdown(bool enableCrashUpload)
 	   返回（launchAction 默认 useSafeMode=false、sendCrashReport=false）。
 	   注：早期理由里还有一句"阶段 4 前无插件可禁用、safe mode 无意义"，那条已随白名单推进失效 ——
 	   留着这分支靠的是上面那条平台事实，不是阶段进度。 */
-	blog(LOG_WARNING, "Android: unclean-shutdown marker is meaningless; launching normally");
+	blog(LOG_INFO, "Android: ignoring unclean-shutdown marker (expected with system process lifecycle); launching normally");
 	Q_UNUSED(enableCrashUpload);
 #else
 	QMessageBox crashWarning;
@@ -1692,8 +1692,8 @@ protected:
 			backEaten = true;
 			QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
 			QApplication::sendEvent(top, &esc);
-			obsAndroidDisplayLog("BACK→Escape：%s（模态=%d 送出后 accepted=%d）", top->metaObject()->className(),
-					     (int)top->isModal(), (int)esc.isAccepted());
+			blog(LOG_DEBUG, "AndroidInputFilter: Back 键转换为 Escape 发送至 %s（modal=%d，accepted=%d）",
+			     top->metaObject()->className(), (int)top->isModal(), (int)esc.isAccepted());
 			return true;
 		}
 		case QEvent::KeyRelease:
@@ -1703,14 +1703,6 @@ protected:
 				return true;
 			}
 			break;
-		/* ===== P-8 探针（先量再修）：组合框弹层在合成触摸下打不开 ==================================
-		 * 要分开的两种长相，在截图上是同一张脸（都是"两秒后屏上没有弹层"）：
-		 *   A 从未 Show ⇒ `QComboBox::mousePressEvent` 里那条 `d->popup()` 根本没跑到（事件没进来 / 被手势
-		 *     判走 / 落点不是那个控件）；
-		 *   B Show 了又立刻 Hide ⇒ 弹层立起来又被打死，看 Hide 隔了多少毫秒、松手落在谁身上。
-		 * 四行各管一环：P8-PRESS（按下落到谁、是不是 QComboBox）、P8-G（有没有被判成 TapAndHold 手势）、
-		 * P8-W（顶层窗 Show/Hide/Close/Expose 与几何）、P8-REL（松手时谁是 activePopupWidget）。
-		 * 前缀一律 ASCII —— 设备端 grep 中文不可靠（仪器账第 7 次）。 */
 		case QEvent::Show:
 		case QEvent::Hide:
 		case QEvent::Close:
@@ -1827,9 +1819,10 @@ protected:
 				QMouseEvent *re = static_cast<QMouseEvent *>(ev);
 				QWidget *rp = static_cast<QWidget *>(watched);
 				QWidget *pop = qApp->activePopupWidget();
-				obsAndroidDisplayLog("P8-REL cls=%s at=(%d,%d) actPopup=%s eaten=%d", rp->metaObject()->className(),
-							     re->globalPosition().toPoint().x(), re->globalPosition().toPoint().y(),
-							     pop ? pop->metaObject()->className() : "none", int(comboPress != nullptr));
+				blog(LOG_DEBUG, "AndroidInputFilter: mouseRelease cls=%s at=(%d,%d) activePopup=%s consumed=%d",
+				     rp->metaObject()->className(), re->globalPosition().toPoint().x(),
+				     re->globalPosition().toPoint().y(), pop ? pop->metaObject()->className() : "none",
+				     int(comboPress != nullptr));
 			}
 			/* P-8 修法 v3（接上面 press 分支）：这发松手如果正好是"刚落在组合框上的那次按下"的尾巴、
 			 * 而此刻弹层确实立着，就把它吃掉 —— Qt 那条"松手落在弹层外 ⇒ hidePopup"收不到事件，弹层留住。
@@ -1909,25 +1902,22 @@ private:
 		 *   `.qoder/longpress-hit-probe.sh` 与 `menupos-probe.sh` 的正则都吃这个前缀。 */
 		const QRect wGeo = w->geometry();
 		const QWidget *wWin = w->window();
-		obsAndroidDisplayLog("3-4 长按→右键：%s@(%d,%d) → %s %s〔w「%s」%dx%d+%d+%d 顶层=%d 属于「%s」〕",
-				     w->metaObject()->className(), pressGlobal.x(), pressGlobal.y(),
-				     menu->metaObject()->className(),
-				     menu == w ? "（未找到菜单策略祖先，投给事件原点）" : "",
-				     qUtf8Printable(w->objectName()), wGeo.width(), wGeo.height(), wGeo.x(),
-				     wGeo.y(), int(w->isWindow()), qUtf8Printable(wWin ? wWin->objectName() : QString()));
+		blog(LOG_DEBUG,
+		     "AndroidInputFilter: 长按菜单目标 %s@(%d,%d) -> %s%s [obj='%s' geo=%dx%d+%d+%d isWindow=%d root='%s']",
+		     w->metaObject()->className(), pressGlobal.x(), pressGlobal.y(), menu->metaObject()->className(),
+		     menu == w ? "（回退为事件源控件）" : "", qUtf8Printable(w->objectName()), wGeo.width(),
+		     wGeo.height(), wGeo.x(), wGeo.y(), int(w->isWindow()),
+		     qUtf8Printable(wWin ? wWin->objectName() : QString()));
 
-		/* 单独一行、不动上面那个前缀：记下"向下的几何落点找到了谁、最后采用的是谁"。
-		 * 这一格是 build 80 那次改动唯一的判据来源 —— 没有它，"菜单起来了"和"菜单为什么
-		 * 起来了"在日志里是同一张脸。 */
-		const QString hitDesc = hit ? QStringLiteral("「%1」%2").arg(hit->objectName(),
+		const QString hitDesc = hit ? QStringLiteral("'%1' %2").arg(hit->objectName(),
 									     QString::fromUtf8(
 										     hit->metaObject()->className()))
-					    : QStringLiteral("空");
+					    : QStringLiteral("none");
 		const QByteArray hitUtf8 = hitDesc.toUtf8();
 		const QByteArray tailUtf8 =
-			(menu == w ? QStringLiteral("（落点也没找到策略持有者）") : QString()).toUtf8();
-		obsAndroidDisplayLog("3-4 长按→下钻：childAt=%s 采用=「%s」%s", hitUtf8.constData(),
-				     qUtf8Printable(menu->objectName()), tailUtf8.constData());
+			(menu == w ? QStringLiteral("（未匹配到上下文菜单策略持有者）") : QString()).toUtf8();
+		blog(LOG_DEBUG, "AndroidInputFilter: 长按命中 childAt=%s，采用='%s'%s", hitUtf8.constData(),
+		     qUtf8Printable(menu->objectName()), tailUtf8.constData());
 
 		/* 坐标系：QAbstractScrollArea 那一类（SourceTree/SceneTree 都是）的
 		 * `customContextMenuRequested` 按 Qt 文档给的是 **viewport 系**坐标 —— OBS 的 handler 里
@@ -1938,50 +1928,31 @@ private:
 			coordBase = scroll->viewport();
 		const QPoint local = coordBase->mapFromGlobal(pressGlobal);
 		QContextMenuEvent ce(QContextMenuEvent::Mouse, local, pressGlobal);
-		/* 分岔口不是 isAccepted()：QContextMenuEvent 造出来就是 accepted 的，CustomContextMenu
-		 * 那条分支也只是 emit 一下就 return，谁都没碰过这个标志位 —— 20:36 那句"已受理"是假信号。
-		 * 真正的判据是**耗时**：OBS 的 CreateSourcePopupMenu 结尾是阻塞的 popup.exec()，菜单只要
-		 * 立起来，sendEvent 就要待到菜单关掉才返回（手指抬起时）；同毫秒返回 = 菜单压根没弹。 */
 		QElapsedTimer held;
 		held.start();
 		QApplication::sendEvent(menu, &ce);
 		const long long spent = (long long)held.elapsed();
-		obsAndroidDisplayLog("3-4 长按→右键：sendEvent 返回 用时=%lldms 弹出菜单=%s", spent,
-				     qApp->activePopupWidget() ? "在场" : "已关");
+		blog(LOG_DEBUG, "AndroidInputFilter: QContextMenuEvent 返回耗时=%lldms，活动弹出菜单=%s", spent,
+		     qApp->activePopupWidget() ? "存在" : "无");
 
 		if (spent > 0)
 			return true; // 阻塞过 = 菜单真的立起来过
-		/* 0ms 返回就补一发直发 —— 20:45 实测过：sendEvent 到 SourceTree/SceneTree 这类
-		 * CustomContextMenu 控件，Android 上**不会**走到 OBSBasic 的 handler（0ms 返回、无菜单），
-		 * 而 `invokeMethod("customContextMenuRequested")` 一发就中（菜单 33 项，藏面正常）。
-		 * sendEvent 还是留着先走一遍：contextMenuEvent 覆写型控件（如 VolumeControl）只认事件不认信号。 */
 		{
-			obsAndroidDisplayLog("3-4 长按→右键：0ms 返回 → 直发 customContextMenuRequested(%d,%d)",
-					     local.x(), local.y());
-			/* 判据不能是 invokeMethod 的返回值：`customContextMenuRequested` 是 **QWidget**
-			 * 自己声明的信号，任何 widget 上都"存在"，invokeMethod 恒返回 true —— 18:58 实测
-			 * 那条 !ok 分支永远进不去，投影仪长按什么也没弹。
-			 * 换成和上面同一把尺子：**耗时**。OBS 的 handler 结尾是阻塞的 popup.exec()，菜单
-			 * 立起来 invokeMethod 就要等菜单关掉才返回；0ms = 信号发了但没人接。 */
+			blog(LOG_DEBUG, "AndroidInputFilter: 事件未打开菜单，触发 customContextMenuRequested(%d,%d)",
+			     local.x(), local.y());
 			QElapsedTimer held2;
 			held2.start();
 			const bool ok = QMetaObject::invokeMethod(menu, "customContextMenuRequested",
 								  Q_ARG(QPoint, local));
 			const long long spent2 = (long long)held2.elapsed();
 			if (ok && spent2 > 0) {
-				obsAndroidDisplayLog("3-4 长按→右键：直发已处理 用时=%lldms（菜单弹过又关了）", spent2);
+				blog(LOG_DEBUG, "AndroidInputFilter: customContextMenuRequested 已处理（耗时=%lldms）",
+				     spent2);
 				return true;
 			}
-			obsAndroidDisplayLog("3-4 长按→右键：直发无人接（ok=%d 用时=%lldms）→ 补发右键到 %s",
-					     ok, spent2, w->metaObject()->className());
-			/* 还有一格：既不吃 QContextMenuEvent、直发信号又没人接的控件 —— `OBSProjector`
-			 * 就是（它的右键菜单写在 mousePressEvent 的 RightButton 分支里，结尾同样是
-			 * 阻塞的 popup.exec()）。Android 上顶层窗没有标题栏、KEYCODE_BACK 又实测关不掉
-			 * 任何顶层窗 ⇒ 长按弹那个含"关闭"的菜单是投影仪**唯一**能触摸关掉它的入口。 */
-			/* 补发右键。注意别指望把光标挪到手指处：19:03 实测 Android 上
-			 * `QCursor::setPos()` 是空操作（setPos(533,333) 之后 pos() 仍返回上一次 tap 的
-			 * 377,279），而菜单定位读的就是 pos() —— 所以修在菜单那一头
-			 * （OBSProjector::mousePressEvent 改用 event->globalPosition()）。 */
+			blog(LOG_DEBUG,
+			     "AndroidInputFilter: customContextMenuRequested 未触发菜单（ok=%d，耗时=%lldms），尝试发送右键事件至 %s",
+			     ok, spent2, w->metaObject()->className());
 			QElapsedTimer held3;
 			held3.start();
 			QMouseEvent press(QEvent::MouseButtonPress, QPointF(local), QPointF(pressGlobal),
@@ -1991,7 +1962,7 @@ private:
 					    Qt::RightButton, Qt::NoButton, Qt::NoModifier);
 			QApplication::sendEvent(w, &release);
 			const long long spent3 = (long long)held3.elapsed();
-			obsAndroidDisplayLog("3-4 长按→右键：补发的右键菜单已关 用时=%lldms", spent3);
+			blog(LOG_DEBUG, "AndroidInputFilter: 右键菜单已关闭（耗时=%lldms）", spent3);
 			return spent3 > 0;
 		}
 	}
