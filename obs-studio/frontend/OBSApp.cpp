@@ -447,15 +447,15 @@ void OBSApp::InitUserConfigDefaults()
 	config_set_default_bool(userConfig, "BasicWindow", "ShowListboxToolbars", true);
 	config_set_default_bool(userConfig, "BasicWindow", "ShowStatusBar", true);
 	config_set_default_bool(userConfig, "BasicWindow", "ShowSourceIcons", true);
-#ifdef __ANDROID__
-	config_set_default_bool(userConfig, "BasicWindow", "ShowContextToolbars", false);
-#else
 	config_set_default_bool(userConfig, "BasicWindow", "ShowContextToolbars", true);
-#endif
 	config_set_default_bool(userConfig, "BasicWindow", "StudioModeLabels", true);
 	config_set_default_bool(userConfig, "BasicWindow", "SideDocks", true);
 
+#ifdef __ANDROID__
+	config_set_default_bool(userConfig, "BasicWindow", "VerticalVolumeControl", false);
+#else
 	config_set_default_bool(userConfig, "BasicWindow", "VerticalVolumeControl", true);
+#endif
 
 	config_set_default_bool(userConfig, "BasicWindow", "MultiviewMouseSwitch", true);
 
@@ -763,6 +763,18 @@ void OBSApp::MigrateLegacySettings(const uint32_t lastVersion)
 			hasGlobalConfigChanges = true;
 		}
 	}
+
+#ifdef __ANDROID__
+	// Older builds persisted these defaults even when the user never changed them.
+	if (!config_get_bool(userConfig, "BasicWindow", "MigratedAndroidLayoutDefaults")) {
+		if (!config_get_bool(userConfig, "BasicWindow", "ShowContextToolbars"))
+			config_remove_value(userConfig, "BasicWindow", "ShowContextToolbars");
+		if (config_get_bool(userConfig, "BasicWindow", "VerticalVolumeControl"))
+			config_remove_value(userConfig, "BasicWindow", "VerticalVolumeControl");
+		config_set_bool(userConfig, "BasicWindow", "MigratedAndroidLayoutDefaults", true);
+		hasUserConfigChanges = true;
+	}
+#endif
 
 	if (hasUserConfigChanges) {
 		userConfig.SaveSafe("tmp");

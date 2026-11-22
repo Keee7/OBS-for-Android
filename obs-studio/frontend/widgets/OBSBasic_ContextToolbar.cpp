@@ -67,10 +67,9 @@ void OBSBasic::copyActionsDynamicProperties()
 
 void OBSBasic::ClearContextBar()
 {
-	QLayoutItem *la = ui->emptySpace->layout()->itemAt(0);
-	if (la) {
-		delete la->widget();
-		ui->emptySpace->layout()->removeItem(la);
+	if (QLayoutItem *item = ui->emptySpace->layout()->takeAt(0)) {
+		delete item->widget();
+		delete item;
 	}
 }
 
