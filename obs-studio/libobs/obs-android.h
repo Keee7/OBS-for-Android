@@ -98,6 +98,8 @@ struct obs_android_audio_device {
 	/** AudioDeviceInfo.isSource()：这台能不能采集（getDevices 已按 INPUTS 过滤，
 	 *  留着是因为全双工设备会同时出现在两侧）。 */
 	bool is_source;
+	/** AudioDeviceInfo.isSink()：这台能不能作为音频监听输出。 */
+	bool is_sink;
 	/** AudioDeviceInfo.getProductName()：设备自己上报的字符串，宿主侧已滤掉分隔符 */
 	char product[OBS_ANDROID_AUDIO_PRODUCT_LEN];
 	/** 给人看的一行（类型名 + 产品名 + id），属性页直接当条目文本用 */
@@ -114,6 +116,9 @@ struct obs_android_audio_host {
 	/** RECORD_AUDIO 是否已授予。没授予时 get_devices 往往仍能返回条目但属性是空的，
 	 *  所以这条要单独问，插件才能把"没权限"和"没设备"说成两句话。 */
 	bool (*has_capture_permission)(void *param);
+
+	/** 枚举音频输出设备（AudioManager.GET_DEVICES_OUTPUTS），用于音频监听选择目标设备。 */
+	int (*get_output_devices)(void *param, struct obs_android_audio_device *out, int max);
 };
 
 /** App 启动时调用；传 NULL 可注销。 */
@@ -123,6 +128,7 @@ EXPORT void obs_android_set_audio_host(const struct obs_android_audio_host *host
 EXPORT bool obs_android_audio_ready(void);
 
 EXPORT int obs_android_audio_enum_devices(struct obs_android_audio_device *out, int max);
+EXPORT int obs_android_audio_enum_output_devices(struct obs_android_audio_device *out, int max);
 /** 总线未注册时也返回 false："问不到"不等于"有权限"，调用方先判 obs_android_audio_ready()。 */
 EXPORT bool obs_android_audio_has_permission(void);
 
@@ -346,6 +352,12 @@ extern "C" {
 #endif
 EXPORT void obs_android_set_storage_open(int (*open_document)(const char *, const char *));
 EXPORT int obs_android_storage_open(const char *uri, const char *mode);
+/* create returns true with a NULL URI for ordinary filesystem directories.
+ * Otherwise the caller owns the URI (bfree) and must publish or discard it. */
+EXPORT void obs_android_set_replay_storage(bool (*create)(const char *, const char *, char **),
+					 bool (*finish)(const char *, bool));
+EXPORT bool obs_android_create_replay_document(const char *directory, const char *name, char **uri);
+EXPORT bool obs_android_finish_replay_document(const char *uri, bool publish);
 /* Android process VM, set by the frontend before loading modules. */
 EXPORT void obs_android_set_java_vm(void *vm);
 EXPORT void *obs_android_get_java_vm(void);

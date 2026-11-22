@@ -36,8 +36,8 @@ public final class ObsAudioHost {
     /** 冒烟用的自注入广播：模拟器上造不出真的设备插拔，至少能证明 receiver 链路是通的 */
     public static final String TEST_UPDATE_ACTION = "com.obsproject.studio.AUDIO_TEST_UPDATE";
 
-    /** 快照一次最多带多少条。native 侧的缓冲同样是 16，两边不一致时以截断为准并如实报数 */
-    private static final int MAX_ENTRIES = 16;
+    /** 快照一次最多带多少条（与 native 侧 AAUDIO_MON_DEV_MAX 一致，不足由调用方截断）。 */
+    private static final int MAX_ENTRIES = 32;
 
     private static Context context;
     private static AudioManager manager;
@@ -93,8 +93,8 @@ public final class ObsAudioHost {
         /* Log every input port once: a capture card's UAC input has to appear
          * here (type 11/22, isSource=true) before AAudio can even name it. */
         Log.i(TAG, "音频宿主已安装：callback=" + callbackRegistered + " receiver=" + receiverRegistered
-                       + " 输入设备=" + inputs().length + " RECORD_AUDIO=" + hasRecordPermission()
-                       + describeInputs());
+                       + " 输入设备=" + inputs().length + " 输出设备=" + outputs().length
+                       + " RECORD_AUDIO=" + hasRecordPermission() + describeInputs());
         return true;
     }
 
@@ -145,24 +145,56 @@ public final class ObsAudioHost {
         return manager.getDevices(AudioManager.GET_DEVICES_INPUTS);
     }
 
+    /** 只取播放侧（用于音频监听设备枚举）。调用方须保证 manager 已就位。 */
+    private static AudioDeviceInfo[] outputs() {
+        return manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+    }
+
+    /** "id|type|isAvailable|product|label" 用 ';' 拼成的单串，native 侧拆开填结构体。 */
+    private static String buildSnapshot(AudioDeviceInfo[] all, boolean outputMode) {
+        StringBuilder sb = new StringBuilder();
+        int included = 0;
+        int eligible = 0;
+        for (int i = 0; i < all.length; i++) {
+            AudioDeviceInfo d = all[i];
+            if (outputMode) {
+                final int t = d.getType();
+                if (!d.isSink() || d.getId() <= 0 ||
+                    t == AudioDeviceInfo.TYPE_TELEPHONY || t == AudioDeviceInfo.TYPE_REMOTE_SUBMIX) {
+                    continue;
+                }
+            }
+            eligible++;
+            if (included >= MAX_ENTRIES)
+                continue;
+            if (sb.length() > 0)
+                sb.append(ENTRY_SEP);
+            String product = scrub(safeProductName(d));
+            boolean available = outputMode ? d.isSink() : d.isSource();
+            sb.append(d.getId()).append(FIELD_SEP).append(d.getType()).append(FIELD_SEP)
+              .append(available ? "1" : "0").append(FIELD_SEP).append(product).append(FIELD_SEP)
+              .append(scrub(labelOf(d, product, outputMode)));
+            included++;
+        }
+        if (eligible > MAX_ENTRIES) {
+            Log.w(TAG, (outputMode ? "输出设备共 " : "输入设备共 ") + eligible +
+                       " 台，快照只带前 " + MAX_ENTRIES + " 条进 native");
+        }
+        return sb.toString();
+    }
+
     /** "id|type|isSource|product|label" 用 ';' 拼成的单串，native 侧拆开填结构体。 */
     public static synchronized String snapshot() {
         if (manager == null)
             return "";
-        StringBuilder sb = new StringBuilder();
-        AudioDeviceInfo[] all = inputs();
-        for (int i = 0; i < all.length && i < MAX_ENTRIES; i++) {
-            AudioDeviceInfo d = all[i];
-            if (sb.length() > 0)
-                sb.append(ENTRY_SEP);
-            String product = scrub(safeProductName(d));
-            sb.append(d.getId()).append(FIELD_SEP).append(d.getType()).append(FIELD_SEP)
-              .append(d.isSource() ? "1" : "0").append(FIELD_SEP).append(product).append(FIELD_SEP)
-              .append(scrub(labelOf(d, product)));
-        }
-        if (all.length > MAX_ENTRIES)
-            Log.w(TAG, "输入设备共 " + all.length + " 台，快照只带前 " + MAX_ENTRIES + " 条进 native");
-        return sb.toString();
+        return buildSnapshot(inputs(), false);
+    }
+
+    /** "id|type|isSink|product|label" 用 ';' 拼成的单串，供音频监听枚举播放设备。 */
+    public static synchronized String snapshotOutputs() {
+        if (manager == null)
+            return "";
+        return buildSnapshot(outputs(), true);
     }
 
     /* --- 快照协议 ---------------------------------------------------------- */
@@ -193,14 +225,14 @@ public final class ObsAudioHost {
         }
     }
 
-    private static String labelOf(AudioDeviceInfo d, String product) {
+    private static String labelOf(AudioDeviceInfo d, String product, boolean outputMode) {
         StringBuilder sb = new StringBuilder();
         sb.append(typeName(d.getType()));
         if (!product.isEmpty())
             sb.append(' ').append(product);
         sb.append("（id=").append(d.getId()).append(", type=").append(d.getType());
-        if (!d.isSource())
-            sb.append(", 不可采集");
+        if (outputMode ? !d.isSink() : !d.isSource())
+            sb.append(outputMode ? ", 不可输出" : ", 不可采集");
         sb.append('）');
         return sb.toString();
     }
@@ -232,6 +264,7 @@ public final class ObsAudioHost {
             case 21: return "BUS";
             case 22: return "USB 耳机";
             case 23: return "助听器";
+            case 24: return "内置扬声器（安全输出）";
             case 25: return "远程混音（虚拟设备）";
             case 26: return "蓝牙 LE 耳机";
             case 27: return "蓝牙 LE 扬声器";

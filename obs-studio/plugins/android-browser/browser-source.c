@@ -2,6 +2,7 @@
 #include <obs-module.h>
 #include <obs-android.h>
 #include <graphics/graphics.h>
+#include <util/dstr.h>
 #include <util/platform.h>
 #include <util/threading.h>
 #include <pthread.h>
@@ -124,6 +125,52 @@ static const char *name(void *unused)
 	UNUSED_PARAMETER(unused);
 	return obs_module_text("BrowserSource");
 }
+static void append_file_uri(struct dstr *out, const char *path)
+{
+	dstr_copy(out, path[0] == '/' ? "file://" : "file:///");
+	for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+		const unsigned char c = *p;
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+		    c == '-' || c == '_' || c == '.' || c == '~' || c == '/') {
+			dstr_ncat(out, (const char *)&c, 1);
+		} else {
+			dstr_catf(out, "%%%02X", (unsigned int)c);
+		}
+	}
+}
+static const char *skip_ascii_whitespace(const char *s)
+{
+	while (s && (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n'))
+		s++;
+	return s;
+}
+static void resolve_target_url(bool is_local_file, const char *url, const char *local_file, struct dstr *out)
+{
+	if (is_local_file) {
+		const char *trimmed = skip_ascii_whitespace(local_file);
+		if (!trimmed || !*trimmed) {
+			dstr_copy(out, "about:blank");
+			return;
+		}
+		if (astrcmpi_n(trimmed, "content://", 10) == 0 || astrcmpi_n(trimmed, "file://", 7) == 0) {
+			dstr_copy(out, trimmed);
+			return;
+		}
+		append_file_uri(out, trimmed);
+		return;
+	}
+	const char *trimmed = skip_ascii_whitespace(url);
+	if (!trimmed || !*trimmed) {
+		dstr_copy(out, "");
+		return;
+	}
+	/* Keep file:// and content:// inaccessible unless Local file mode is enabled. */
+	if (astrcmpi_n(trimmed, "file://", 7) == 0 || astrcmpi_n(trimmed, "content://", 10) == 0) {
+		dstr_copy(out, "about:blank");
+		return;
+	}
+	dstr_copy(out, trimmed);
+}
 static void update(void *data, obs_data_t *settings)
 {
 	struct browser_source *s = data;
@@ -141,7 +188,12 @@ static void update(void *data, obs_data_t *settings)
 		fps = 1;
 	if (fps > 60)
 		fps = 60;
+	const bool is_local_file = obs_data_get_bool(settings, "is_local_file");
 	const char *url = obs_data_get_string(settings, "url");
+	const char *local_file = obs_data_get_string(settings, "local_file");
+	struct dstr effective_url = {0};
+	resolve_target_url(is_local_file, url, local_file, &effective_url);
+	const char *target_url = effective_url.array ? effective_url.array : "";
 	const char *css = obs_data_get_string(settings, "css");
 	const bool transparent = obs_data_get_bool(settings, "transparent");
 	const bool reroute = obs_data_get_bool(settings, "reroute_audio");
@@ -152,11 +204,11 @@ static void update(void *data, obs_data_t *settings)
 	 * a properties change cannot stall a frame. */
 	os_atomic_set_long(&s->alpha_mode, alpha);
 	pthread_mutex_lock(&s->mutex);
-	if (!s->url || s->width != w || s->height != h || strcmp(s->url, url) || strcmp(s->css, css) ||
+	if (!s->url || s->width != w || s->height != h || strcmp(s->url, target_url) || strcmp(s->css, css) ||
 	    s->transparent != transparent) {
 		bfree(s->url);
 		bfree(s->css);
-		s->url = bstrdup(url);
+		s->url = bstrdup(target_url);
 		s->css = bstrdup(css);
 		s->width = (uint32_t)w;
 		s->height = (uint32_t)h;
@@ -166,6 +218,7 @@ static void update(void *data, obs_data_t *settings)
 		s->retry_at = 0;
 		s->status = 0;
 	}
+	dstr_free(&effective_url);
 	if (s->reroute_audio != reroute) {
 		s->reroute_audio = reroute;
 		// Recreate the page when switching the browser's audio graph.
@@ -455,6 +508,8 @@ static void mouse_move(void *data, const struct obs_mouse_event *event, bool lea
 }
 static void defaults(obs_data_t *settings)
 {
+	obs_data_set_default_bool(settings, "is_local_file", false);
+	obs_data_set_default_string(settings, "local_file", "");
 	obs_data_set_default_string(settings, "url", "https://obsproject.com/");
 	obs_data_set_default_string(settings, "css", "");
 	obs_data_set_default_int(settings, "width", 1280);
@@ -476,6 +531,16 @@ static bool refresh(obs_properties_t *props, obs_property_t *property, void *dat
 	}
 	return false;
 }
+static bool is_local_file_modified(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+	const bool enabled = obs_data_get_bool(settings, "is_local_file");
+	obs_property_t *url = obs_properties_get(props, "url");
+	obs_property_t *local_file = obs_properties_get(props, "local_file");
+	obs_property_set_visible(url, !enabled);
+	obs_property_set_visible(local_file, enabled);
+	return true;
+}
 static obs_properties_t *properties(void *data)
 {
 	obs_properties_t *p = obs_properties_create();
@@ -487,6 +552,19 @@ static obs_properties_t *properties(void *data)
 		const char *key = status == 1 ? "StatusReceiving" : status == 2 ? "StatusRetrying" : "StatusStarting";
 		obs_properties_add_text(p, "browser_status", obs_module_text(key), OBS_TEXT_INFO);
 	}
+	obs_property_t *local = obs_properties_add_bool(p, "is_local_file", obs_module_text("LocalFile"));
+	obs_property_set_modified_callback(local, is_local_file_modified);
+
+	struct dstr filter = {0};
+	dstr_copy(&filter, obs_module_text("HTMLFileFilter"));
+	dstr_cat(&filter, " (*.html *.htm);;");
+	dstr_cat(&filter, obs_module_text("XHTMLFileFilter"));
+	dstr_cat(&filter, " (*.xhtml *.xht);;");
+	dstr_cat(&filter, obs_module_text("AllFilesFilter"));
+	dstr_cat(&filter, " (*.*)");
+	obs_properties_add_path(p, "local_file", obs_module_text("LocalFile"), OBS_PATH_FILE, filter.array, NULL);
+	dstr_free(&filter);
+
 	obs_properties_add_text(p, "url", obs_module_text("URL"), OBS_TEXT_DEFAULT);
 	obs_properties_add_int(p, "width", obs_module_text("Width"), 1, 4096, 1);
 	obs_properties_add_int(p, "height", obs_module_text("Height"), 1, 4096, 1);

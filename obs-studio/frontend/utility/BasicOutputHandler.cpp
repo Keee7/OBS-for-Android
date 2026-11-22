@@ -140,11 +140,20 @@ void OBSReplayBufferStopping(void *data, calldata_t * /* params */)
 	QMetaObject::invokeMethod(output->main, &OBSBasic::ReplayBufferStopping);
 }
 
-void OBSReplayBufferSaved(void *data, calldata_t * /* params */)
+void OBSReplayBufferSaved(void *data, calldata_t *params)
 {
 	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
-	QMetaObject::invokeMethod(output->main, &OBSBasic::ReplayBufferSaved, Qt::QueuedConnection);
+	QString path = QT_UTF8(calldata_string(params, "path"));
+	QMetaObject::invokeMethod(output->main, &OBSBasic::ReplayBufferSaved, Qt::QueuedConnection, path);
 }
+
+#ifdef __ANDROID__
+void OBSReplayBufferSaveFailed(void *data, calldata_t *)
+{
+	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
+	QMetaObject::invokeMethod(output->main, &OBSBasic::ReplayBufferSaveFailed, Qt::QueuedConnection);
+}
+#endif
 
 static void OBSStartVirtualCam(void *data, calldata_t * /* params */)
 {

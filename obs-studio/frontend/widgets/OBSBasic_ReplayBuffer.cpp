@@ -24,9 +24,6 @@
 #include <qt-wrappers.hpp>
 
 #include <QCheckBox>
-#ifdef __ANDROID__
-#include "OBSAndroidPath.hpp"
-#endif
 
 #define REPLAY_BUFFER_START "==== Replay Buffer Start ==========================================="
 #define REPLAY_BUFFER_STOP "==== Replay Buffer Stop ============================================"
@@ -93,14 +90,6 @@ void OBSBasic::StartReplayBuffer()
 		DiskSpaceMessage();
 		return;
 	}
-#ifdef __ANDROID__
-	if (obsAndroidStorageManaged(QString::fromUtf8(GetCurrentOutputPath()))) {
-		OBSMessageBox::warning(this, QTStr("Output.StartReplayFailed"),
-			QStringLiteral("此测试版暂不支持把回放缓存保存到共享文档目录，请使用普通录像。"));
-		return;
-	}
-#endif
-
 	OnEvent(OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTING);
 
 	SaveProject();
@@ -178,28 +167,35 @@ void OBSBasic::ReplayBufferSave()
 	calldata_free(&cd);
 }
 
-void OBSBasic::ReplayBufferSaved()
+void OBSBasic::ReplayBufferSaved(QString path)
 {
-	if (!outputHandler || !outputHandler->replayBuffer) {
-		return;
-	}
-	if (!outputHandler->ReplayBufferActive()) {
-		return;
+	if (path.isEmpty()) {
+		if (!outputHandler || !outputHandler->ReplayBufferActive() || !outputHandler->replayBuffer)
+			return;
+		calldata_t cd = {0};
+		proc_handler_t *ph = obs_output_get_proc_handler(outputHandler->replayBuffer);
+		proc_handler_call(ph, "get_last_replay", &cd);
+		path = QT_UTF8(calldata_string(&cd, "path"));
+		calldata_free(&cd);
+		if (path.isEmpty())
+			return;
 	}
 
-	calldata_t cd = {0};
-	proc_handler_t *ph = obs_output_get_proc_handler(outputHandler->replayBuffer);
-	proc_handler_call(ph, "get_last_replay", &cd);
-	std::string path = calldata_string(&cd, "path");
-	QString msg = QTStr("Basic.StatusBar.ReplayBufferSavedTo").arg(QT_UTF8(path.c_str()));
-	ShowStatusBarMessage(msg);
-	lastReplay = path;
-	calldata_free(&cd);
-
+	ShowStatusBarMessage(QTStr("Basic.StatusBar.ReplayBufferSavedTo").arg(path));
+	lastReplay = path.toUtf8().toStdString();
 	OnEvent(OBS_FRONTEND_EVENT_REPLAY_BUFFER_SAVED);
 
-	AutoRemux(QT_UTF8(path.c_str()));
+#ifndef __ANDROID__
+	AutoRemux(path);
+#endif
 }
+
+#ifdef __ANDROID__
+void OBSBasic::ReplayBufferSaveFailed()
+{
+	ShowStatusBarMessage(QTStr("Basic.StatusBar.ReplayBufferSaveFailed"));
+}
+#endif
 
 void OBSBasic::ReplayBufferStop(int code)
 {

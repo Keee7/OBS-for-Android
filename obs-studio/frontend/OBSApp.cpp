@@ -53,18 +53,30 @@
 #include "widgets/OBSAndroidDisplay.hpp"
 #include "widgets/OBSAndroidKeepAlive.hpp" // 前台保活服务语言同步
 #include "widgets/OBSAndroidPath.hpp" // 3-4：openUrl(本地路径) 的 Android 替代
+#include <QAbstractButton>
 #include <QAbstractScrollArea> // 3-4 触摸：长按坐标要按 viewport 系给（itemAt/exec 都吃这个系）
+#include <QAbstractSlider>
 #include <QAbstractItemView>
+#include <QAbstractSpinBox>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QScrollBar>
 #include <QScroller>
+#include <QScrollerProperties>
 #include <QScreen>
+#include <QSlider>
+#include <QTextEdit>
 #include <QComboBox> // P-8 触摸：组合框弹层探针要认出按下落在的是不是 QComboBox
 #include <QContextMenuEvent> // 3-4 触摸：长按合成右键
 #include <QGestureEvent> // P-8 探针：认出 TapAndHold 手势
 #include <QInputMethod>
 #include <QJniObject>
+#include <QMenu>
+#include <QMouseEvent>
 #include <QElapsedTimer>
 #include <QTimer>
 #include <QWindow>
+#include <memory>
 #include <android/log.h>
 // P-1 装载轨迹：APK 不是 debuggable，blog() 只进日志文件不进 logcat，实测看不看得到全靠这条。
 #define P1LOG(...) __android_log_print(ANDROID_LOG_INFO, "P1-LOAD", __VA_ARGS__)
@@ -435,7 +447,11 @@ void OBSApp::InitUserConfigDefaults()
 	config_set_default_bool(userConfig, "BasicWindow", "ShowListboxToolbars", true);
 	config_set_default_bool(userConfig, "BasicWindow", "ShowStatusBar", true);
 	config_set_default_bool(userConfig, "BasicWindow", "ShowSourceIcons", true);
+#ifdef __ANDROID__
+	config_set_default_bool(userConfig, "BasicWindow", "ShowContextToolbars", false);
+#else
 	config_set_default_bool(userConfig, "BasicWindow", "ShowContextToolbars", true);
+#endif
 	config_set_default_bool(userConfig, "BasicWindow", "StudioModeLabels", true);
 	config_set_default_bool(userConfig, "BasicWindow", "SideDocks", true);
 
@@ -1074,99 +1090,549 @@ static void clampTopLevelToScreen(QWidget *w)
 			     r.actual.width(), r.actual.height(), r.avail.width(), r.avail.height());
 }
 
-/* 给对话框里的滚动区开单指滑动（QScroller）。
+/* 为滚动区启用单指触摸滑动（QScroller + AndroidTouchScrollGuard）。
  *
- * 背景：Qt 在 Android 上把单指触摸合成成鼠标事件，而 QAbstractScrollArea 只在
- * wheelEvent 里滚动 —— 所以现在只有"双指拖"（Qt 把它合成成 QWheelEvent）能滚；
- * 单指拖在桌面语义里是框选/拖拽，不滚。这是手机上最不习惯的一点。
- *
- * 用 TouchGesture（而不是 LeftMouseButtonGesture）：
- *   TouchGesture 会给控件设 WA_AcceptTouchEvents（见 qscroller.cpp 的 grabGesture
- *   :372-373），直接吃原始触摸事件 —— 滚动时**不会先按下选中列表项**，
- *   这才是 Android 上正常的观感。
- *   LeftMouseButtonGesture 走的是合成鼠标事件，拖动会先触发一次 press，
- *   列表项被顺带选中，观感差一截。
- *
- * 代价与风险：控件接受触摸后，Qt 不再为它合成鼠标事件，**轻点是否还能选中/触发
- * 列表项必须真机验证**。若点击失灵，把这里换回 LeftMouseButtonGesture 即可
- * （它不动 WA_AcceptTouchEvents，鼠标合成照旧，代价是滚动时会误选中一次）。
- *
- * 只作用于对话框：本函数只从"非主窗"的 Show 分支里调，所以主窗口里的
- * 场景/源列表不受影响 —— 那两个有拖拽排序，单指拖必须留给拖拽。 */
+ * 不直接挂 QScroller::grabGesture(LeftMouseButtonGesture) + MousePressEventDelay：
+ *   Qt 6 内置单例 PressDelayHandler::sendingEvent 在派发单击触发的模态循环
+ *   （例如点控制按钮里的“设置”进入 OBSBasicSettings::exec()）期间全程保持 true，
+ *   会导致弹窗内的所有 QScroller 被全局 shouldEventBeIgnored() 吞掉而无法滑动。
+ *   改为仅配置 QScroller 实例，统一由 AndroidTouchScrollGuard 负责 150ms 延迟按下、
+ *   拖拽防误触、以及 QSlider 垂直/水平方向分流；同时关闭越界回弹移位。 */
+static bool canScrollAxis(const QScrollBar *bar)
+{
+	return bar && bar->maximum() > bar->minimum();
+}
+
+static bool canScrollAreaAnyDirection(const QAbstractScrollArea *area)
+{
+	return area && (canScrollAxis(area->horizontalScrollBar()) || canScrollAxis(area->verticalScrollBar()));
+}
+
+static bool isAndroidScrollTargetAllowed(const QWidget *area)
+{
+	if (!area)
+		return false;
+	if (const auto *itemView = qobject_cast<const QAbstractItemView *>(area)) {
+		// Preserve single-finger drag-and-drop reordering in lists like Scenes and Sources.
+		if (itemView->dragEnabled() && itemView->dragDropMode() != QAbstractItemView::NoDragDrop)
+			return false;
+	}
+	const QWidget *win = area->window();
+	if (!win)
+		return true;
+	const Qt::WindowFlags f = win->windowFlags();
+	if (f.testFlag(Qt::ToolTip) || win->inherits("QDockWidgetGroupWindow"))
+		return false;
+	if (f.testFlag(Qt::Popup)) {
+		const auto *combo = qobject_cast<const QComboBox *>(win->parentWidget());
+		return combo && combo->view()->window() == win;
+	}
+	return true;
+}
+
+static bool enableFlickScrollOnArea(QAbstractScrollArea *area)
+{
+	if (!isAndroidScrollTargetAllowed(area))
+		return false;
+
+	QWidget *vp = area->viewport();
+	if (!vp || QScroller::hasScroller(vp))
+		return false;
+
+	if (auto *itemView = qobject_cast<QAbstractItemView *>(area)) {
+		itemView->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+		itemView->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+	}
+
+	QScroller *scroller = QScroller::scroller(vp);
+	if (!scroller)
+		return false;
+	QScrollerProperties props = scroller->scrollerProperties();
+	props.setScrollMetric(QScrollerProperties::DragStartDistance, 0.002);
+	props.setScrollMetric(QScrollerProperties::MousePressEventDelay, 0.0);
+	props.setScrollMetric(QScrollerProperties::HorizontalOvershootPolicy, QScrollerProperties::OvershootAlwaysOff);
+	props.setScrollMetric(QScrollerProperties::VerticalOvershootPolicy, QScrollerProperties::OvershootAlwaysOff);
+	scroller->setScrollerProperties(props);
+	return true;
+}
+
 static void enableFlickScroll(QWidget *w)
 {
-	if (!w || !w->isWindow())
-		return;
-
-	/* 排除表必须和 clampTopLevelToScreen 保持一致。尤其 Popup：QComboBox 的弹层
-	 * （QComboBoxPrivateContainer）是 Qt::Popup，给它挂 TouchGesture 会改变它的
-	 * 触摸/鼠标合成行为 —— 而那正是 P-8 补丁（组合框弹层被松手打死）刚修好的链路。 */
-	const Qt::WindowFlags f = w->windowFlags();
-	if (f.testFlag(Qt::Popup) || f.testFlag(Qt::ToolTip) || w->inherits("QDockWidget") ||
-	    w->inherits("QDockWidgetGroupWindow"))
+	if (!isAndroidScrollTargetAllowed(w))
 		return;
 
 	const QList<QAbstractScrollArea *> areas = w->findChildren<QAbstractScrollArea *>();
 	int grabbed = 0;
 	int itemViews = 0;
 	for (QAbstractScrollArea *area : areas) {
-		QWidget *vp = area->viewport();
-		if (!vp || QScroller::hasScroller(vp))
-			continue; // 没有 viewport 或已经抓过，别重复挂
-
-		/* 手势模式必须按控件类型分开，实测两种都对不上是行不通的：
-		 *
-		 * QAbstractItemView（QListWidget/QTreeView…）用 TouchGesture **不生效**：
-		 * 它自己处理触摸，识别器抢不到，事件退回成"按住左键拖选"。在添加源的源列表上
-		 * 表现就是"列表不滚、手指滑过哪项就把哪项点开"——因为
-		 * OBSBasicSourceSelect 把 currentItemChanged 接到了 sourceTypeSelected，
-		 * 拖选改一次当前项，右边面板就换一次。
-		 *
-		 * 对这类控件改用 LeftMouseButtonGesture：QScroller 会抓走鼠标并消费移动事件，
-		 * 拖动变成滚动，视图收不到那些移动。代价是按下那一项仍会被选中一次
-		 * （按下先到控件），但那比"依次点开所有项"好得多。
-		 *
-		 * QScrollArea（设置页那种）继续用 TouchGesture —— 那边实测工作正常，
-		 * 而且不会出现"按下先选中"。 */
-		const bool isItemView = qobject_cast<QAbstractItemView *>(area) != nullptr;
-		QScroller::grabGesture(vp, isItemView ? QScroller::LeftMouseButtonGesture
-						      : QScroller::TouchGesture);
-		++grabbed;
-		if (isItemView)
-			++itemViews;
+		if (enableFlickScrollOnArea(area)) {
+			++grabbed;
+			if (qobject_cast<QAbstractItemView *>(area) != nullptr)
+				++itemViews;
+		}
 	}
 
-	obsAndroidDisplayLog("FLICK %s：滚动区 %d 个，本次开 %d 个（其中 item view %d 个用鼠标手势）",
-			     w->metaObject()->className(), int(areas.size()), grabbed, itemViews);
+	if (grabbed > 0) {
+		obsAndroidDisplayLog("FLICK %s：滚动区 %d 个，本次开 %d 个（其中 item view %d 个）",
+				     w->metaObject()->className(), int(areas.size()), grabbed, itemViews);
+	}
+}
+
+static void fitPopupToSafeArea(QWidget *popup, const QWidget *anchor, int paddingPx, bool clampSize)
+{
+	if (!popup || !popup->isVisible())
+		return;
+	const QWidget *ref = anchor ? anchor : popup;
+	const QScreen *scr = ref->screen() ? ref->screen()
+					   : (ref->window() ? ref->window()->screen() : QGuiApplication::primaryScreen());
+	if (!scr)
+		return;
+	QRect available = scr->availableGeometry();
+	const QWindow *host = nullptr;
+	if (anchor && anchor->window())
+		host = anchor->window()->windowHandle();
+	else if (popup->windowHandle() && popup->windowHandle()->transientParent())
+		host = popup->windowHandle()->transientParent();
+	else if (QWidget *active = QApplication::activeWindow())
+		host = active->windowHandle();
+	if (host) {
+		// Dialogs and menus can open near screen edges or in narrow multi-window bounds.
+		while (host->transientParent()) {
+			host = host->transientParent();
+		}
+		const QMargins safe = obsAndroidWindowSafeMargins(host, scr);
+		available = available.intersected(host->geometry().marginsRemoved(safe));
+	} else {
+		const QMargins safe = obsAndroidWindowSafeMargins(nullptr, scr);
+		available = available.marginsRemoved(safe);
+	}
+	if (paddingPx > 0)
+		available = available.marginsRemoved(QMargins(paddingPx, paddingPx, paddingPx, paddingPx));
+	if (available.isEmpty())
+		return;
+
+	QRect geometry = popup->geometry();
+	if (clampSize)
+		geometry.setSize(geometry.size().boundedTo(available.size()));
+	if (geometry.width() <= available.width()) {
+		geometry.moveLeft(qBound(available.left(), geometry.left(), available.right() - geometry.width() + 1));
+	} else {
+		geometry.moveLeft(available.left());
+	}
+	if (geometry.height() <= available.height()) {
+		geometry.moveTop(qBound(available.top(), geometry.top(), available.bottom() - geometry.height() + 1));
+	} else {
+		geometry.moveTop(available.top());
+	}
+	if (geometry != popup->geometry())
+		popup->setGeometry(geometry);
 }
 
 static void fitComboBoxPopup(QWidget *popup, const QComboBox *combo)
 {
-	QRect available = combo->screen()->availableGeometry();
-	const QWindow *host = combo->window()->windowHandle();
-	if (host) {
-		// Dialogs can open popups outside their own bounds, but the activity
-		// may be narrower than the display in split-screen or floating mode.
-		while (host->transientParent()) {
-			host = host->transientParent();
-		}
-		available = available.intersected(host->geometry().marginsRemoved(host->safeAreaMargins()));
-	}
-	const QMargins padding(8, 8, 8, 8);
-	available = available.marginsRemoved(padding);
-	if (available.isEmpty() || available.contains(popup->geometry())) {
-		return;
-	}
-
-	QRect geometry = popup->geometry();
-	geometry.setSize(geometry.size().boundedTo(available.size()));
-	geometry.moveLeft(qBound(available.left(), geometry.left(), available.right() - geometry.width() + 1));
-	geometry.moveTop(qBound(available.top(), geometry.top(), available.bottom() - geometry.height() + 1));
-	popup->setGeometry(geometry);
+	fitPopupToSafeArea(popup, combo, 8, true);
 
 	QAbstractItemView *view = combo->view();
+	enableFlickScrollOnArea(view);
 	view->scrollTo(view->currentIndex());
 }
+
+class AndroidTouchScrollGuard : public QObject {
+public:
+	static AndroidTouchScrollGuard *&globalSlot()
+	{
+		static AndroidTouchScrollGuard *guard = nullptr;
+		return guard;
+	}
+
+	static AndroidTouchScrollGuard *current() { return globalSlot(); }
+
+	bool isCancelRelease(const QEvent *e) const
+	{
+		return cancelingScroll && e && e->type() == QEvent::MouseButtonRelease;
+	}
+
+	explicit AndroidTouchScrollGuard(QObject *parent) : QObject(parent)
+	{
+		monotonicClock.start();
+		holdTimer.setSingleShot(true);
+		connect(&holdTimer, &QTimer::timeout, this, [this] {
+			if (pendingTarget && qApp)
+				promotePendingToWidget(static_cast<QApplication *>(qApp));
+		});
+	}
+
+	~AndroidTouchScrollGuard() override
+	{
+		if (globalSlot() == this)
+			globalSlot() = nullptr;
+	}
+
+	bool beforeNotify(QApplication *app, QObject *receiver, QEvent *e, bool &outResult)
+	{
+		if (replayingEvent == e)
+			return false;
+
+		const QEvent::Type type = e->type();
+		if (type == QEvent::ApplicationStateChange) {
+			if (QGuiApplication::applicationState() != Qt::ApplicationActive)
+				reset();
+			return false;
+		}
+		if (type == QEvent::WindowDeactivate) {
+			QWidget *trackedWin = activeWindow();
+			if (trackedWin && receiver == trackedWin)
+				reset();
+			return false;
+		}
+		if (type != QEvent::MouseButtonPress && type != QEvent::MouseButtonDblClick &&
+		    type != QEvent::MouseMove && type != QEvent::MouseButtonRelease)
+			return false;
+
+		auto *me = static_cast<QMouseEvent *>(e);
+
+		if (type == QEvent::MouseButtonPress || type == QEvent::MouseButtonDblClick)
+			return handlePress(me, receiver, outResult);
+		if (type == QEvent::MouseMove)
+			return handleMove(app, me, outResult);
+		return handleRelease(app, receiver, me, outResult);
+	}
+
+	void afterNotify(QEvent *e)
+	{
+		if (replayingEvent == e)
+			return;
+		if (e->type() == QEvent::MouseButtonRelease) {
+			activeHoldTarget.clear();
+			postHoldTarget.clear();
+			postHoldArea.clear();
+			postHoldViewport.clear();
+		}
+	}
+
+private:
+	static constexpr int HOLD_DELAY_MS = 150;
+	static constexpr int AXIS_SLOP_LOGICAL_PX = 10;
+	static constexpr int POST_HOLD_SLOP_LOGICAL_PX = 18;
+
+	template<typename T> struct ScopedAssign {
+		T &slot;
+		T prev;
+		explicit ScopedAssign(T &s, T v) : slot(s), prev(s) { slot = v; }
+		~ScopedAssign() { slot = prev; }
+	};
+
+	QWidget *activeWindow() const
+	{
+		QWidget *w = pendingTarget
+				     ? pendingTarget.data()
+				     : (postHoldTarget ? postHoldTarget.data()
+						       : (activeHoldTarget ? activeHoldTarget.data()
+									   : scrollerTarget.data()));
+		return w ? w->window() : nullptr;
+	}
+
+	static QWidget *findScrollTarget(QWidget *leaf, QAbstractScrollArea **outArea)
+	{
+		if (outArea)
+			*outArea = nullptr;
+		if (!leaf)
+			return nullptr;
+		if (QWidget *pop = QApplication::activePopupWidget(); pop && !pop->isAncestorOf(leaf) && pop != leaf)
+			return nullptr;
+		for (QWidget *cur = leaf; cur; cur = cur->isWindow() ? nullptr : cur->parentWidget()) {
+			auto *area = qobject_cast<QAbstractScrollArea *>(cur->parentWidget());
+			if (!area || area->viewport() != cur)
+				continue;
+			if (!isAndroidScrollTargetAllowed(area))
+				return nullptr;
+			if (QScroller::hasScroller(cur) && canScrollAreaAnyDirection(area)) {
+				if (outArea)
+					*outArea = area;
+				return cur;
+			}
+		}
+		return nullptr;
+	}
+
+	static bool canHoldTransitionToScroll(const QWidget *target, const QAbstractScrollArea *area)
+	{
+		if (!target || qobject_cast<const QAbstractItemView *>(area))
+			return false;
+		return !qobject_cast<const QSlider *>(target) && !qobject_cast<const QComboBox *>(target) &&
+		       !qobject_cast<const QAbstractSpinBox *>(target) && !qobject_cast<const QLineEdit *>(target) &&
+		       !qobject_cast<const QTextEdit *>(target) && !qobject_cast<const QPlainTextEdit *>(target);
+	}
+
+	static std::unique_ptr<QMouseEvent> cloneMouseEvent(const QMouseEvent *me)
+	{
+		return std::unique_ptr<QMouseEvent>(static_cast<QMouseEvent *>(me->clone()));
+	}
+
+	void dispatchReplayedEvent(QApplication *app, QWidget *target, QEvent *ev)
+	{
+		ScopedAssign<QEvent *> scope(replayingEvent, ev);
+		app->QApplication::notify(target, ev);
+	}
+
+	void clearPending()
+	{
+		holdTimer.stop();
+		heldPress.reset();
+		pendingTarget.clear();
+		pendingSlider.clear();
+		pendingArea.clear();
+		pendingViewport.clear();
+	}
+
+	bool handlePress(const QMouseEvent *me, QObject *receiver, bool &outResult)
+	{
+		if (me->button() != Qt::LeftButton)
+			return false;
+		reset();
+
+		auto *widget = qobject_cast<QWidget *>(receiver);
+		if (!widget)
+			return false;
+
+		QAbstractScrollArea *area = nullptr;
+		QWidget *vp = findScrollTarget(widget, &area);
+		if (!area || !vp)
+			return false;
+
+		QScroller *scroller = QScroller::scroller(vp);
+		if (scroller->state() != QScroller::Inactive) {
+			const bool consumed = scroller->handleInput(QScroller::InputPress,
+								    vp->mapFromGlobal(me->globalPosition()),
+								    monotonicClock.elapsed());
+			if (consumed && scroller->state() != QScroller::Inactive) {
+				scrollerTarget = vp;
+				outResult = true;
+				return true;
+			}
+			if (scroller->state() != QScroller::Inactive)
+				scroller->stop();
+		}
+
+		if (auto *slider = qobject_cast<QSlider *>(widget); slider && slider->isEnabled()) {
+			const bool canScrollPerp =
+				(slider->orientation() == Qt::Horizontal)
+					? canScrollAxis(area->verticalScrollBar())
+					: canScrollAxis(area->horizontalScrollBar());
+			if (!canScrollPerp) {
+				activeHoldTarget = slider;
+				return false;
+			}
+			pendingSlider = slider;
+		}
+
+		pendingTarget = widget;
+		pendingArea = area;
+		pendingViewport = vp;
+		pressGlobal = me->globalPosition().toPoint();
+		pressGlobalF = me->globalPosition();
+		pressElapsedMs = monotonicClock.elapsed();
+		heldPress = cloneMouseEvent(me);
+		holdTimer.start(HOLD_DELAY_MS);
+		outResult = true;
+		return true;
+	}
+
+	bool handleMove(QApplication *app, const QMouseEvent *me, bool &outResult)
+	{
+		if (activeHoldTarget)
+			return false;
+		if (scrollerTarget) {
+			QScroller::scroller(scrollerTarget)
+				->handleInput(QScroller::InputMove,
+					      scrollerTarget->mapFromGlobal(me->globalPosition()),
+					      monotonicClock.elapsed());
+			outResult = true;
+			return true;
+		}
+		if (pendingTarget) {
+			if (!pendingViewport || !heldPress) {
+				reset();
+				return false;
+			}
+			const QPoint delta = me->globalPosition().toPoint() - pressGlobal;
+			const int dx = qAbs(delta.x());
+			const int dy = qAbs(delta.y());
+			if (dx + dy < AXIS_SLOP_LOGICAL_PX) {
+				outResult = true;
+				return true;
+			}
+			if (pendingSlider && pendingSlider->isEnabled()) {
+				const bool alongSlider =
+					(pendingSlider->orientation() == Qt::Horizontal) ? (dx >= dy) : (dy >= dx);
+				if (alongSlider) {
+					promotePendingToWidget(app);
+					return false;
+				}
+			}
+			if (!promotePendingToScroller(me)) {
+				promotePendingToWidget(app);
+				return false;
+			}
+			outResult = true;
+			return true;
+		}
+		if (postHoldTarget) {
+			if (!postHoldViewport || !postHoldArea || QApplication::activePopupWidget()) {
+				postHoldTarget.clear();
+				postHoldArea.clear();
+				postHoldViewport.clear();
+				return false;
+			}
+			const QPoint delta = me->globalPosition().toPoint() - pressGlobal;
+			if (qAbs(delta.x()) + qAbs(delta.y()) < POST_HOLD_SLOP_LOGICAL_PX)
+				return false;
+			if (promotePostHoldToScroller(app, me)) {
+				outResult = true;
+				return true;
+			}
+			return false;
+		}
+		return false;
+	}
+
+	bool handleRelease(QApplication *app, QObject *receiver, const QMouseEvent *me, bool &outResult)
+	{
+		if (scrollerTarget) {
+			QPointer<QWidget> vp = scrollerTarget;
+			scrollerTarget.clear();
+			if (vp) {
+				QScroller::scroller(vp)->handleInput(QScroller::InputRelease,
+								     vp->mapFromGlobal(me->globalPosition()),
+								     monotonicClock.elapsed());
+			}
+			outResult = true;
+			return true;
+		}
+		if (pendingTarget) {
+			QPointer<QWidget> target = pendingTarget;
+			QPointer<QObject> recGuard(receiver);
+			auto press = std::move(heldPress);
+			clearPending();
+			if (target && press)
+				dispatchReplayedEvent(app, target, press.get());
+			if (!recGuard) {
+				outResult = true;
+				return true;
+			}
+			return false;
+		}
+		return false;
+	}
+
+	void promotePendingToWidget(QApplication *app)
+	{
+		QPointer<QWidget> target = pendingTarget;
+		QPointer<QAbstractScrollArea> area = pendingArea;
+		QPointer<QWidget> vp = pendingViewport;
+		auto press = std::move(heldPress);
+		clearPending();
+		if (!target)
+			return;
+		if (canHoldTransitionToScroll(target, area) && vp) {
+			postHoldTarget = target;
+			postHoldArea = area;
+			postHoldViewport = vp;
+		} else {
+			activeHoldTarget = target;
+		}
+		if (press)
+			dispatchReplayedEvent(app, target, press.get());
+	}
+
+	bool startScrollerDrag(QWidget *vp, QAbstractSlider *slider, const QPointF &moveGlobalPos)
+	{
+		if (!vp)
+			return false;
+		if (!slider) {
+			if (QWidget *child = vp->childAt(vp->mapFromGlobal(pressGlobalF.toPoint()))) {
+				if (!qobject_cast<QScrollBar *>(child))
+					slider = qobject_cast<QAbstractSlider *>(child);
+			}
+		}
+		QScroller *scroller = QScroller::scroller(vp);
+		QPointer<QAbstractSlider> sliderGuard(slider);
+		const bool wasTransparent = slider && slider->testAttribute(Qt::WA_TransparentForMouseEvents);
+		// QAbstractScrollAreaPrivate::canStartScrollingAt rejects ScrollPrepare over a QAbstractSlider.
+		if (slider && !wasTransparent)
+			slider->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+		scroller->handleInput(QScroller::InputPress, vp->mapFromGlobal(pressGlobalF), pressElapsedMs);
+		if (sliderGuard && !wasTransparent)
+			sliderGuard->setAttribute(Qt::WA_TransparentForMouseEvents, false);
+		if (scroller->state() == QScroller::Inactive)
+			return false;
+		scrollerTarget = vp;
+		scroller->handleInput(QScroller::InputMove, vp->mapFromGlobal(moveGlobalPos),
+				      monotonicClock.elapsed());
+		return true;
+	}
+
+	bool promotePendingToScroller(const QMouseEvent *moveEvent)
+	{
+		if (!startScrollerDrag(pendingViewport, pendingSlider, moveEvent->globalPosition()))
+			return false;
+		clearPending();
+		return true;
+	}
+
+	bool promotePostHoldToScroller(QApplication *app, const QMouseEvent *moveEvent)
+	{
+		QPointer<QWidget> target = postHoldTarget;
+		QPointer<QWidget> vp = postHoldViewport;
+		postHoldTarget.clear();
+		postHoldArea.clear();
+		postHoldViewport.clear();
+		if (target) {
+			// Cancel button highlight and long-press timer without triggering clicked() or context menus.
+			const QPointF farAway(-1e6, -1e6);
+			QMouseEvent cancelRelease(QEvent::MouseButtonRelease, farAway, farAway, farAway, Qt::LeftButton,
+						  Qt::NoButton, moveEvent->modifiers(), moveEvent->source(),
+						  moveEvent->pointingDevice());
+			cancelRelease.setTimestamp(moveEvent->timestamp());
+			ScopedAssign<bool> cancelScope(cancelingScroll, true);
+			dispatchReplayedEvent(app, target, &cancelRelease);
+		}
+		return startScrollerDrag(vp, nullptr, moveEvent->globalPosition());
+	}
+
+	void reset()
+	{
+		clearPending();
+		activeHoldTarget.clear();
+		postHoldTarget.clear();
+		postHoldArea.clear();
+		postHoldViewport.clear();
+		if (scrollerTarget) {
+			QScroller *scroller = QScroller::scroller(scrollerTarget);
+			if (scroller && scroller->state() == QScroller::Dragging)
+				scroller->stop();
+		}
+		scrollerTarget.clear();
+	}
+
+	QTimer holdTimer;
+	QElapsedTimer monotonicClock;
+	QPointer<QWidget> pendingTarget;
+	QPointer<QSlider> pendingSlider;
+	QPointer<QAbstractScrollArea> pendingArea;
+	QPointer<QWidget> pendingViewport;
+	QPointer<QWidget> activeHoldTarget;
+	QPointer<QWidget> postHoldTarget;
+	QPointer<QAbstractScrollArea> postHoldArea;
+	QPointer<QWidget> postHoldViewport;
+	QPointer<QWidget> scrollerTarget;
+	QPoint pressGlobal;
+	QPointF pressGlobalF;
+	qint64 pressElapsedMs = 0;
+	std::unique_ptr<QMouseEvent> heldPress;
+	QEvent *replayingEvent = nullptr;
+	bool cancelingScroll = false;
+};
 
 class AndroidInputFilter : public QObject {
 public:
@@ -1237,10 +1703,21 @@ protected:
 		case QEvent::Hide:
 		case QEvent::Close:
 		case QEvent::Expose: {
+			if (ev->type() == QEvent::Show) {
+				if (auto *area = qobject_cast<QAbstractScrollArea *>(watched)) {
+					QTimer::singleShot(0, area, [area] { enableFlickScrollOnArea(area); });
+				}
+			}
 			QWidget *pw = static_cast<QWidget *>(watched);
-			/* 主窗不进这条：它的 Expose 每轮都来，会把上面几行淹掉。 */
-			if (!pw->isWindow() || pw == static_cast<OBSApp *>(qApp)->GetMainWindow())
+			if (!pw->isWindow())
 				break;
+			/* 主窗不打 P8-W/CLAMP 日志：它的 Expose 每轮都来；但 Show 时要给它挂单指滑动。 */
+			if (pw == static_cast<OBSApp *>(qApp)->GetMainWindow()) {
+				if (ev->type() == QEvent::Show) {
+					QTimer::singleShot(0, pw, [pw] { enableFlickScroll(pw); });
+				}
+				break;
+			}
 			const Qt::WindowFlags flags = pw->windowFlags();
 			const QRect geo = pw->geometry();
 			const char *kind = ev->type() == QEvent::Show
@@ -1255,13 +1732,15 @@ protected:
 				int(flags.testFlag(Qt::Dialog)), int(pw->isVisible()),
 				int(qApp->activePopupWidget() == pw));
 
-			/* 等 Qt 完成布局后，约束下拉框的弹层位置，或调整普通对话框并启用滚动。 */
+			/* 等 Qt 完成布局后，约束下拉框与上下文菜单弹层位置，或调整普通对话框并启用滚动。 */
 			if (ev->type() == QEvent::Show) {
 				QTimer::singleShot(0, pw, [pw] {
 					if (pw->windowType() == Qt::Popup) {
 						const auto *combo = qobject_cast<const QComboBox *>(pw->parentWidget());
 						if (combo && pw->isVisible() && combo->view()->window() == pw) {
 							fitComboBoxPopup(pw, combo);
+						} else if (qobject_cast<QMenu *>(pw) && pw->isVisible()) {
+							fitPopupToSafeArea(pw, pw->parentWidget(), 0, false);
 						}
 						return;
 					}
@@ -1325,6 +1804,14 @@ protected:
 		case QEvent::MouseButtonRelease:
 		case QEvent::MouseButtonDblClick:
 			if (ev->type() == QEvent::MouseButtonRelease) {
+				if (auto *guard = AndroidTouchScrollGuard::current();
+				    guard && guard->isCancelRelease(ev)) {
+					timer.stop();
+					armed = false;
+					comboPress = nullptr;
+					target.clear();
+					return false;
+				}
 				QMouseEvent *re = static_cast<QMouseEvent *>(ev);
 				QWidget *rp = static_cast<QWidget *>(watched);
 				QWidget *pop = qApp->activePopupWidget();
@@ -1518,6 +2005,7 @@ OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
 	/* 装在 app 上：所有控件的鼠标**和键盘**事件都过这一道（跟着进程活，不用管析构）。
 	 * ① 3-4 长按合成右键；② build 74 返回键当 Escape 用。 */
 	installEventFilter(new AndroidInputFilter(this));
+	AndroidTouchScrollGuard::globalSlot() = new AndroidTouchScrollGuard(this);
 
 	// A Java QtWindow can host multiple QWidget editors. Mark every Qt focus
 	// change so the IME bridge never treats a different editor as a duplicate.
@@ -2117,6 +2605,12 @@ bool OBSApp::notify(QObject *receiver, QEvent *e)
 				    static_cast<void *>(QGuiApplication::focusObject()),
 				    int(QGuiApplication::inputMethod()->isVisible()));
 	}
+
+	bool touchGuardResult = false;
+	if (auto *guard = AndroidTouchScrollGuard::current();
+	    guard && !QCoreApplication::closingDown() &&
+	    guard->beforeNotify(this, receiver, e, touchGuardResult))
+		return touchGuardResult;
 #endif
 
 	if (!receiver->isWidgetType()) {
@@ -2149,7 +2643,14 @@ bool OBSApp::notify(QObject *receiver, QEvent *e)
 	}
 
 skip:
+#ifdef __ANDROID__
+	const bool notified = QApplication::notify(receiver, e);
+	if (auto *guard = AndroidTouchScrollGuard::current(); guard && !QCoreApplication::closingDown())
+		guard->afterNotify(e);
+	return notified;
+#else
 	return QApplication::notify(receiver, e);
+#endif
 }
 
 string GenerateTimeDateFilename(const char *extension, bool noSpace)

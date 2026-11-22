@@ -18,6 +18,7 @@
 #include "platform.hpp"
 
 #include <OBSApp.hpp>
+#include <widgets/OBSAndroidPath.hpp>
 
 #include <obs-config.h>
 
@@ -83,11 +84,12 @@ bool GetDataFilePath(const char *data, string &output)
 
 string GetDefaultVideoSavePath()
 {
-	/* 这个值会被写进 SimpleOutput/FilePath 的默认配置（OBSBasic.cpp:750），
-	 * 所以必须是真能写进去的目录，不能只是"语义上正确"的媒体目录。 */
-	QString path = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
-	if (!QFileInfo(path).isDir()) {
-		path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+	/* 默认放到 MediaStore 受管的公共 Movies/OBS 目录，确保设置页可见且录制可写。 */
+	QString path = obsAndroidStorageDefaultVideoDirectory();
+	if (path.isEmpty()) {
+		path = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+		if (!QFileInfo(path).isDir())
+			path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
 	}
 
 	blog(LOG_INFO, "Default video save path: %s", path.toStdString().c_str());

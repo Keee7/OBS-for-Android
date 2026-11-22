@@ -20,6 +20,10 @@
 #include "display-helpers.hpp"
 
 #include <widgets/OBSBasic.hpp>
+#ifdef __ANDROID__
+#include <widgets/OBSAndroidPath.hpp>
+#include <QFile>
+#endif
 
 #include <qt-wrappers.hpp>
 
@@ -332,8 +336,31 @@ static HRESULT SaveJxr(LPCWSTR path, uint8_t *pixels, uint32_t cx, uint32_t cy)
 
 void ScreenshotObj::muxFile()
 {
+	if (path.empty())
+		return;
 	if (half_bytes.empty()) {
-		image.save(QT_UTF8(path.c_str()));
+		bool saved = false;
+#ifdef __ANDROID__
+		if (path.rfind("content://", 0) == 0) {
+			if (FILE *file = os_fopen(path.c_str(), "wb")) {
+				QFile output;
+				const bool encoded = output.open(file, QIODevice::WriteOnly, QFileDevice::DontCloseHandle) &&
+						     image.save(&output, "PNG") && output.flush();
+				output.close();
+				saved = fclose(file) == 0 && encoded;
+			}
+			if (!saved)
+				obsAndroidStorageRemove(QT_UTF8(path.c_str()));
+		} else
+#endif
+		{
+			saved = image.save(QT_UTF8(path.c_str()));
+		}
+		if (!saved) {
+			blog(LOG_ERROR, "Failed to save screenshot to '%s'", path.c_str());
+			path.clear();
+			return;
+		}
 		blog(LOG_INFO, "Saved screenshot to '%s'", path.c_str());
 	} else {
 #ifdef _WIN32
@@ -354,7 +381,7 @@ void ScreenshotObj::onFinished()
 	}
 
 	if (outputWidth > 0 && outputHeight > 0) {
-		if (options.outputToFile) {
+		if (options.outputToFile && !path.empty()) {
 			emit imageSaved(path);
 		}
 

@@ -17,7 +17,9 @@
 
 #pragma once
 #ifdef __ANDROID__
+#include <QMargins>
 #include <QTimer>
+#include <QWindow>
 #endif
 
 #include "ui_OBSBasic.h"
@@ -504,13 +506,24 @@ public:
 private:
 	void ResizeAndroidDocks();
 	void InitAndroidResponsiveLayout();
+	void UpdateAndroidSafeAreaMargins();
+	void ConnectAndroidWindowSignals();
+	void ConnectAndroidScreenSignals(QScreen *scr);
 	void SetAndroidPhoneDockLayout(bool phone);
-	void ApplyAndroidPhoneDockOrder();
+	void ApplyAndroidPhoneDockOrder(QDockWidget *rightTab = nullptr);
+	QDockWidget *AndroidPhoneRightTab() const;
+	void ResizeAndroidPhoneDockColumns(int leftWidth, int rightWidth, int leftTopHeight, int leftBottomHeight,
+					   int rightTopHeight, int rightBottomHeight);
 	void UpdateAndroidControlColumns(bool phone);
 	void CancelAndroidDockDrag();
 	bool eventFilter(QObject *watched, QEvent *event) override;
 	QTimer *androidLayoutResizeTimer = nullptr;
 	QSize androidDockViewport;
+	QMargins androidDockMargins;
+	QPointer<QWindow> androidObservedWindow;
+	QPointer<QScreen> androidObservedScreen;
+	QMetaObject::Connection androidScreenGeoConn;
+	QMetaObject::Connection androidScreenOrientConn;
 	QByteArray androidRegularDockLayout;
 	QList<QDockWidget *> androidMainDocks;
 	QList<QDockWidget *> androidPhoneDocks;
@@ -1122,7 +1135,10 @@ public slots:
 
 	void ReplayBufferStart();
 	void ReplayBufferSave();
-	void ReplayBufferSaved();
+	void ReplayBufferSaved(QString path);
+#ifdef __ANDROID__
+	void ReplayBufferSaveFailed();
+#endif
 	void ReplayBufferStopping();
 	void ReplayBufferStop(int code);
 

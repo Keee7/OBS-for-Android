@@ -21,6 +21,10 @@
 #ifdef _WIN32
 #include "util/windows/win-version.h"
 #endif
+#ifdef __ANDROID__
+#include "../obs-outputs/mp4-mux.h"
+#include <obs-android.h>
+#endif
 
 #include <libavformat/avformat.h>
 
@@ -57,7 +61,11 @@ static inline void replay_buffer_clear(struct ffmpeg_muxer *stream)
 	stream->cur_time = 0;
 	stream->max_size = 0;
 	stream->max_time = 0;
+#ifdef __ANDROID__
+	__atomic_store_n(&stream->save_ts, 0, __ATOMIC_RELAXED);
+#else
 	stream->save_ts = 0;
+#endif
 	stream->keyframes = 0;
 }
 
@@ -571,16 +579,8 @@ static void find_best_filename(struct dstr *path, bool space)
 	}
 }
 
-static void generate_filename(struct ffmpeg_muxer *stream, struct dstr *dst, bool overwrite)
+static void prepare_output_path(struct dstr *dst, const char *dir, const char *filename)
 {
-	obs_data_t *settings = obs_output_get_settings(stream->output);
-	const char *dir = obs_data_get_string(settings, "directory");
-	const char *fmt = obs_data_get_string(settings, "format");
-	const char *ext = obs_data_get_string(settings, "extension");
-	bool space = obs_data_get_bool(settings, "allow_spaces");
-
-	char *filename = os_generate_formatted_filename(ext, space, fmt);
-
 	dstr_copy(dst, dir);
 	dstr_replace(dst, "\\", "/");
 	if (dstr_end(dst) != '/')
@@ -593,7 +593,18 @@ static void generate_filename(struct ffmpeg_muxer *stream, struct dstr *dst, boo
 		os_mkdirs(dst->array);
 		*slash = '/';
 	}
+}
 
+static void generate_filename(struct ffmpeg_muxer *stream, struct dstr *dst, bool overwrite)
+{
+	obs_data_t *settings = obs_output_get_settings(stream->output);
+	const char *dir = obs_data_get_string(settings, "directory");
+	const char *fmt = obs_data_get_string(settings, "format");
+	const char *ext = obs_data_get_string(settings, "extension");
+	bool space = obs_data_get_bool(settings, "allow_spaces");
+
+	char *filename = os_generate_formatted_filename(ext, space, fmt);
+	prepare_output_path(dst, dir, filename);
 	if (!overwrite)
 		find_best_filename(dst, space);
 
@@ -927,15 +938,26 @@ static void save_replay_proc(void *data, calldata_t *cd)
 			return;
 		}
 
-		stream->save_ts = os_gettime_ns() / 1000LL;
+		const int64_t ts = os_gettime_ns() / 1000LL;
+#ifdef __ANDROID__
+		__atomic_store_n(&stream->save_ts, ts, __ATOMIC_RELAXED);
+#else
+		stream->save_ts = ts;
+#endif
 	}
 }
 
 static void get_last_replay(void *data, calldata_t *cd)
 {
 	struct ffmpeg_muxer *stream = data;
+#ifdef __ANDROID__
+	pthread_mutex_lock(&stream->replay_path_mutex);
+	calldata_set_string(cd, "path", stream->path.array);
+	pthread_mutex_unlock(&stream->replay_path_mutex);
+#else
 	if (!os_atomic_load_bool(&stream->muxing))
 		calldata_set_string(cd, "path", stream->path.array);
+#endif
 }
 
 static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
@@ -943,13 +965,24 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 	UNUSED_PARAMETER(settings);
 	struct ffmpeg_muxer *stream = bzalloc(sizeof(*stream));
 	stream->output = output;
+#ifdef __ANDROID__
+	if (pthread_mutex_init(&stream->replay_path_mutex, NULL) != 0) {
+		bfree(stream);
+		return NULL;
+	}
+#endif
 
 	proc_handler_t *ph = obs_output_get_proc_handler(output);
 	proc_handler_add(ph, "void save()", save_replay_proc, stream);
 	proc_handler_add(ph, "void get_last_replay(out string path)", get_last_replay, stream);
 
 	signal_handler_t *sh = obs_output_get_signal_handler(output);
+#ifdef __ANDROID__
+	signal_handler_add(sh, "void saved(string path)");
+	signal_handler_add(sh, "void save_failed()");
+#else
 	signal_handler_add(sh, "void saved()");
+#endif
 	signal_handler_add(sh, "void saving(ptr output)");
 
 	return stream;
@@ -957,6 +990,14 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 
 static void replay_buffer_destroy(void *data)
 {
+#ifdef __ANDROID__
+	struct ffmpeg_muxer *stream = data;
+	if (stream->mux_thread_joinable) {
+		pthread_join(stream->mux_thread, NULL);
+		stream->mux_thread_joinable = false;
+	}
+	pthread_mutex_destroy(&stream->replay_path_mutex);
+#endif
 	ffmpeg_mux_destroy(data);
 }
 
@@ -1034,17 +1075,175 @@ static inline void replay_buffer_purge(struct ffmpeg_muxer *stream, struct encod
 		if (!stream->packets.size || stream->keyframes <= 2)
 			return;
 
-		while ((stream->cur_size + (int64_t)pkt->size) > stream->max_size)
+		while (stream->packets.size && stream->cur_size + (int64_t)pkt->size > stream->max_size)
 			purge(stream);
 	}
 
 	if (!stream->packets.size || stream->keyframes <= 2)
 		return;
 
-	while ((pkt->dts_usec - stream->cur_time) > stream->max_time)
+	while (stream->packets.size && pkt->dts_usec - stream->cur_time > stream->max_time)
 		purge(stream);
 }
 
+#ifdef __ANDROID__
+struct replay_file {
+	FILE *file;
+	bool failed;
+};
+
+static size_t replay_file_write(void *data, const void *bytes, size_t size)
+{
+	struct replay_file *out = data;
+	if (out->failed)
+		return 0;
+	const size_t written = fwrite(bytes, 1, size, out->file);
+	out->failed = written != size;
+	return written;
+}
+
+static int64_t replay_file_position(void *data)
+{
+	struct replay_file *out = data;
+	const int64_t pos = os_ftelli64(out->file);
+	out->failed |= pos < 0;
+	return pos;
+}
+
+static int64_t replay_file_seek(void *data, int64_t offset, enum serialize_seek_type type)
+{
+	struct replay_file *out = data;
+	int origin = SEEK_SET;
+	if (type == SERIALIZE_SEEK_CURRENT)
+		origin = SEEK_CUR;
+	else if (type == SERIALIZE_SEEK_END)
+		origin = SEEK_END;
+	if (os_fseeki64(out->file, offset, origin) != 0) {
+		out->failed = true;
+		return -1;
+	}
+	return replay_file_position(data);
+}
+
+static bool write_replay_file(struct ffmpeg_muxer *stream, FILE *file, enum mp4_flavor flavor)
+{
+	struct replay_file out = {.file = file};
+	struct serializer serializer = {
+		.data = &out,
+		.write = replay_file_write,
+		.seek = replay_file_seek,
+		.get_pos = replay_file_position,
+	};
+	struct mp4_mux *mux = mp4_mux_create(stream->output, &serializer, 0, flavor);
+	bool ok = true;
+	for (size_t i = 0; i < stream->mux_packets.num; i++) {
+		if (!mp4_mux_submit_packet(mux, &stream->mux_packets.array[i]) || out.failed) {
+			ok = false;
+			break;
+		}
+	}
+	if (ok)
+		ok = mp4_mux_finalise(mux);
+	mp4_mux_destroy(mux);
+	return ok && !out.failed;
+}
+
+static void replay_save_failed(struct ffmpeg_muxer *stream)
+{
+	calldata_t cd = {0};
+	signal_handler_signal(obs_output_get_signal_handler(stream->output), "save_failed", &cd);
+	calldata_free(&cd);
+}
+
+static void *replay_buffer_mux_thread(void *data)
+{
+	struct ffmpeg_muxer *stream = data;
+	obs_data_t *settings = obs_output_get_settings(stream->output);
+	const char *dir = obs_data_get_string(settings, "directory");
+	const char *format = obs_data_get_string(settings, "format");
+	const bool spaces = obs_data_get_bool(settings, "allow_spaces");
+	const bool mov = strcmp(obs_data_get_string(settings, "extension"), "mov") == 0;
+	char *filename = os_generate_formatted_filename(mov ? "mov" : "mp4", spaces, format);
+	char *uri = NULL;
+	struct dstr local_path = {0};
+	const bool destination_ready = *dir && filename && obs_android_create_replay_document(dir, filename, &uri);
+	if (destination_ready && !uri) {
+		prepare_output_path(&local_path, dir, filename);
+		find_best_filename(&local_path, spaces);
+	}
+	obs_data_release(settings);
+	bfree(filename);
+
+	const char *path = uri ? uri : local_path.array;
+	FILE *file = destination_ready ? os_fopen(path, uri ? "wb" : "wbx") : NULL;
+	bool ok = false;
+	if (file) {
+		ok = write_replay_file(stream, file, mov ? FLAVOR_MOV : FLAVOR_MP4);
+		if (fclose(file) != 0)
+			ok = false;
+		if (!uri && !ok)
+			os_unlink(path);
+	} else {
+		warn("Could not open replay destination");
+	}
+	if (uri) {
+		if (ok)
+			ok = obs_android_finish_replay_document(uri, true);
+		if (!ok && !obs_android_finish_replay_document(uri, false))
+			warn("Could not remove unfinished replay document '%s'", uri);
+	}
+
+	for (size_t i = 0; i < stream->mux_packets.num; i++)
+		obs_encoder_packet_release(&stream->mux_packets.array[i]);
+	da_free(stream->mux_packets);
+
+	if (ok) {
+		info("Wrote replay buffer to '%s'", path);
+		pthread_mutex_lock(&stream->replay_path_mutex);
+		dstr_copy(&stream->path, path);
+		pthread_mutex_unlock(&stream->replay_path_mutex);
+		calldata_t cd = {0};
+		calldata_set_string(&cd, "path", path);
+		signal_handler_signal(obs_output_get_signal_handler(stream->output), "saved", &cd);
+		calldata_free(&cd);
+	} else {
+		warn("Could not save replay");
+		replay_save_failed(stream);
+	}
+
+	dstr_free(&local_path);
+	bfree(uri);
+	os_atomic_set_bool(&stream->muxing, false);
+	return NULL;
+}
+
+static void snapshot_replay_packets(struct ffmpeg_muxer *stream)
+{
+	const size_t size = sizeof(struct encoder_packet);
+	const size_t count = stream->packets.size / size;
+	da_reserve(stream->mux_packets, count);
+
+	bool found_keyframe = false;
+	int64_t start_usec = 0;
+	/* libobs supplies interleaved packets. Rebase all tracks to a shared
+	 * start so audio keeps its position relative to the first keyframe. */
+	for (size_t i = 0; i < count; i++) {
+		struct encoder_packet *src = deque_data(&stream->packets, i * size);
+		if (!found_keyframe) {
+			if (src->type != OBS_ENCODER_VIDEO || !src->keyframe)
+				continue;
+			found_keyframe = true;
+			start_usec = src->dts_usec;
+		}
+		struct encoder_packet *pkt = da_push_back_new(stream->mux_packets);
+		obs_encoder_packet_ref(pkt, src);
+		const int64_t offset = av_rescale(start_usec, pkt->timebase_den, 1000000);
+		pkt->pts -= offset;
+		pkt->dts -= offset;
+		pkt->dts_usec -= start_usec;
+	}
+}
+#else
 static void insert_packet(mux_packets_t *packets, struct encoder_packet *packet, int64_t video_offset,
 			  int64_t *audio_offsets, int64_t video_pts_offset, int64_t *audio_dts_offsets)
 {
@@ -1121,9 +1320,18 @@ error:
 
 	return NULL;
 }
+#endif
 
 static void replay_buffer_save(struct ffmpeg_muxer *stream)
 {
+#ifdef __ANDROID__
+	snapshot_replay_packets(stream);
+	if (!stream->mux_packets.num) {
+		da_free(stream->mux_packets);
+		replay_save_failed(stream);
+		return;
+	}
+#else
 	const size_t size = sizeof(struct encoder_packet);
 	size_t num_packets = stream->packets.size / size;
 
@@ -1160,6 +1368,7 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 		insert_packet(&stream->mux_packets, pkt, video_offset, audio_offsets, video_pts_offset,
 			      audio_dts_offsets);
 	}
+#endif
 
 	calldata_t cd = {0};
 	calldata_set_ptr(&cd, "output", stream->output);
@@ -1167,18 +1376,34 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 	signal_handler_signal(sh, "saving", &cd);
 	calldata_free(&cd);
 
+#ifndef __ANDROID__
 	generate_filename(stream, &stream->path, true);
+#endif
 
 	os_atomic_set_bool(&stream->muxing, true);
 	stream->mux_thread_joinable = pthread_create(&stream->mux_thread, NULL, replay_buffer_mux_thread, stream) == 0;
 	if (!stream->mux_thread_joinable) {
 		warn("Failed to create muxer thread");
+		for (size_t i = 0; i < stream->mux_packets.num; i++)
+			obs_encoder_packet_release(&stream->mux_packets.array[i]);
+		da_free(stream->mux_packets);
 		os_atomic_set_bool(&stream->muxing, false);
+#ifdef __ANDROID__
+		replay_save_failed(stream);
+#endif
 	}
 }
 
 static void deactivate_replay_buffer(struct ffmpeg_muxer *stream, int code)
 {
+#ifdef __ANDROID__
+	/* The MP4 muxer reads codec headers while writing the file. Finish before
+	 * libobs releases the encoder state when capture ends. */
+	if (stream->mux_thread_joinable) {
+		pthread_join(stream->mux_thread, NULL);
+		stream->mux_thread_joinable = false;
+	}
+#endif
 	if (code) {
 		obs_output_signal_stop(stream->output, code);
 	} else if (stopping(stream)) {
@@ -1224,7 +1449,12 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 	if (packet->type == OBS_ENCODER_VIDEO && packet->keyframe)
 		stream->keyframes++;
 
-	if (stream->save_ts && packet->sys_dts_usec >= stream->save_ts) {
+#ifdef __ANDROID__
+	int64_t save_ts = __atomic_load_n(&stream->save_ts, __ATOMIC_RELAXED);
+#else
+	const int64_t save_ts = stream->save_ts;
+#endif
+	if (save_ts && packet->sys_dts_usec >= save_ts) {
 		if (os_atomic_load_bool(&stream->muxing))
 			return;
 
@@ -1233,7 +1463,12 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 			stream->mux_thread_joinable = false;
 		}
 
+#ifdef __ANDROID__
+		__atomic_compare_exchange_n(&stream->save_ts, &save_ts, 0, false, __ATOMIC_RELAXED,
+					    __ATOMIC_RELAXED);
+#else
 		stream->save_ts = 0;
+#endif
 		replay_buffer_save(stream);
 	}
 }

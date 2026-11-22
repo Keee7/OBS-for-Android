@@ -9,14 +9,16 @@
 #     Linux 上这个文件由 os-linux.cmake 加入，前端的 OBSBasic.cpp(isWayland) 和
 #     importers/studio.cpp 都要 obs_get_nix_platform()，缺了它前端链接直接报
 #     undefined symbol（pass-7 实测）。Android 侧的取值见该文件里的 __ANDROID__ 默认值。
-# 音频监听用 null 后端（阶段 1 再换成 AAudio/OpenSLES）。
+# 音频监听使用基于 Android AAudio 回调流与 AudioManager 输出枚举的后端。
 
 target_sources(
   libobs
   PRIVATE
     obs-android.c
     obs-nix-platform.c
-    audio-monitoring/null/null-audio-monitoring.c
+    audio-monitoring/aaudio/aaudio-enum-devices.c
+    audio-monitoring/aaudio/aaudio-monitoring-available.c
+    audio-monitoring/aaudio/aaudio-output.c
     util/pipe-posix.c
     util/platform-android.c
     util/platform-nix.c
@@ -27,8 +29,8 @@ target_sources(
 target_compile_definitions(libobs PRIVATE OBS_INSTALL_PREFIX="${OBS_INSTALL_PREFIX}")
 
 # mediandk：FFmpeg --enable-mediacodec 引入 AMediaCodec*/AMediaFormat*，其 NDK stub 从 API 29 起才有，
-# 这也是整个 Android 侧以 android-29 为目标（minSdk 29）的原因。
-target_link_libraries(libobs PRIVATE ${CMAKE_DL_LIBS} m log android mediandk)
+# 这也是整个 Android 侧以 android-29 为目标（minSdk 29）的原因。aaudio 自 API 26 起由系统提供。
+target_link_libraries(libobs PRIVATE ${CMAKE_DL_LIBS} m log android mediandk aaudio)
 
 # 静态 FFmpeg 的汇编用 adrp+add 直接引用 ff_* 数据表；这些符号一旦进入 .dynsym 就成了可抢占符号，
 # lld 会报 "relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol"。

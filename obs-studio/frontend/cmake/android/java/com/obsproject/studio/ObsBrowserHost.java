@@ -2,6 +2,7 @@ package com.obsproject.studio;
 
 import android.app.Presentation;
 import android.content.Context;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
@@ -10,6 +11,7 @@ import android.graphics.drawable.ColorDrawable;
 import android.hardware.HardwareBuffer;
 import android.media.Image;
 import android.media.ImageReader;
+import android.net.Uri;
 import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
 import android.hardware.display.DisplayManager;
@@ -17,6 +19,7 @@ import android.hardware.display.VirtualDisplay;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.util.Log;
 import android.view.Surface;
@@ -26,17 +29,28 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import org.json.JSONObject;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Collections;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** One offscreen browser per OBS source. No MediaProjection or CPU frame copy. */
 public final class ObsBrowserHost {
     private static final String TAG = "OBS-browser";
+    private static final String LOCAL_VIRTUAL_HOST = "obs-local.invalid";
     private static final int AUDIO_PACKET_FRAMES = 1024;
     private static final String AUDIO_HOOK_JS =
             "(function(){" +
@@ -221,6 +235,11 @@ public final class ObsBrowserHost {
     private int heldNext;
     private final int width, height;
     private final String url, css;
+    private final Uri localContentUri;
+    private final String localVirtualHost;
+    private volatile Uri localVirtualUri;
+    private volatile String localDisplayName;
+    private final boolean allowFileAccess;
     private final boolean transparent;
     private volatile boolean closed, failed;
     // The following fields are touched only on the main thread.
@@ -234,10 +253,24 @@ public final class ObsBrowserHost {
     private ObsBrowserHost(Context context, int id, int width, int height, String url, String css,
                            boolean transparent, boolean audioReroute) {
         this.context = context.getApplicationContext();
-        this.width = width; this.height = height; this.url = url; this.css = css;
+        String cleanUrl = url == null ? "" : url.trim();
+        this.width = width; this.height = height; this.url = cleanUrl; this.css = css;
         this.transparent = transparent;
         this.audioReroute = audioReroute;
         this.readerMode = id == 0;
+        if (cleanUrl.regionMatches(true, 0, "content://", 0, 10)) {
+            this.localContentUri = Uri.parse(cleanUrl);
+            this.localVirtualHost = localHostForUri(cleanUrl);
+            this.allowFileAccess = false;
+        } else if (cleanUrl.regionMatches(true, 0, "file://", 0, 7)) {
+            this.localContentUri = null;
+            this.localVirtualHost = null;
+            this.allowFileAccess = true;
+        } else {
+            this.localContentUri = null;
+            this.localVirtualHost = null;
+            this.allowFileAccess = false;
+        }
         if (!readerMode) {
             SurfaceTexture candidate = new SurfaceTexture(id);
             Surface candidateSurface;
@@ -326,19 +359,155 @@ public final class ObsBrowserHost {
         if (audioReroute && !closed && view == web)
             view.evaluateJavascript(AUDIO_HOOK_JS, null);
     }
+    private static String localHostForUri(String uri) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(uri.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(16);
+            for (int i = 0; i < 8; i++) {
+                hex.append(String.format(Locale.ROOT, "%02x", digest[i] & 0xFF));
+            }
+            return hex + "." + LOCAL_VIRTUAL_HOST;
+        } catch (NoSuchAlgorithmException e) {
+            return "doc." + LOCAL_VIRTUAL_HOST;
+        }
+    }
+    private static String resolveDisplayName(Context ctx, Uri uri) {
+        String name = null;
+        try (Cursor cursor = ctx.getContentResolver().query(
+                uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) name = cursor.getString(idx);
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Failed to query display name for " + uri, e);
+        }
+        if (name == null || name.isEmpty()) {
+            name = uri.getLastPathSegment();
+        }
+        if (name != null) {
+            int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+            if (slash >= 0) name = name.substring(slash + 1);
+        }
+        return (name == null || name.isEmpty() || ".".equals(name) || "..".equals(name))
+                ? "index.html" : name;
+    }
+    private static String normalizeLocalHtmlMime(String rawMime, String displayName) {
+        String base = "";
+        if (rawMime != null) {
+            int semi = rawMime.indexOf(';');
+            base = (semi >= 0 ? rawMime.substring(0, semi) : rawMime).trim().toLowerCase(Locale.ROOT);
+        }
+        if ("text/html".equals(base) || "application/xhtml+xml".equals(base) || "image/svg+xml".equals(base)) {
+            return base;
+        }
+        if (displayName != null) {
+            String lower = displayName.toLowerCase(Locale.ROOT);
+            if (lower.endsWith(".xhtml") || lower.endsWith(".xht")) return "application/xhtml+xml";
+            if (lower.endsWith(".svg")) return "image/svg+xml";
+            if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html";
+        }
+        return "text/html";
+    }
+    private static String extractCharset(String rawMime) {
+        if (rawMime == null) return "UTF-8";
+        for (String part : rawMime.split(";")) {
+            String trimmed = part.trim();
+            if (trimmed.regionMatches(true, 0, "charset=", 0, 8)) {
+                String charset = trimmed.substring(8).trim();
+                if (charset.length() >= 2 && charset.startsWith("\"") && charset.endsWith("\"")) {
+                    charset = charset.substring(1, charset.length() - 1).trim();
+                }
+                if (!charset.isEmpty()) return charset;
+            }
+        }
+        return "UTF-8";
+    }
+    private static WebResourceResponse localNotFoundResponse() {
+        byte[] body = ("<!doctype html><meta charset=utf-8>" +
+                "<body style='margin:0;padding:16px;font:16px sans-serif;color:#eee;background:#222'>" +
+                "Local HTML file could not be opened.</body>").getBytes(StandardCharsets.UTF_8);
+        return new WebResourceResponse("text/html", "UTF-8", 404, "Not Found",
+                Collections.singletonMap("Cache-Control", "no-store"), new ByteArrayInputStream(body));
+    }
+    private static WebResourceResponse emptyErrorResponse(int statusCode, String reason) {
+        return new WebResourceResponse("text/plain", "UTF-8", statusCode, reason,
+                Collections.singletonMap("Cache-Control", "no-store"), new ByteArrayInputStream(new byte[0]));
+    }
+    private boolean isDisallowedLocalScheme(Uri reqUri) {
+        if (reqUri == null) return false;
+        String scheme = reqUri.getScheme();
+        if ("content".equalsIgnoreCase(scheme)) return true;
+        return !allowFileAccess && "file".equalsIgnoreCase(scheme);
+    }
+    private WebResourceResponse openLocalDocumentResponse() {
+        Map<String, String> headers = Collections.singletonMap("Cache-Control", "no-store");
+        String rawMime = null;
+        try {
+            rawMime = context.getContentResolver().getType(localContentUri);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Failed to query MIME type for " + localContentUri, e);
+        }
+        String mime = normalizeLocalHtmlMime(rawMime, localDisplayName);
+        String encoding = extractCharset(rawMime);
+        try {
+            InputStream stream = context.getContentResolver().openInputStream(localContentUri);
+            if (stream == null) {
+                Log.w(TAG, "ContentResolver returned null stream for " + localContentUri);
+                return localNotFoundResponse();
+            }
+            return new WebResourceResponse(mime, encoding, 200, "OK", headers, stream);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to open local document: " + localContentUri, e);
+            return localNotFoundResponse();
+        }
+    }
     private void createWeb() {
         if (closed || container == null) return;
+        if (localContentUri != null && localVirtualUri == null) {
+            String displayName = resolveDisplayName(context, localContentUri);
+            localDisplayName = displayName;
+            localVirtualUri = new Uri.Builder()
+                    .scheme("https")
+                    .authority(localVirtualHost != null ? localVirtualHost : LOCAL_VIRTUAL_HOST)
+                    .appendPath(displayName)
+                    .build();
+        }
         web = new WebView(presentation.getContext());
         web.setBackgroundColor(Color.TRANSPARENT);
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);
-        web.getSettings().setAllowFileAccess(false);
+        web.getSettings().setAllowFileAccess(allowFileAccess);
         web.getSettings().setAllowContentAccess(false);
+        web.getSettings().setAllowFileAccessFromFileURLs(false);
+        web.getSettings().setAllowUniversalAccessFromFileURLs(false);
         if (audioReroute) {
             web.getSettings().setMediaPlaybackRequiresUserGesture(false);
             web.addJavascriptInterface(new AudioBridge(), "__obsAudio");
         }
         web.setWebViewClient(new WebViewClient() {
+            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return request != null && isDisallowedLocalScheme(request.getUrl());
+            }
+            @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                if (closed || request == null)
+                    return null;
+                Uri reqUri = request.getUrl();
+                if (isDisallowedLocalScheme(reqUri)) {
+                    return emptyErrorResponse(403, "Forbidden");
+                }
+                if (localContentUri == null || localVirtualUri == null || localVirtualHost == null)
+                    return null;
+                if (reqUri == null || !"https".equalsIgnoreCase(reqUri.getScheme())
+                        || !localVirtualHost.equalsIgnoreCase(reqUri.getHost())) {
+                    return null;
+                }
+                String expectedPath = localVirtualUri.getPath();
+                if (expectedPath != null && expectedPath.equals(reqUri.getPath())) {
+                    return openLocalDocumentResponse();
+                }
+                return emptyErrorResponse(404, "Not Found");
+            }
             @Override public void onPageStarted(WebView view, String pageUrl, Bitmap favicon) {
                 injectAudioHook(view);
             }
@@ -371,7 +540,9 @@ public final class ObsBrowserHost {
             }
         });
         container.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        web.loadUrl(url == null || url.isEmpty() ? "about:blank" : url);
+        String loadTarget = localVirtualUri != null ? localVirtualUri.toString()
+                : (url == null || url.isEmpty() ? "about:blank" : url);
+        web.loadUrl(loadTarget);
     }
     /** Called only with OBS's EGL context current. */
     public synchronized int update(float[] matrix) {

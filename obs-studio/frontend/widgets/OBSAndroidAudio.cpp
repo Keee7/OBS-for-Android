@@ -33,17 +33,20 @@ static void copyField(char *dst, size_t dstLen, const QString &src)
 		return;
 	const QByteArray utf8 = src.toUtf8();
 	const size_t cap = dstLen - 1;
-	const size_t n = (size_t)utf8.size() < cap ? (size_t)utf8.size() : cap;
+	size_t n = (size_t)utf8.size() <= cap ? (size_t)utf8.size() : cap;
+	if (n < (size_t)utf8.size()) {
+		while (n > 0 && (static_cast<unsigned char>(utf8.at((qsizetype)n)) & 0xC0) == 0x80)
+			n--;
+	}
 	memcpy(dst, utf8.constData(), n);
 	dst[n] = '\0';
 }
 
-/* Wire format from snapshot(): id|type|isSource|product|label, entries split by ';'. */
-static int getAudioDevices(void *param, struct obs_android_audio_device *out, int max)
+/* Wire format from snapshot()/snapshotOutputs(): id|type|flag|product|label, entries split by ';'. */
+static int getAudioDevicesFromHost(const char *method, bool outputMode, struct obs_android_audio_device *out, int max)
 {
-	(void)param;
 	const QJniObject snap =
-		QJniObject::callStaticObjectMethod(hostClass, "snapshot", "()Ljava/lang/String;");
+		QJniObject::callStaticObjectMethod(hostClass, method, "()Ljava/lang/String;");
 	if (!snap.isValid())
 		return -1; /* bridge missing, not "no devices" */
 
@@ -69,9 +72,11 @@ static int getAudioDevices(void *param, struct obs_android_audio_device *out, in
 			dropped++;
 			continue;
 		}
+		const bool available = (f.at(2) == QLatin1String("1"));
 		out[n].id = id;
 		out[n].type = type;
-		out[n].is_source = (f.at(2) == QLatin1String("1"));
+		out[n].is_source = !outputMode && available;
+		out[n].is_sink = outputMode && available;
 		copyField(out[n].product, sizeof(out[n].product), f.at(3));
 		copyField(out[n].label, sizeof(out[n].label), f.at(4));
 		n++;
@@ -79,6 +84,18 @@ static int getAudioDevices(void *param, struct obs_android_audio_device *out, in
 	if (n == 0 && dropped > 0)
 		return -1; /* protocol mismatch, not an empty list */
 	return n;
+}
+
+static int getAudioDevices(void *param, struct obs_android_audio_device *out, int max)
+{
+	(void)param;
+	return getAudioDevicesFromHost("snapshot", false, out, max);
+}
+
+static int getAudioOutputDevices(void *param, struct obs_android_audio_device *out, int max)
+{
+	(void)param;
+	return getAudioDevicesFromHost("snapshotOutputs", true, out, max);
 }
 
 static bool hasCapturePermission(void *param)
@@ -91,6 +108,7 @@ static struct obs_android_audio_host g_audioHost = {
 	nullptr,
 	getAudioDevices,
 	hasCapturePermission,
+	getAudioOutputDevices,
 };
 
 bool OBSAndroidAudioInit()

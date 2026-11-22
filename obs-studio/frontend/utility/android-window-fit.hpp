@@ -2,13 +2,62 @@
 
 #ifdef __ANDROID__
 
+#include <QJniEnvironment>
+#include <QJniObject>
+#include <QMargins>
 #include <QPoint>
 #include <QRect>
 #include <QScreen>
 #include <QSize>
 #include <QWidget>
+#include <QWindow>
 #include <QtGlobal>
+#include <QtMath>
 #include "android-layout-policy.hpp"
+
+inline QMargins obsAndroidWindowSafeMargins(const QWindow *wh, const QScreen *fallbackScreen = nullptr)
+{
+	QMargins margins = wh ? wh->safeAreaMargins() : QMargins();
+	const qreal dpr = wh ? wh->devicePixelRatio()
+			     : (fallbackScreen ? fallbackScreen->devicePixelRatio() : 1.0);
+	if (dpr <= 0.0)
+		return margins;
+
+	const QJniObject activity = QJniObject::callStaticObjectMethod(
+		"org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
+	if (!activity.isValid())
+		return margins;
+
+	jobject viewObj = (wh && wh->handle()) ? reinterpret_cast<jobject>(wh->winId()) : nullptr;
+	const QJniObject result = QJniObject::callStaticObjectMethod(
+		"com/obsproject/studio/ObsWindowInsetsHost", "getSafeInsetsPx",
+		"(Landroid/app/Activity;Landroid/view/View;)[I", activity.object(), viewObj);
+	if (!result.isValid())
+		return margins;
+
+	QJniEnvironment env;
+	const auto arr = result.object<jintArray>();
+	if (!arr || env->GetArrayLength(arr) < 4)
+		return margins;
+
+	jint px[4] = {0, 0, 0, 0};
+	env->GetIntArrayRegion(arr, 0, 4, px);
+	const auto toLogical = [dpr](jint val) -> int {
+		return val > 0 ? static_cast<int>(qCeil(val / dpr)) : 0;
+	};
+	margins.setLeft(qMax(margins.left(), toLogical(px[0])));
+	margins.setTop(qMax(margins.top(), toLogical(px[1])));
+	margins.setRight(qMax(margins.right(), toLogical(px[2])));
+	margins.setBottom(qMax(margins.bottom(), toLogical(px[3])));
+	return margins;
+}
+
+inline QMargins obsAndroidWindowSafeMargins(const QWidget *w)
+{
+	const QWidget *top = w ? w->window() : nullptr;
+	return obsAndroidWindowSafeMargins(top ? top->windowHandle() : nullptr,
+					   top ? top->screen() : nullptr);
+}
 
 inline QRect androidAvailableWindowRect(const QWidget *w)
 {
@@ -19,12 +68,19 @@ inline QRect androidAvailableWindowRect(const QWidget *w)
 	// Dialogs must also fit the current app window in Android multi-window
 	// mode. QScreen alone may still describe the complete tablet display.
 	const QWidget *parent = w->parentWidget();
-	if (parent) {
-		const QWidget *host = parent->window();
+	const QWidget *host = parent ? parent->window() : nullptr;
+	if (host) {
 		const QRect hostRect(host->mapToGlobal(QPoint()), host->size());
 		const QRect intersection = available.intersected(hostRect);
 		if (!intersection.isEmpty())
 			available = intersection;
+	}
+	const QMargins safe = host ? obsAndroidWindowSafeMargins(host)
+				   : obsAndroidWindowSafeMargins(nullptr, scr);
+	if (!safe.isNull()) {
+		const QRect safeRect = available.marginsRemoved(safe);
+		if (!safeRect.isEmpty())
+			available = safeRect;
 	}
 	return available;
 }

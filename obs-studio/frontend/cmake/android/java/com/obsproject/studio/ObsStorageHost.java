@@ -20,6 +20,13 @@ import java.io.File;
 public final class ObsStorageHost {
     private static final String TAG = "OBS-storage";
     private ObsStorageHost() {}
+
+    public static String defaultVideoDirectory() {
+        if (!Environment.MEDIA_MOUNTED.equals(Environment.getExternalStorageState())) return "";
+        File movies = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES);
+        return movies == null ? "" : new File(movies, "OBS").getAbsolutePath();
+    }
+
     private static String relative(String path) {
         if (path == null || path.isEmpty()) return null;
         String root = Environment.getExternalStorageDirectory().getAbsolutePath();
@@ -46,10 +53,20 @@ public final class ObsStorageHost {
         } catch (Exception e) { Log.e(TAG, "Directory permission unavailable; select it again", e); return false; }
     }
     public static String create(Context context, String path, String name) {
+        return create(context, path, name, false);
+    }
+
+    public static String createReplay(Context context, String path, String name) {
+        return create(context, path, name, true);
+    }
+
+    private static String create(Context context, String path, String name, boolean pending) {
         try {
             if (name.isEmpty() || name.contains("/") || name.contains("\\"))
                 throw new IllegalArgumentException("Filename subdirectories are unsupported for document destinations");
-            String mime = name.endsWith(".mov") ? "video/quicktime" : name.endsWith(".flv") ? "video/x-flv" :
+            boolean image = name.endsWith(".png");
+            String mime = image ? "image/png" : name.endsWith(".mov") ? "video/quicktime" :
+                    name.endsWith(".flv") ? "video/x-flv" :
                     name.endsWith(".mkv") ? "video/x-matroska" : "video/mp4";
             Uri result;
             if (path.startsWith("content://")) {
@@ -63,17 +80,52 @@ public final class ObsStorageHost {
             } else {
                 String rel = relative(path);
                 if (rel == null) return "";
+                // MediaStore stores screenshots in Pictures when recordings are under Movies.
+                if (image && rel.startsWith(Environment.DIRECTORY_MOVIES + "/"))
+                    rel = Environment.DIRECTORY_PICTURES + rel.substring(Environment.DIRECTORY_MOVIES.length());
                 ContentValues values = new ContentValues();
                 values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
                 values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
                 values.put(MediaStore.MediaColumns.RELATIVE_PATH, rel);
-                Uri collection = rel.startsWith(Environment.DIRECTORY_DOWNLOADS + "/") ?
-                    MediaStore.Downloads.EXTERNAL_CONTENT_URI : MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+                if (pending) values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+                Uri collection;
+                if (rel.startsWith(Environment.DIRECTORY_DOWNLOADS + "/"))
+                    collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+                else if (image)
+                    collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+                else
+                    collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
                 result = context.getContentResolver().insert(collection, values);
             }
-            if (result == null) throw new IllegalStateException("Provider could not create recording");
+            if (result == null) throw new IllegalStateException("Provider could not create output document");
             return result.toString();
-        } catch (Exception e) { Log.e(TAG, "Cannot create recording in " + path, e); return ""; }
+        } catch (Exception e) { Log.e(TAG, "Cannot create output document in " + path, e); return ""; }
+    }
+
+    public static boolean remove(Context context, String path) {
+        try {
+            Uri uri = Uri.parse(path);
+            if (DocumentsContract.isDocumentUri(context, uri))
+                return DocumentsContract.deleteDocument(context.getContentResolver(), uri);
+            return context.getContentResolver().delete(uri, null, null) == 1;
+        } catch (Exception e) {
+            Log.w(TAG, "Cannot remove incomplete document", e);
+            return false;
+        }
+    }
+
+    public static boolean finishReplay(Context context, String path, boolean publish) {
+        if (!publish) return remove(context, path);
+        Uri uri = Uri.parse(path);
+        try {
+            if (DocumentsContract.isDocumentUri(context, uri)) return true;
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            return context.getContentResolver().update(uri, values, null, null) == 1;
+        } catch (Exception e) {
+            Log.e(TAG, "Cannot finish replay document", e);
+            return false;
+        }
     }
     public static int open(Context context, String path, String mode) {
         try (ParcelFileDescriptor fd = context.getContentResolver().openFileDescriptor(Uri.parse(path),

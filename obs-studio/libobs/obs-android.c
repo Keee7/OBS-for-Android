@@ -337,16 +337,13 @@ bool obs_android_audio_ready(void)
 	return audio_host != NULL;
 }
 
-int obs_android_audio_enum_devices(struct obs_android_audio_device *out, int max)
+static int enum_audio_devices_with(int (*fn)(void *, struct obs_android_audio_device *, int), void *param,
+				   struct obs_android_audio_device *out, int max)
 {
-	const struct obs_android_audio_host *h = audio_host;
-
-	if (!h || !h->get_devices)
-		return -1;
-	if (!out || max <= 0)
+	if (!fn || !out || max <= 0)
 		return -1;
 
-	int n = h->get_devices(h->param, out, max);
+	int n = fn(param, out, max);
 	if (n < 0)
 		return -1;
 	if (n > max)
@@ -358,6 +355,18 @@ int obs_android_audio_enum_devices(struct obs_android_audio_device *out, int max
 		out[i].label[OBS_ANDROID_AUDIO_LABEL_LEN - 1] = 0;
 	}
 	return n;
+}
+
+int obs_android_audio_enum_devices(struct obs_android_audio_device *out, int max)
+{
+	const struct obs_android_audio_host *h = audio_host;
+	return h ? enum_audio_devices_with(h->get_devices, h->param, out, max) : -1;
+}
+
+int obs_android_audio_enum_output_devices(struct obs_android_audio_device *out, int max)
+{
+	const struct obs_android_audio_host *h = audio_host;
+	return h ? enum_audio_devices_with(h->get_output_devices, h->param, out, max) : -1;
 }
 
 bool obs_android_audio_has_permission(void)
@@ -561,6 +570,27 @@ uint32_t obs_android_screen_read_audio(int16_t *out, uint32_t max_frames)
 static int (*storage_open)(const char *, const char *);
 void obs_android_set_storage_open(int (*open_document)(const char *, const char *)) { storage_open = open_document; }
 int obs_android_storage_open(const char *uri, const char *mode) { return storage_open ? storage_open(uri, mode) : -1; }
+
+static bool (*replay_storage_create)(const char *, const char *, char **);
+static bool (*replay_storage_finish)(const char *, bool);
+
+void obs_android_set_replay_storage(bool (*create)(const char *, const char *, char **),
+				    bool (*finish)(const char *, bool))
+{
+	replay_storage_create = create;
+	replay_storage_finish = finish;
+}
+
+bool obs_android_create_replay_document(const char *directory, const char *name, char **uri)
+{
+	*uri = NULL;
+	return replay_storage_create && replay_storage_create(directory, name, uri);
+}
+
+bool obs_android_finish_replay_document(const char *uri, bool publish)
+{
+	return replay_storage_finish && replay_storage_finish(uri, publish);
+}
 
 static const struct obs_android_browser_host *browser_host;
 void obs_android_set_browser_host(const struct obs_android_browser_host *host) { browser_host = host; }

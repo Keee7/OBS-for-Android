@@ -16,7 +16,9 @@ void obsAndroidExportLog(QWidget *parent, const char *name);
 
 // Scoped-storage destinations use a resolver-owned, seekable file descriptor.
 void obsAndroidStorageInit();
+QString obsAndroidStorageDefaultVideoDirectory();
 bool obsAndroidStorageManaged(const QString &path);
 bool obsAndroidStorageWritable(const QString &path);
 QString obsAndroidStorageCreate(const QString &path, const QString &name);
+void obsAndroidStorageRemove(const QString &path);
 qint64 obsAndroidStorageSpace(const QString &path);

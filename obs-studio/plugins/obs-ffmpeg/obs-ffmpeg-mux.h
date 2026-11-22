@@ -34,6 +34,9 @@ struct ffmpeg_muxer {
 	/* replay buffer */
 	int64_t save_ts;
 	int keyframes;
+#ifdef __ANDROID__
+	pthread_mutex_t replay_path_mutex;
+#endif
 	obs_hotkey_id hotkey;
 	volatile bool muxing;
 	mux_packets_t mux_packets;

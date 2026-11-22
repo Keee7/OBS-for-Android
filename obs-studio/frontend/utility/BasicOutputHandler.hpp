@@ -66,6 +66,9 @@ struct BasicOutputHandler {
 	OBSSignal recordFileChanged;
 	OBSSignal replayBufferStopping;
 	OBSSignal replayBufferSaved;
+#ifdef __ANDROID__
+	OBSSignal replayBufferSaveFailed;
+#endif
 
 	BasicOutputHandler(OBSBasic *main_);
 
@@ -125,6 +128,9 @@ void OBSStartReplayBuffer(void *data, calldata_t *params);
 void OBSStopReplayBuffer(void *data, calldata_t *params);
 void OBSReplayBufferStopping(void *data, calldata_t *params);
 void OBSReplayBufferSaved(void *data, calldata_t *params);
+#ifdef __ANDROID__
+void OBSReplayBufferSaveFailed(void *data, calldata_t *params);
+#endif
 
 inline bool can_use_output(const char *prot, const char *output, const char *prot_test1,
 			   const char *prot_test2 = nullptr)

@@ -109,6 +109,14 @@ endif()
 set_target_properties_obs(obs-ffmpeg PROPERTIES FOLDER plugins/obs-ffmpeg PREFIX "")
 
 if(OS_ANDROID)
+  target_sources(
+    obs-ffmpeg
+    PRIVATE
+      ../obs-outputs/mp4-mux.c
+      ../obs-outputs/rtmp-av1.c
+      $<$<BOOL:${ENABLE_HEVC}>:../obs-outputs/rtmp-hevc.c>
+  )
+
   # 这份插件把静态 FFmpeg **又编了一份进自己的 .so**，所以 libobs 与前端那两处 Android 专属处理
   # 必须原样复刻（不复制就会在这里重现已经解决过的错误）：
   # ① 链接 `log android mediandk` —— libavcodec 是 `--enable-mediacodec` 构建的，引用

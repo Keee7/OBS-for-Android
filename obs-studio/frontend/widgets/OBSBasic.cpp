@@ -34,7 +34,9 @@
 #include "OBSAndroidKeepAlive.hpp"
 #include "OBSAndroidPermissions.hpp"
 #include "OBSAndroidUsb.hpp" // USB host 总线注册（logcat tag OBS-usb）
+#include <QDir>
 #include <QListView> // 3-4 命中区：列表行高
+#include <QStandardPaths>
 #include <QToolBar> // 3-4 命中区：场景/源两排工具按钮
 #include <QToolButton>
 #endif
@@ -749,7 +751,8 @@ bool OBSBasic::InitBasicConfigDefaults()
 	config_set_default_bool(activeConfiguration, "Stream1", "MultitrackVideoMaximumAggregateBitrateAuto", true);
 	config_set_default_bool(activeConfiguration, "Stream1", "MultitrackVideoMaximumVideoTracksAuto", true);
 
-	config_set_default_string(activeConfiguration, "SimpleOutput", "FilePath", GetDefaultVideoSavePath().c_str());
+	const std::string defaultVideoSavePath = GetDefaultVideoSavePath();
+	config_set_default_string(activeConfiguration, "SimpleOutput", "FilePath", defaultVideoSavePath.c_str());
 	config_set_default_string(activeConfiguration, "SimpleOutput", "RecFormat2", DEFAULT_CONTAINER);
 	config_set_default_uint(activeConfiguration, "SimpleOutput", "VBitrate", 6000);
 	config_set_default_uint(activeConfiguration, "SimpleOutput", "ABitrate", 160);
@@ -777,7 +780,7 @@ bool OBSBasic::InitBasicConfigDefaults()
 
 	config_set_default_string(activeConfiguration, "AdvOut", "RecType", "Standard");
 
-	config_set_default_string(activeConfiguration, "AdvOut", "RecFilePath", GetDefaultVideoSavePath().c_str());
+	config_set_default_string(activeConfiguration, "AdvOut", "RecFilePath", defaultVideoSavePath.c_str());
 	config_set_default_string(activeConfiguration, "AdvOut", "RecFormat2", DEFAULT_CONTAINER);
 	config_set_default_bool(activeConfiguration, "AdvOut", "RecUseRescale", false);
 	config_set_default_uint(activeConfiguration, "AdvOut", "RecTracks", (1 << 0));
@@ -785,7 +788,7 @@ bool OBSBasic::InitBasicConfigDefaults()
 	config_set_default_uint(activeConfiguration, "AdvOut", "FLVTrack", 1);
 	config_set_default_uint(activeConfiguration, "AdvOut", "StreamMultiTrackAudioMixes", 1);
 	config_set_default_bool(activeConfiguration, "AdvOut", "FFOutputToFile", true);
-	config_set_default_string(activeConfiguration, "AdvOut", "FFFilePath", GetDefaultVideoSavePath().c_str());
+	config_set_default_string(activeConfiguration, "AdvOut", "FFFilePath", defaultVideoSavePath.c_str());
 	config_set_default_string(activeConfiguration, "AdvOut", "FFExtension", "mp4");
 	config_set_default_uint(activeConfiguration, "AdvOut", "FFVBitrate", 6000);
 	config_set_default_uint(activeConfiguration, "AdvOut", "FFVGOPSize", 250);
@@ -927,6 +930,29 @@ bool OBSBasic::InitBasicConfigDefaults()
 		     recType);
 		config_set_string(activeConfiguration, "AdvOut", "RecType", "Standard");
 	}
+
+	const QString legacyPrivateVideoPath =
+		QDir::cleanPath(QStandardPaths::writableLocation(QStandardPaths::MoviesLocation));
+	const QString defaultVideoPath = QDir::cleanPath(QString::fromStdString(defaultVideoSavePath));
+	if (!legacyPrivateVideoPath.isEmpty() && !defaultVideoPath.isEmpty() &&
+	    legacyPrivateVideoPath != defaultVideoPath) {
+		struct PathKey {
+			const char *section;
+			const char *key;
+		};
+		for (const auto &entry : {PathKey{"SimpleOutput", "FilePath"}, PathKey{"AdvOut", "RecFilePath"},
+					  PathKey{"AdvOut", "FFFilePath"}}) {
+			if (strcmp(entry.key, "RecFilePath") == 0 &&
+			    config_get_bool(activeConfiguration, "AdvOut", "RecSplitFile"))
+				continue;
+			const QString cur = QDir::cleanPath(
+				QString::fromUtf8(config_get_string(activeConfiguration, entry.section, entry.key)));
+			if (cur == legacyPrivateVideoPath) {
+				config_set_string(activeConfiguration, entry.section, entry.key,
+						  defaultVideoPath.toUtf8().constData());
+			}
+		}
+	}
 #endif
 
 	CheckExistingCookieId();
@@ -1058,6 +1084,10 @@ void OBSBasic::OBSInit()
 {
 	ProfileScope("OBSBasic::OBSInit");
 
+#ifdef __ANDROID__
+	obsAndroidStorageInit();
+#endif
+
 	if (!InitBasicConfig()) {
 		throw "Failed to load basic.ini";
 	}
@@ -1081,6 +1111,11 @@ void OBSBasic::OBSInit()
 			throw UNKNOWN_ERROR;
 		}
 	}
+
+#ifdef __ANDROID__
+	if (!OBSAndroidAudioInit())
+		blog(LOG_WARNING, "Android audio host registration failed");
+#endif
 
 	/* load audio monitoring */
 	if (obs_audio_monitoring_available()) {
@@ -1111,11 +1146,8 @@ void OBSBasic::OBSInit()
 
 #ifdef __ANDROID__
 	OBSAndroidRegisterCodecQuery();
-	obsAndroidStorageInit();
 	if (!OBSAndroidBrowserInit())
 		blog(LOG_WARNING, "Android browser host registration failed");
-	if (!OBSAndroidAudioInit())
-		blog(LOG_WARNING, "Android audio host registration failed");
 #endif
 	App()->loadAppModules();
 
