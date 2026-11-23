@@ -1480,12 +1480,22 @@ static aaudio_data_callback_result_t uvc_audio_data(AAudioStream *stream, void *
 	struct uvc_source *s = context;
 	if (frames <= 0)
 		return AAUDIO_CALLBACK_RESULT_CONTINUE;
+	const aaudio_format_t aaudio_fmt = AAudioStream_getFormat(stream);
+	enum audio_format obs_fmt;
+	if (aaudio_fmt == AAUDIO_FORMAT_PCM_I16)
+		obs_fmt = AUDIO_FORMAT_16BIT;
+	else if (aaudio_fmt == AAUDIO_FORMAT_PCM_FLOAT)
+		obs_fmt = AUDIO_FORMAT_FLOAT;
+	else
+		return AAUDIO_CALLBACK_RESULT_CONTINUE;
 	const uint32_t rate = (uint32_t)AAudioStream_getSampleRate(stream);
+	if (!rate)
+		return AAUDIO_CALLBACK_RESULT_CONTINUE;
 	const struct obs_source_audio audio = {
 		.data = {(const uint8_t *)data},
 		.frames = (uint32_t)frames,
 		.speakers = AAudioStream_getChannelCount(stream) == 1 ? SPEAKERS_MONO : SPEAKERS_STEREO,
-		.format = AUDIO_FORMAT_FLOAT,
+		.format = obs_fmt,
 		.samples_per_sec = rate,
 		.timestamp = os_gettime_ns() - (uint64_t)frames * 1000000000ULL / rate,
 	};
@@ -1510,46 +1520,86 @@ static AAudioStream *uvc_audio_open(struct uvc_source *s, const char *usb_device
 		return NULL;
 	}
 
-	AAudioStreamBuilder *builder = NULL;
-	aaudio_result_t result = AAudio_createStreamBuilder(&builder);
-	if (result != AAUDIO_OK || !builder) {
-		blog(LOG_WARNING, "uvc: could not create audio stream builder: %d", result);
-		return NULL;
-	}
-	AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_INPUT);
-	AAudioStreamBuilder_setDeviceId(builder, requested_device);
-	AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
-	AAudioStreamBuilder_setInputPreset(builder, AAUDIO_INPUT_PRESET_UNPROCESSED);
-	AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
-	AAudioStreamBuilder_setChannelCount(builder, 2);
-	AAudioStreamBuilder_setDataCallback(builder, uvc_audio_data, s);
+	/* Many USB capture cards expose 16-bit PCM profiles only on Android, so
+	 * probe PCM_I16 before PCM_FLOAT and fall back to generic preset/auto channels. */
+	const struct {
+		aaudio_format_t fmt;
+		int32_t channels;
+		aaudio_input_preset_t preset;
+	} attempts[] = {
+		{AAUDIO_FORMAT_PCM_I16, 2, AAUDIO_INPUT_PRESET_UNPROCESSED},
+		{AAUDIO_FORMAT_PCM_I16, AAUDIO_UNSPECIFIED, AAUDIO_INPUT_PRESET_UNPROCESSED},
+		{AAUDIO_FORMAT_PCM_FLOAT, 2, AAUDIO_INPUT_PRESET_UNPROCESSED},
+		{AAUDIO_FORMAT_PCM_FLOAT, AAUDIO_UNSPECIFIED, AAUDIO_INPUT_PRESET_UNPROCESSED},
+		{AAUDIO_FORMAT_PCM_I16, AAUDIO_UNSPECIFIED, AAUDIO_INPUT_PRESET_GENERIC},
+		{AAUDIO_FORMAT_PCM_FLOAT, AAUDIO_UNSPECIFIED, AAUDIO_INPUT_PRESET_GENERIC},
+	};
+
 	AAudioStream *stream = NULL;
-	result = AAudioStreamBuilder_openStream(builder, &stream);
-	AAudioStreamBuilder_delete(builder);
-	if (result != AAUDIO_OK || !stream) {
-		blog(LOG_WARNING, "uvc: opening audio input %d failed: %d", requested_device, result);
+	int32_t device = 0;
+	int32_t rate = 0;
+	int32_t channels = 0;
+	aaudio_format_t fmt = AAUDIO_FORMAT_INVALID;
+	aaudio_result_t last_result = AAUDIO_OK;
+
+	for (size_t i = 0; i < sizeof(attempts) / sizeof(attempts[0]); ++i) {
+		AAudioStreamBuilder *builder = NULL;
+		last_result = AAudio_createStreamBuilder(&builder);
+		if (last_result != AAUDIO_OK || !builder) {
+			blog(LOG_WARNING, "uvc: could not create audio stream builder: %d", last_result);
+			return NULL;
+		}
+		AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_INPUT);
+		if (requested_device > 0)
+			AAudioStreamBuilder_setDeviceId(builder, requested_device);
+		AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
+		AAudioStreamBuilder_setInputPreset(builder, attempts[i].preset);
+		AAudioStreamBuilder_setFormat(builder, attempts[i].fmt);
+		if (attempts[i].channels > 0)
+			AAudioStreamBuilder_setChannelCount(builder, attempts[i].channels);
+		AAudioStreamBuilder_setDataCallback(builder, uvc_audio_data, s);
+
+		AAudioStream *candidate = NULL;
+		last_result = AAudioStreamBuilder_openStream(builder, &candidate);
+		AAudioStreamBuilder_delete(builder);
+		if (last_result != AAUDIO_OK || !candidate)
+			continue;
+
+		const int32_t got_dev = AAudioStream_getDeviceId(candidate);
+		const int32_t got_rate = AAudioStream_getSampleRate(candidate);
+		const int32_t got_ch = AAudioStream_getChannelCount(candidate);
+		const aaudio_format_t got_fmt = AAudioStream_getFormat(candidate);
+		if ((requested_device > 0 && got_dev != requested_device) || got_rate <= 0 || got_ch < 1 ||
+		    got_ch > 2 || (got_fmt != AAUDIO_FORMAT_PCM_I16 && got_fmt != AAUDIO_FORMAT_PCM_FLOAT)) {
+			if (first_attempt)
+				blog(LOG_INFO,
+				     "uvc: audio open attempt %zu mismatch (req=%d got=%d rate=%d ch=%d fmt=%d)",
+				     i, requested_device, got_dev, got_rate, got_ch, got_fmt);
+			AAudioStream_close(candidate);
+			continue;
+		}
+
+		stream = candidate;
+		device = got_dev;
+		rate = got_rate;
+		channels = got_ch;
+		fmt = got_fmt;
+		break;
+	}
+
+	if (!stream) {
+		blog(LOG_WARNING, "uvc: opening audio input %d failed: %d", requested_device, last_result);
 		return NULL;
 	}
 
-	const int32_t device = AAudioStream_getDeviceId(stream);
-	const int32_t rate = AAudioStream_getSampleRate(stream);
-	const int32_t channels = AAudioStream_getChannelCount(stream);
-	if ((requested_device > 0 && device != requested_device) || rate <= 0 || channels < 1 || channels > 2 ||
-	    AAudioStream_getFormat(stream) != AAUDIO_FORMAT_PCM_FLOAT) {
-		blog(LOG_WARNING, "uvc: unexpected audio route or format (device=%d rate=%d channels=%d)", device, rate,
-		     channels);
+	const aaudio_result_t start_result = AAudioStream_requestStart(stream);
+	if (start_result != AAUDIO_OK) {
+		blog(LOG_WARNING, "uvc: starting audio input %d failed: %d", device, start_result);
 		AAudioStream_close(stream);
 		return NULL;
 	}
-
-	result = AAudioStream_requestStart(stream);
-	if (result != AAUDIO_OK) {
-		blog(LOG_WARNING, "uvc: starting audio input %d failed: %d", device, result);
-		AAudioStream_close(stream);
-		return NULL;
-	}
-	blog(LOG_INFO, "uvc: audio input started (device=%d rate=%d channels=%d auto_match=%d)", device, rate, channels,
-	     automatic);
+	blog(LOG_INFO, "uvc: audio input started (device=%d rate=%d channels=%d fmt=%d auto_match=%d)", device, rate,
+	     channels, fmt, automatic);
 	return stream;
 }
 
