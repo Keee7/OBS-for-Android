@@ -374,7 +374,9 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 
 	/* clang-format off */
 	HookWidget(ui->language,             COMBO_CHANGED,  GENERAL_CHANGED);
+#if !defined(__ANDROID__)
 	HookWidget(ui->updateChannelBox,     COMBO_CHANGED,  GENERAL_CHANGED);
+#endif
 	HookWidget(ui->enableAutoUpdates,    CHECK_CHANGED,  GENERAL_CHANGED);
 	HookWidget(ui->openStatsOnStartup,   CHECK_CHANGED,  GENERAL_CHANGED);
 	HookWidget(ui->hideOBSFromCapture,   CHECK_CHANGED,  GENERAL_CHANGED);
@@ -623,13 +625,23 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	ui->advOutFFVBitrate->setSuffix(" Kbps");
 	ui->advOutFFABitrate->setSuffix(" Kbps");
 
-#if !defined(_WIN32) && !defined(ENABLE_SPARKLE_UPDATER)
+#if !defined(_WIN32) && !defined(ENABLE_SPARKLE_UPDATER) && !defined(__ANDROID__)
 	delete ui->updateSettingsGroupBox;
 	ui->updateSettingsGroupBox = nullptr;
 	ui->updateChannelLabel = nullptr;
 	ui->updateChannelBox = nullptr;
 	ui->enableAutoUpdates = nullptr;
 #else
+#if defined(__ANDROID__)
+	if (auto *formLayout = qobject_cast<QFormLayout *>(ui->updateSettingsGroupBox->layout())) {
+		formLayout->removeRow(ui->updateChannelBox);
+	} else {
+		delete ui->updateChannelLabel;
+		delete ui->updateChannelBox;
+	}
+	ui->updateChannelLabel = nullptr;
+	ui->updateChannelBox = nullptr;
+#endif
 	// Hide update section if disabled
 	if (App()->IsUpdaterDisabled()) {
 		ui->updateSettingsGroupBox->hide();
@@ -1358,11 +1370,14 @@ void OBSBasicSettings::LoadGeneralSettings()
 
 	LoadLanguageList();
 
-#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
+#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER) || defined(__ANDROID__)
 	bool enableAutoUpdates = config_get_bool(App()->GetAppConfig(), "General", "EnableAutoUpdates");
-	ui->enableAutoUpdates->setChecked(enableAutoUpdates);
+	if (ui->enableAutoUpdates)
+		ui->enableAutoUpdates->setChecked(enableAutoUpdates);
 
+#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
 	LoadBranchesList();
+#endif
 #endif
 	bool openStatsOnStartup = config_get_bool(main->Config(), "General", "OpenStatsOnStartup");
 	ui->openStatsOnStartup->setChecked(openStatsOnStartup);
@@ -1821,6 +1836,7 @@ static inline bool IsSurround(const char *speakers)
 }
 
 static constexpr int UnavailableEncoderRole = Qt::UserRole + 1;
+static constexpr int UnsupportedProfileRole = Qt::UserRole + 2;
 
 static int AddUnavailableMediaCodecEncoder(QComboBox *combo, const char *encoder)
 {
@@ -2824,6 +2840,9 @@ void OBSBasicSettings::LoadAdvancedSettings()
 	SetComboByValue(ui->hotkeyFocusType, hotkeyFocusType);
 
 	loading = false;
+#ifdef __ANDROID__
+	UpdateAndroidHevcMain10Options();
+#endif
 }
 
 template<typename Func>
@@ -3169,11 +3188,12 @@ void OBSBasicSettings::SaveGeneralSettings()
 		config_set_string(App()->GetUserConfig(), "General", "Language", language.c_str());
 	}
 
-#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
-	if (WidgetChanged(ui->enableAutoUpdates)) {
+#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER) || defined(__ANDROID__)
+	if (ui->enableAutoUpdates && WidgetChanged(ui->enableAutoUpdates)) {
 		config_set_bool(App()->GetAppConfig(), "General", "EnableAutoUpdates",
 				ui->enableAutoUpdates->isChecked());
 	}
+#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
 	int branchIdx = ui->updateChannelBox->currentIndex();
 	QString branchName = ui->updateChannelBox->itemData(branchIdx).toString();
 
@@ -3181,6 +3201,7 @@ void OBSBasicSettings::SaveGeneralSettings()
 		config_set_string(App()->GetAppConfig(), "General", "UpdateBranch", QT_TO_UTF8(branchName));
 		forceUpdateCheck = true;
 	}
+#endif
 #endif
 #ifdef _WIN32
 	if (ui->hideOBSFromCapture && WidgetChanged(ui->hideOBSFromCapture)) {
@@ -3892,7 +3913,7 @@ void OBSBasicSettings::SaveSettings()
 {
 	bool resetOutputs = outputsChanged;
 #ifdef __ANDROID__
-	const bool wasHdr = OBSAndroidHdrVideoActive();
+	const auto oldColorSpace = OBSAndroidVideoColorSpace();
 #endif
 	if (generalChanged) {
 		SaveGeneralSettings();
@@ -3928,7 +3949,7 @@ void OBSBasicSettings::SaveSettings()
 		 * 上游各调用点都不当错误，这里也不报。 */
 		const int videoRet = main->ResetVideo();
 #ifdef __ANDROID__
-		if (videoRet == OBS_VIDEO_SUCCESS && wasHdr != OBSAndroidHdrVideoActive())
+		if (videoRet == OBS_VIDEO_SUCCESS && oldColorSpace != OBSAndroidVideoColorSpace())
 			resetOutputs = true;
 #endif
 		if (videoRet != OBS_VIDEO_SUCCESS && videoRet != OBS_VIDEO_CURRENTLY_ACTIVE) {
@@ -3940,6 +3961,14 @@ void OBSBasicSettings::SaveSettings()
 
 	if (resetOutputs)
 		main->ResetOutputs();
+
+#ifdef __ANDROID__
+	if (resetOutputs || videoChanged || outputsChanged) {
+		QMetaObject::invokeMethod(
+			main, [m = main] { m->NotifyAndroidSoftwareEncoderFallback(true, true, true); },
+			Qt::QueuedConnection);
+	}
+#endif
 
 	config_save_safe(main->Config(), "tmp", nullptr);
 	config_save_safe(App()->GetUserConfig(), "tmp", nullptr);
@@ -4217,6 +4246,10 @@ void OBSBasicSettings::on_advOutEncoder_currentIndexChanged()
 
 	ui->advOutUseRescale->setVisible(true);
 	ui->advOutRescale->setVisible(true);
+#ifdef __ANDROID__
+	if (!loading)
+		AdvOutRecCheckWarnings();
+#endif
 }
 
 void OBSBasicSettings::on_advOutRecEncoder_currentIndexChanged(int idx)
@@ -4324,12 +4357,61 @@ void OBSBasicSettings::on_colorSpace_currentIndexChanged(int)
 	const QString space = ui->colorSpace->currentData().toString();
 	const QString format = ui->colorFormat->currentData().toString();
 	if (!loading && (space == "2100PQ" || space == "2100HLG") && format != "P010" && format != "I010") {
-		const char *preferred = obs_get_encoder_codec("android_mediacodec_hevc_main10") ? "P010" : "I010";
+		const char *preferred = OBSAndroidHevcMain10Available(space == "2100PQ", false) ? "P010" : "I010";
 		ui->colorFormat->setCurrentIndex(ui->colorFormat->findData(preferred));
 	}
+	if (!loading)
+		UpdateAndroidHevcMain10Options();
 #endif
 	UpdateColorFormatSpaceWarning();
 }
+
+#ifdef __ANDROID__
+static video_colorspace SelectedSettingsColorSpace(const QComboBox *colorSpace)
+{
+	const QString space = colorSpace->currentData().toString();
+	if (space == "2100PQ")
+		return VIDEO_CS_2100_PQ;
+	if (space == "2100HLG")
+		return VIDEO_CS_2100_HLG;
+	return VIDEO_CS_709;
+}
+
+void OBSBasicSettings::UpdateAndroidHevcMain10Options()
+{
+	const bool pq = ui->colorSpace->currentData().toString() == "2100PQ";
+	const bool simpleAvailable = OBSAndroidHevcMain10Available(pq, true);
+	const bool advancedAvailable = OBSAndroidHevcMain10Available(pq, false);
+	const auto id = SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10;
+	bool recheckCompat = false;
+	for (auto *combo : {ui->simpleOutRecEncoder, ui->simpleOutStrEncoder, ui->advOutRecEncoder, ui->advOutEncoder}) {
+		const int row = combo->findData(QString::fromLatin1(id));
+		if (row < 0 || combo->itemData(row, UnavailableEncoderRole).toBool())
+			continue;
+		const bool simple = combo == ui->simpleOutRecEncoder || combo == ui->simpleOutStrEncoder;
+		const bool unsupported = !(simple ? simpleAvailable : advancedAvailable);
+		if (unsupported == combo->itemData(row, UnsupportedProfileRole).toBool())
+			continue;
+		auto *model = qobject_cast<QStandardItemModel *>(combo->model());
+		if (!model)
+			continue;
+		QStandardItem *item = model->item(row);
+		const QString name = QT_UTF8(obs_encoder_get_display_name(id));
+		item->setData(unsupported, UnsupportedProfileRole);
+		item->setFlags(unsupported ? Qt::NoItemFlags : Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+		item->setText(unsupported ? QTStr("Basic.Settings.Output.Encoder.Unavailable").arg(name) : name);
+		if (!unsupported)
+			recheckCompat = true;
+	}
+	if (!loading) {
+		if (recheckCompat)
+			AdvOutRecCheckCodecs();
+		else
+			AdvOutRecCheckWarnings();
+		SimpleRecordingEncoderChanged();
+	}
+}
+#endif
 
 #define INVALID_RES_STR "Basic.Settings.Video.InvalidResolution"
 
@@ -4838,7 +4920,8 @@ static void DisableIncompatibleCodecs(QComboBox *cbox, const QString &format, co
 	/* Check if selected encoders and output format are compatible, disable incompatible items. */
 	bool currentCompatible = true;
 	for (int idx = 0; idx < cbox->count(); idx++) {
-		if (cbox->itemData(idx, UnavailableEncoderRole).toBool())
+		if (cbox->itemData(idx, UnavailableEncoderRole).toBool() ||
+		    cbox->itemData(idx, UnsupportedProfileRole).toBool())
 			continue;
 		QString encName = cbox->itemData(idx).toString();
 		string encoderId = (encName == "none") ? streamEncoder.toStdString() : encName.toStdString();
@@ -4968,6 +5051,18 @@ void OBSBasicSettings::AdvOutRecCheckWarnings()
 
 		warningMsg += QTStr("OutputWarnings.CodecIncompatible");
 	}
+
+#ifdef __ANDROID__
+	const auto activeSpace = SelectedSettingsColorSpace(ui->colorSpace);
+	const QString streamEnc = ui->advOutEncoder->currentData().toString();
+	const QString recEnc = ui->advOutRecEncoder->currentData().toString();
+	if (OBSAndroidEncoderUsesSoftwareFallback(QT_TO_UTF8(streamEnc), activeSpace, false) ||
+	    (!useStreamEncoder && OBSAndroidEncoderUsesSoftwareFallback(QT_TO_UTF8(recEnc), activeSpace, false))) {
+		if (!warningMsg.isEmpty())
+			warningMsg += "\n\n";
+		warningMsg += QTStr("OutputWarnings.AndroidHevcSoftwareFallback");
+	}
+#endif
 
 	delete advOutRecWarning;
 
@@ -5576,7 +5671,8 @@ static void DisableIncompatibleSimpleCodecs(QComboBox *cbox, const QString &form
 
 	bool currentCompatible = true;
 	for (int idx = 0; idx < cbox->count(); idx++) {
-		if (cbox->itemData(idx, UnavailableEncoderRole).toBool())
+		if (cbox->itemData(idx, UnavailableEncoderRole).toBool() ||
+		    cbox->itemData(idx, UnsupportedProfileRole).toBool())
 			continue;
 		QString encName = cbox->itemData(idx).toString();
 		QString codec;
@@ -5776,6 +5872,23 @@ void OBSBasicSettings::SimpleRecordingEncoderChanged()
 			ui->simpleRecTrackWidget->setCurrentWidget(ui->simpleRecTracks);
 		}
 	}
+
+#ifdef __ANDROID__
+	const auto activeSpace = SelectedSettingsColorSpace(ui->colorSpace);
+	const QString streamEnc = ui->simpleOutStrEncoder->currentData().toString();
+	const char *streamEncId = streamEnc.isEmpty() ? nullptr : get_simple_output_encoder(QT_TO_UTF8(streamEnc));
+	const char *recEncId = recEncoder.isEmpty() ? nullptr : get_simple_output_encoder(QT_TO_UTF8(recEncoder));
+	const bool streamFallback = OBSAndroidEncoderUsesSoftwareFallback(streamEncId, activeSpace, true);
+	const bool recFallback =
+		(qual == "Stream") ? streamFallback
+		: (qual != "Lossless") ? OBSAndroidEncoderUsesSoftwareFallback(recEncId, activeSpace, true)
+				       : false;
+	if (streamFallback || recFallback) {
+		if (!warning.isEmpty())
+			warning += "\n\n";
+		warning += QTStr("OutputWarnings.AndroidHevcSoftwareFallback");
+	}
+#endif
 
 	if (warning.isEmpty()) {
 		return;

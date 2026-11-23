@@ -150,9 +150,9 @@ void OBSBasic::StartRecording()
 		const bool nativeMuxer = strcmp(format, "hybrid_mp4") == 0 || strcmp(format, "hybrid_mov") == 0;
 		const bool custom = advanced ? strcmp(config_get_string(Config(), "AdvOut", "RecType"), "FFmpeg") == 0
 					     : strcmp(config_get_string(Config(), "SimpleOutput", "RecQuality"), "Lossless") == 0;
-		if (!nativeMuxer || custom || (advanced && config_get_bool(Config(), "AdvOut", "RecSplitFile"))) {
+		if (!nativeMuxer || custom) {
 			OBSMessageBox::warning(this, QTStr("Output.StartRecordingFailed"),
-				QStringLiteral("共享文件夹录像请选择混合 MP4 或混合 MOV，并关闭文件分割。"
+				QStringLiteral("共享文件夹录像请选择混合 MP4 或混合 MOV。"
 					       "此测试版尚不支持将 FFmpeg 自定义输出直接写入 Android 文档目录。"));
 			return;
 		}
@@ -163,7 +163,11 @@ void OBSBasic::StartRecording()
 
 	SaveProject();
 
-	outputHandler->StartRecording();
+	if (outputHandler->StartRecording()) {
+#ifdef __ANDROID__
+		NotifyAndroidSoftwareEncoderFallback(false, true);
+#endif
+	}
 }
 
 void OBSBasic::RecordStopping()
@@ -192,6 +196,10 @@ void OBSBasic::StopRecording()
 void OBSBasic::RecordingStart()
 {
 	ui->statusbar->RecordingStarted(outputHandler->fileOutput);
+#ifdef __ANDROID__
+	if (outputHandler && outputHandler->androidRecordingSoftwareFallback)
+		ShowStatusBarMessage(QTStr("Output.AndroidHevcSoftwareFallback.Status"));
+#endif
 	emit RecordingStarted(isRecordingPausable);
 
 	if (sysTrayRecord) {

@@ -100,6 +100,9 @@ void OBSBasic::StartStreaming()
 			DisplayStreamStartError();
 			return;
 		}
+#ifdef __ANDROID__
+		NotifyAndroidSoftwareEncoderFallback(true, false);
+#endif
 
 		if (autoStartBroadcast) {
 			emit BroadcastStreamStarted(autoStopBroadcast);
@@ -244,6 +247,10 @@ void OBSBasic::StreamingStart()
 	emit StreamingStarted();
 	OBSOutputAutoRelease output = obs_frontend_get_streaming_output();
 	ui->statusbar->StreamStarted(output);
+#ifdef __ANDROID__
+	if (outputHandler && outputHandler->androidStreamingSoftwareFallback)
+		ShowStatusBarMessage(QTStr("Output.AndroidHevcSoftwareFallback.Status"));
+#endif
 
 	if (sysTrayStream) {
 		sysTrayStream->setText(QTStr("Basic.Main.StopStreaming"));

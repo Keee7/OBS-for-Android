@@ -212,7 +212,11 @@ void MediaControls::StartMediaTimer()
 	}
 
 	if (!mediaTimer.isActive()) {
+#ifdef __ANDROID__
+		mediaTimer.start(compact ? 100 : 50);
+#else
 		mediaTimer.start(compact ? 50 : 16);
+#endif
 	}
 }
 
@@ -292,11 +296,11 @@ void MediaControls::RefreshControls()
 		show();
 	}
 
-	bool has_playlist = !compact && strcmp(id, "ffmpeg_source") != 0;
+	isSlideshow = strcmp(id, "slideshow") == 0;
+	const bool has_playlist = isSlideshow || (!compact && strcmp(id, "ffmpeg_source") != 0);
 	ui->previousButton->setVisible(has_playlist);
 	ui->nextButton->setVisible(has_playlist);
 
-	isSlideshow = strcmp(id, "slideshow") == 0;
 	ui->slider->setVisible(!isSlideshow);
 	ui->emptySpaceAgain->setVisible(!compact && isSlideshow);
 
@@ -354,6 +358,10 @@ void MediaControls::SetSource(OBSSource source)
 
 void MediaControls::SetSliderPosition()
 {
+	if (!isVisible()) {
+		return;
+	}
+
 	OBSSource source = OBSGetStrongRef(weakSource);
 	if (!source) {
 		return;

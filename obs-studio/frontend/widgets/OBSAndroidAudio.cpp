@@ -5,6 +5,7 @@
 #include <obs-android.h>
 
 #include <QByteArray>
+#include <QJniEnvironment>
 #include <QJniObject>
 #include <QStringList>
 
@@ -13,6 +14,12 @@
 /* Java side (frontend/cmake/android/java/com/obsproject/studio/ObsAudioHost.java)
  * exposes only public static methods. */
 static constexpr auto hostClass = "com/obsproject/studio/ObsAudioHost";
+static constexpr auto notifierClass = "com/obsproject/studio/ObsAudioRouteNotifier";
+
+static void JNICALL onNativeAudioRouteChanged(JNIEnv *, jclass)
+{
+	obs_android_audio_notify_route_change();
+}
 
 static QJniObject appContext()
 {
@@ -112,13 +119,32 @@ static int findUsbInput(void *param, const char *usbDevice)
 						path.object<jstring>());
 }
 
+static uint64_t getRouteRevision(void *param)
+{
+	(void)param;
+	return static_cast<uint64_t>(QJniObject::callStaticMethod<jlong>(hostClass, "routeRevision", "()J"));
+}
+
 static struct obs_android_audio_host g_audioHost = {
 	nullptr,
 	getAudioDevices,
 	hasCapturePermission,
 	getAudioOutputDevices,
 	findUsbInput,
+	getRouteRevision,
 };
+
+static bool registerRouteNotifier()
+{
+	QJniEnvironment env;
+	jclass cls = env.findClass(notifierClass);
+	if (!cls)
+		return false;
+	static const JNINativeMethod methods[] = {
+		{"nativeOnRouteChanged", "()V", reinterpret_cast<void *>(onNativeAudioRouteChanged)},
+	};
+	return env->RegisterNatives(cls, methods, 1) >= 0;
+}
 
 bool OBSAndroidAudioInit()
 {
@@ -134,6 +160,13 @@ bool OBSAndroidAudioInit()
 		blog(LOG_WARNING, "Android audio host: ObsAudioHost.install() failed");
 		return false;
 	}
+	if (registerRouteNotifier()) {
+		const QJniObject notifier(notifierClass);
+		if (notifier.isValid()) {
+			QJniObject::callStaticMethod<void>(hostClass, "setRouteChangeListener",
+							   "(Ljava/lang/Runnable;)V", notifier.object<jobject>());
+		}
+	}
 	obs_android_set_audio_host(&g_audioHost);
 	blog(LOG_INFO, "Android audio host registered (AAudio input device list)");
 	return true;
@@ -141,5 +174,6 @@ bool OBSAndroidAudioInit()
 
 void OBSAndroidAudioShutdown()
 {
+	QJniObject::callStaticMethod<void>(hostClass, "setRouteChangeListener", "(Ljava/lang/Runnable;)V", nullptr);
 	obs_android_set_audio_host(nullptr);
 }

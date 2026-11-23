@@ -331,15 +331,37 @@ VolumeMeter::VolumeMeter(QWidget *parent, obs_source_t *source)
 
 	if (!updateTimer) {
 		updateTimer = new QTimer(qApp);
+#ifdef __ANDROID__
+		updateTimer->setTimerType(Qt::CoarseTimer);
+		updateTimer->start(66);
+#else
 		updateTimer->setTimerType(Qt::PreciseTimer);
 		updateTimer->start(16);
+#endif
 	}
 
 	connect(updateTimer, &QTimer::timeout, this, [this]() {
+		if (!isVisible() || size().isEmpty()) {
+			return;
+		}
 		if (needLayoutChange()) {
 			doLayout();
+			needsRedraw.store(false, std::memory_order_release);
 			update();
-		} else {
+			return;
+		}
+		bool dirty = needsRedraw.exchange(false, std::memory_order_acq_rel);
+		if (!dirty) {
+			if (!settledAtFloor.load(std::memory_order_acquire)) {
+				dirty = true;
+			} else if (!lastPaintedIdle) {
+				const uint64_t lastTs = lastUpdateTimeNs.load(std::memory_order_acquire);
+				if ((os_gettime_ns() - lastTs) > 500000000ULL) {
+					dirty = true;
+				}
+			}
+		}
+		if (dirty) {
 			update(getBarRect());
 		}
 	});
@@ -371,6 +393,7 @@ void VolumeMeter::setLevels(const float magnitude[MAX_AUDIO_CHANNELS], const flo
 			    const float inputPeak[MAX_AUDIO_CHANNELS])
 {
 	uint64_t ts = os_gettime_ns();
+	bool anySignal = false;
 	QMutexLocker locker(&dataMutex);
 
 	currentLastUpdateTime = ts;
@@ -378,12 +401,20 @@ void VolumeMeter::setLevels(const float magnitude[MAX_AUDIO_CHANNELS], const flo
 		currentMagnitude[channelNr] = magnitude[channelNr];
 		currentPeak[channelNr] = peak[channelNr];
 		currentInputPeak[channelNr] = inputPeak[channelNr];
+		if (magnitude[channelNr] > minimumLevel || peak[channelNr] > minimumLevel ||
+		    inputPeak[channelNr] > minimumInputLevel) {
+			anySignal = true;
+		}
 	}
+	lastUpdateTimeNs.store(ts, std::memory_order_release);
 
 	// In case there are more updates then redraws we must make sure
 	// that the ballistics of peak and hold are recalculated.
 	locker.unlock();
 	calculateBallistics(ts);
+	if (anySignal || !settledAtFloor.load(std::memory_order_acquire)) {
+		needsRedraw.store(true, std::memory_order_release);
+	}
 }
 
 void VolumeMeter::obsVolMeterChanged(void *data, const float magnitude[MAX_AUDIO_CHANNELS],
@@ -449,6 +480,7 @@ void VolumeMeter::setUseDisabledColors(bool enable)
 
 	bool forceUpdate = true;
 	updateBackgroundCache(forceUpdate);
+	needsRedraw.store(true, std::memory_order_release);
 }
 
 void VolumeMeter::setMuted(bool mute)
@@ -458,6 +490,7 @@ void VolumeMeter::setMuted(bool mute)
 	}
 
 	muted = mute;
+	needsRedraw.store(true, std::memory_order_release);
 }
 
 void VolumeMeter::refreshColors()
@@ -756,6 +789,23 @@ void VolumeMeter::paintEvent(QPaintEvent *)
 	QColor warning = disabledColors ? foregroundWarningColorDisabled : foregroundWarningColor;
 	QColor error = disabledColors ? foregroundErrorColorDisabled : foregroundErrorColor;
 
+	bool atFloor = !clipping;
+	{
+		QMutexLocker locker(&dataMutex);
+		for (int channelNr = 0; channelNr < displayNrAudioChannels; channelNr++) {
+			int channelNrFixed = (displayNrAudioChannels == 1 && channels > 2) ? 2 : channelNr;
+			if (displayPeak[channelNrFixed] > minimumLevel ||
+			    displayPeakHold[channelNrFixed] > minimumLevel ||
+			    displayMagnitude[channelNrFixed] > minimumLevel ||
+			    displayInputPeakHold[channelNrFixed] > minimumInputLevel) {
+				atFloor = false;
+				break;
+			}
+		}
+	}
+	lastPaintedIdle = idle;
+	settledAtFloor.store(atFloor, std::memory_order_release);
+
 	int meterStart = INDICATOR_THICKNESS + 2;
 	int meterLength = vertical ? rect().height() - (INDICATOR_THICKNESS + 2)
 				   : rect().width() - (INDICATOR_THICKNESS + 2);
@@ -803,7 +853,10 @@ void VolumeMeter::paintEvent(QPaintEvent *)
 		// Draw audio meter peak bars
 		if (peakPosition >= clipPosition) {
 			if (!clipping) {
-				QTimer::singleShot(CLIP_FLASH_DURATION_MS, this, [&]() { clipping = false; });
+				QTimer::singleShot(CLIP_FLASH_DURATION_MS, this, [this]() {
+					clipping = false;
+					needsRedraw.store(true, std::memory_order_release);
+				});
 				clipping = true;
 			}
 
@@ -869,7 +922,14 @@ void VolumeMeter::paintEvent(QPaintEvent *)
 void VolumeMeter::resizeEvent(QResizeEvent *event)
 {
 	updateBackgroundCache();
+	needsRedraw.store(true, std::memory_order_release);
 	return QWidget::resizeEvent(event);
+}
+
+void VolumeMeter::showEvent(QShowEvent *event)
+{
+	needsRedraw.store(true, std::memory_order_release);
+	QWidget::showEvent(event);
 }
 
 void VolumeMeter::mousePressEvent(QMouseEvent *event)

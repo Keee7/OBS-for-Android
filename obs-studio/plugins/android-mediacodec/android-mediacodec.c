@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include <obs-module.h>
+#include <obs-android.h>
 #include <graphics/graphics.h>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
@@ -46,7 +47,6 @@ static const struct codec_spec codecs[] = {
 };
 #define MC_COLOR_P010 54
 #define MC_COLOR_SURFACE 0x7f000789
-#define MC_HEVC_PROFILE_HDR10 4096
 #define MAX_QUEUED 120
 /* High-stability policy (load shedding) lives in shed-policy.h so the host
  * regression test compiles the real decision logic instead of a copy. */
@@ -717,7 +717,7 @@ static void *create(obs_data_t *s, obs_encoder_t *obs)
 		fail(e, "This MediaCodec encoder requires SDR BT.709.");
 		goto error;
 	}
-	e->profile = pq ? MC_HEVC_PROFILE_HDR10 : e->format->profile;
+	e->profile = e->format->p010 ? obs_android_hevc_main10_profile(pq) : e->format->profile;
 	e->color_standard = pq || hlg ? 6 : 1; /* BT.2020 or BT.709 */
 	e->color_transfer = pq ? 6 : hlg ? 7 : 3; /* ST 2084, HLG, or SDR */
 	e->fps_num = (int)base->fps_num;
@@ -1150,19 +1150,25 @@ static struct obs_encoder_info encoder_info = {
 	.encode_texture_flush = flush,
 	.caps = OBS_ENCODER_CAP_PASS_TEXTURE | OBS_ENCODER_CAP_PASS_TEXTURE_RGB | OBS_ENCODER_CAP_DYN_BITRATE,
 };
+static bool encoder_available(const struct codec_spec *format, int profile)
+{
+	calldata_t cd;
+	calldata_init(&cd);
+	calldata_set_string(&cd, "mime", format->mime);
+	calldata_set_int(&cd, "profile", profile);
+	calldata_set_bool(&cd, "p010", format->p010);
+	const bool available = proc_handler_call(obs_get_proc_handler(), "android_mediacodec_encoder_available", &cd) &&
+			       calldata_bool(&cd, "supported");
+	calldata_free(&cd);
+	return available;
+}
+
 bool obs_module_load(void)
 {
 	for (size_t i = 0; i < sizeof(codecs) / sizeof(codecs[0]); ++i) {
 		const struct codec_spec *format = &codecs[i];
-		calldata_t cd;
-		calldata_init(&cd);
-		calldata_set_string(&cd, "mime", format->mime);
-		calldata_set_int(&cd, "profile", format->profile);
-		calldata_set_bool(&cd, "p010", format->p010);
-		bool available = proc_handler_call(obs_get_proc_handler(), "android_mediacodec_encoder_available", &cd) &&
-				 calldata_bool(&cd, "supported");
-		calldata_free(&cd);
-		if (!available)
+		if (!encoder_available(format, format->profile) &&
+		    !(format->p010 && encoder_available(format, obs_android_hevc_main10_profile(true))))
 			continue;
 
 		struct obs_encoder_info info = encoder_info;

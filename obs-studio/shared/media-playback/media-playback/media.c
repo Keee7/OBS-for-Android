@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <libavcodec/mediacodec.h>
 #endif
 
 #include "media-playback.h"
@@ -300,6 +301,18 @@ static bool mp_media_update_scaling(mp_media_t *m)
 		memset(m->scale_pic, 0, sizeof(m->scale_pic));
 		memset(m->scale_linesizes, 0, sizeof(m->scale_linesizes));
 		m->scale_initialized = false;
+#ifdef __ANDROID__
+		if (f->format == AV_PIX_FMT_MEDIACODEC) {
+			m->scale_format = f->format;
+			m->scale_input_width = f->width;
+			m->scale_input_height = f->height;
+			m->scale_input_format = f->format;
+			m->scale_input_colorspace = f->colorspace;
+			m->scale_input_range = f->color_range;
+			m->scale_initialized = true;
+			return true;
+		}
+#endif
 		m->scale_format = closest_format(f->format);
 		if (m->scale_format != f->format && !mp_media_init_scaling(m))
 			return false;
@@ -383,6 +396,14 @@ static inline int64_t mp_media_get_base_pts(mp_media_t *m)
 /* maximum timestamp variance in nanoseconds */
 #define MAX_TS_VAR 2000000000LL
 
+static inline bool mp_is_network_or_uri_input(const mp_media_t *m)
+{
+	if (!m->is_local_file)
+		return true;
+	return m->path && strstr(m->path, "://") != NULL && strncmp(m->path, "content://", 10) != 0 &&
+	       strncmp(m->path, "file://", 7) != 0;
+}
+
 static inline bool mp_media_can_play_frame(mp_media_t *m, struct mp_decode *d)
 {
 	if (m->full_decode)
@@ -441,10 +462,70 @@ void mp_media_next_video(mp_media_t *m, bool preload)
 	}
 
 	if (!f->width || !f->height) {
-		blog(LOG_ERROR, "MP: media frame width or height are zero ('%s': %" PRIu32 "x%" PRIu32 ")", m->path,
-		     f->width, f->height);
+		blog(LOG_ERROR, "MP: media frame width or height are zero ('%s': %" PRIu32 "x%" PRIu32 ")",
+		     mp_is_network_or_uri_input(m) ? "<network input>" : m->path, f->width, f->height);
 		return;
 	}
+
+#ifdef __ANDROID__
+	if (d->android_surface && f->format == AV_PIX_FMT_MEDIACODEC) {
+		new_space = convert_color_space(f->colorspace, f->color_trc, f->color_primaries);
+		new_range = m->force_range == VIDEO_RANGE_DEFAULT ? convert_color_range(f->color_range)
+								  : m->force_range;
+		enum video_trc trc = VIDEO_TRC_DEFAULT;
+		switch (f->color_trc) {
+		case AVCOL_TRC_BT709:
+		case AVCOL_TRC_GAMMA22:
+		case AVCOL_TRC_GAMMA28:
+		case AVCOL_TRC_SMPTE170M:
+		case AVCOL_TRC_SMPTE240M:
+		case AVCOL_TRC_IEC61966_2_1:
+			trc = VIDEO_TRC_SRGB;
+			break;
+		case AVCOL_TRC_SMPTE2084:
+			trc = VIDEO_TRC_PQ;
+			break;
+		case AVCOL_TRC_ARIB_STD_B67:
+			trc = VIDEO_TRC_HLG;
+			break;
+		default:
+			break;
+		}
+		if (!m->is_local_file && !d->got_first_keyframe) {
+			if (!(f->flags & AV_FRAME_FLAG_KEY))
+				return;
+			d->got_first_keyframe = true;
+		}
+		AVMediaCodecBuffer *mc_buf = (AVMediaCodecBuffer *)f->data[3];
+		int v_width = f->width;
+		int v_height = f->height;
+		const bool is_hdr_surface = new_space == VIDEO_CS_2100_PQ || new_space == VIDEO_CS_2100_HLG ||
+					    trc == VIDEO_TRC_PQ || trc == VIDEO_TRC_HLG;
+		const int rel = mc_buf ? av_mediacodec_release_buffer(mc_buf, is_hdr_surface ? 0 : 1)
+				       : AVERROR_INVALIDDATA;
+		av_frame_unref(f);
+		if (preload)
+			d->frame_ready = false;
+		if (is_hdr_surface) {
+			if (m->v_gpu_fail_cb)
+				m->v_gpu_fail_cb(m->opaque);
+			else if (m->v_gpu_cb)
+				m->v_gpu_cb(m->opaque, (uint32_t)v_width, (uint32_t)v_height, new_space, new_range,
+					    trc, preload);
+			return;
+		}
+		if (rel < 0) {
+			blog(LOG_WARNING, "MP: av_mediacodec_release_buffer failed (%d)", rel);
+			if (m->v_gpu_fail_cb)
+				m->v_gpu_fail_cb(m->opaque);
+			return;
+		}
+		if (m->v_gpu_cb)
+			m->v_gpu_cb(m->opaque, (uint32_t)v_width, (uint32_t)v_height, new_space, new_range, trc,
+				    preload);
+		return;
+	}
+#endif
 
 	bool flip = false;
 	if (m->swscale) {
@@ -709,11 +790,12 @@ static bool init_avformat(mp_media_t *m)
 
 	if (m->format_name && *m->format_name) {
 		format = av_find_input_format(m->format_name);
-		if (!format)
-			blog(LOG_INFO,
-			     "MP: Unable to find input format for "
-			     "'%s'",
-			     m->path);
+		if (!format) {
+			if (mp_is_network_or_uri_input(m))
+				blog(LOG_INFO, "MP: Unable to find input format '%s'", m->format_name);
+			else
+				blog(LOG_INFO, "MP: Unable to find input format for '%s'", m->path);
+		}
 	}
 
 	AVDictionary *opts = NULL;
@@ -726,7 +808,7 @@ static bool init_avformat(mp_media_t *m)
 	if (m->ffmpeg_options) {
 		int ret = av_dict_parse_string(&opts, m->ffmpeg_options, "=", " ", 0);
 		if (ret)
-			blog(LOG_WARNING, "Failed to parse FFmpeg options: %s\n%s", av_err2str(ret), m->ffmpeg_options);
+			blog(LOG_WARNING, "Failed to parse FFmpeg options: %s (options redacted)", av_err2str(ret));
 	}
 
 	m->fmt = avformat_alloc_context();
@@ -771,7 +853,7 @@ static bool init_avformat(mp_media_t *m)
 
 	if (ret < 0) {
 		if (!m->reconnecting) {
-			if (!m->is_local_file)
+			if (mp_is_network_or_uri_input(m))
 				blog(LOG_WARNING, "MP: Failed to open network input: %s", av_err2str(ret));
 			else
 				blog(LOG_WARNING, "MP: Failed to open media: '%s': %s", m->path, av_err2str(ret));
@@ -959,6 +1041,12 @@ bool mp_media_init(mp_media_t *media, const struct mp_media_info *info)
 	media->v_cb = info->v_cb;
 	media->a_cb = info->a_cb;
 	media->stop_cb = info->stop_cb;
+#ifdef __ANDROID__
+	media->acquire_native_window = info->acquire_native_window;
+	media->release_native_window = info->release_native_window;
+	media->v_gpu_cb = info->v_gpu_cb;
+	media->v_gpu_fail_cb = info->v_gpu_fail_cb;
+#endif
 	media->ffmpeg_options = info->ffmpeg_options;
 	media->v_seek_cb = info->v_seek_cb;
 	media->v_preload_cb = info->v_preload_cb;

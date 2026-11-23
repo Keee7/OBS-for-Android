@@ -810,7 +810,11 @@ static obs_properties_t *aaudio_properties(void *unused)
 			blog(LOG_WARNING, "aaudio: 缺少 RECORD_AUDIO 权限，可能无法读取设备名称或获取完整设备列表");
 	}
 
-	obs_properties_add_int(props, "sample_rate", obs_module_text("SampleRate"), 0, 192000, 100);
+	obs_property_set_long_description(dev_list, obs_module_text("Device.Description"));
+
+	obs_property_t *rate_prop =
+		obs_properties_add_int(props, "sample_rate", obs_module_text("SampleRate"), 0, 192000, 100);
+	obs_property_set_long_description(rate_prop, obs_module_text("SampleRate.Description"));
 	obs_properties_add_int(props, "channels", obs_module_text("Channels"), 1, 2, 1);
 
 	obs_property_t *p = obs_properties_add_list(props, "input_preset", obs_module_text("InputPreset"),
@@ -827,12 +831,14 @@ static obs_properties_t *aaudio_properties(void *unused)
 				    OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(p, obs_module_text("SharingMode.Shared"), "shared");
 	obs_property_list_add_string(p, obs_module_text("SharingMode.Exclusive"), "exclusive");
+	obs_property_set_long_description(p, obs_module_text("SharingMode.Description"));
 
 	p = obs_properties_add_list(props, "performance_mode", obs_module_text("PerformanceMode"), OBS_COMBO_TYPE_LIST,
 				    OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(p, obs_module_text("PerformanceMode.None"), "none");
 	obs_property_list_add_string(p, obs_module_text("PerformanceMode.LowLatency"), "low_latency");
 	obs_property_list_add_string(p, obs_module_text("PerformanceMode.PowerSaving"), "power_saving");
+	obs_property_set_long_description(p, obs_module_text("PerformanceMode.Description"));
 
 	p = obs_properties_add_list(props, "mmap_policy", obs_module_text("MmapPolicy"), OBS_COMBO_TYPE_LIST,
 				    OBS_COMBO_FORMAT_STRING);
@@ -840,6 +846,7 @@ static obs_properties_t *aaudio_properties(void *unused)
 	obs_property_list_add_string(p, obs_module_text("MmapPolicy.Never"), "never");
 	obs_property_list_add_string(p, obs_module_text("MmapPolicy.Auto"), "auto");
 	obs_property_list_add_string(p, obs_module_text("MmapPolicy.Always"), "always");
+	obs_property_set_long_description(p, obs_module_text("MmapPolicy.Description"));
 
 	return props;
 }

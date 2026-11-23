@@ -1467,11 +1467,13 @@ void OBSBasic::OBSInit()
 	delete ui->actionShowCrashLogs;
 	delete ui->actionUploadLastCrashLog;
 	delete ui->menuCrashLogs;
-	delete ui->actionCheckForUpdates;
 	ui->actionShowCrashLogs = nullptr;
 	ui->actionUploadLastCrashLog = nullptr;
 	ui->menuCrashLogs = nullptr;
+#if !defined(__ANDROID__)
+	delete ui->actionCheckForUpdates;
 	ui->actionCheckForUpdates = nullptr;
+#endif
 #endif
 #endif
 
@@ -1485,11 +1487,13 @@ void OBSBasic::OBSInit()
 	ui->actionShowMacPermissions = nullptr;
 #endif
 
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__APPLE__) || defined(__ANDROID__)
 	if (App()->IsUpdaterDisabled()) {
-		ui->actionCheckForUpdates->setEnabled(false);
+		if (ui->actionCheckForUpdates)
+			ui->actionCheckForUpdates->setEnabled(false);
 #if defined(_WIN32)
-		ui->actionRepair->setEnabled(false);
+		if (ui->actionRepair)
+			ui->actionRepair->setEnabled(false);
 #endif
 	}
 #endif
@@ -1547,9 +1551,14 @@ void OBSBasic::applicationShutdown() noexcept
 	QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 #endif
 
+#ifdef __ANDROID__
+	extern void CancelAndroidUpdateChecks();
+	CancelAndroidUpdateChecks();
+#else
 	if (updateCheckThread && updateCheckThread->isRunning()) {
 		updateCheckThread->wait();
 	}
+#endif
 
 	if (patronJsonThread && patronJsonThread->isRunning()) {
 		patronJsonThread->wait();
@@ -2150,9 +2159,14 @@ void OBSBasic::closeWindow()
 	if (whatsNewInitThread) {
 		whatsNewInitThread->wait();
 	}
+#ifdef __ANDROID__
+	extern void CancelAndroidUpdateChecks();
+	CancelAndroidUpdateChecks();
+#else
 	if (updateCheckThread) {
 		updateCheckThread->wait();
 	}
+#endif
 #ifndef __ANDROID__
 	if (logUploadThread) {
 		logUploadThread->wait();

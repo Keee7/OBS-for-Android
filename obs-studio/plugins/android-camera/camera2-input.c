@@ -1636,6 +1636,7 @@ static obs_properties_t *camera2_properties(void *data)
 		}
 		obs_property_list_add_string(list, obs_module_text("Camera.Auto"), "");
 	}
+	obs_property_set_long_description(list, obs_module_text("Camera.Description"));
 
 	obs_property_t *facing = obs_properties_add_list(props, "facing", obs_module_text("Facing"),
 							 OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -1692,6 +1693,7 @@ static obs_properties_t *camera2_properties(void *data)
 	} else {
 		obs_property_list_add_string(sizes, obs_module_text("Resolution.AutoNoTable"), "");
 	}
+	obs_property_set_long_description(sizes, obs_module_text("Resolution.Description"));
 
 	obs_property_t *fpsl = obs_properties_add_list(props, "fps", obs_module_text("FrameRate"), OBS_COMBO_TYPE_LIST,
 						       OBS_COMBO_FORMAT_STRING);
@@ -1710,12 +1712,14 @@ static obs_properties_t *camera2_properties(void *data)
 	} else {
 		obs_property_list_add_string(fpsl, obs_module_text("FrameRate.AutoNoTable"), "");
 	}
+	obs_property_set_long_description(fpsl, obs_module_text("FrameRate.Description"));
 
 	obs_property_t *cs = obs_properties_add_list(props, "colorspace", obs_module_text("ColorSpace"),
 						     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(cs, obs_module_text("ColorSpace.Auto"), VIDEO_CS_DEFAULT);
 	obs_property_list_add_int(cs, obs_module_text("ColorSpace.601"), VIDEO_CS_601);
 	obs_property_list_add_int(cs, obs_module_text("ColorSpace.709"), VIDEO_CS_709);
+	obs_property_set_long_description(cs, obs_module_text("ColorSpace.Description"));
 
 	if (c) {
 		struct dstr state;

@@ -52,6 +52,8 @@ public final class ObsBrowserHost {
     private static final String TAG = "OBS-browser";
     private static final String LOCAL_VIRTUAL_HOST = "obs-local.invalid";
     private static final int AUDIO_PACKET_FRAMES = 1024;
+    private static final int AUDIO_RATE = 48000;
+    private static final int AUDIO_CHANNELS = 2;
     private static final String AUDIO_HOOK_JS =
             "(function(){" +
             "if(window.__obsAudioHooked){if(window.__obsScanMedia)window.__obsScanMedia();return;}" +
@@ -60,10 +62,13 @@ public final class ObsBrowserHost {
             "if(!AC)return;" +
             "var origConnect=AudioNode.prototype.connect;" +
             "var origDisconnect=AudioNode.prototype.disconnect;" +
-            "function getTap(ctx){" +
-            "if(ctx.__obsTap)return ctx.__obsTap;" +
-            "var gain=ctx.createGain();" +
-            "var proc=ctx.createScriptProcessor(1024,2,2);" +
+            // MediaStream inputs let Web Audio resample each context and mix overlapping audio.
+            "var mixer=null;" +
+            "function getMixer(){" +
+            "if(mixer)return mixer;" +
+            "var ctx;" +
+            "try{ctx=new AC({sampleRate:" + AUDIO_RATE + "});}catch(e){ctx=new AC();}" +
+            "var proc=ctx.createScriptProcessor(" + AUDIO_PACKET_FRAMES + ",2,2);" +
             "var silentTail=0;" +
             "proc.onaudioprocess=function(ev){" +
             "var inBuf=ev.inputBuffer,outBuf=ev.outputBuffer;" +
@@ -92,29 +97,41 @@ public final class ObsBrowserHost {
             "bin+=String.fromCharCode.apply(null,bytes.subarray(k,Math.min(k+1024,bytes.length)));" +
             "}" +
             "try{if(window.__obsAudio&&window.__obsAudio.pushPcm){" +
-            "window.__obsAudio.pushPcm(btoa(bin),Math.round(ctx.sampleRate)||48000,2);" +
+            "window.__obsAudio.pushPcm(btoa(bin),Math.round(ctx.sampleRate)||" + AUDIO_RATE + ",2);" +
             "}}catch(e){}" +
             "};" +
-            "origConnect.call(gain,proc);" +
             "origConnect.call(proc,ctx.destination);" +
-            "ctx.__obsTap={gain:gain,proc:proc};" +
+            "mixer={ctx:ctx,proc:proc};return mixer;" +
+            "}" +
+            "function getTap(ctx){" +
+            "var mix=getMixer();" +
+            "if(mix.ctx.state==='suspended')mix.ctx.resume().catch(function(){});" +
+            "if(ctx.__obsTap)return ctx.__obsTap;" +
+            "var sink=ctx.createMediaStreamDestination();" +
+            "var input=mix.ctx.createMediaStreamSource(sink.stream);" +
+            "origConnect.call(input,mix.proc);" +
+            "ctx.addEventListener('statechange',function(){" +
+            "if(ctx.state==='closed'){" +
+            "origDisconnect.call(input);" +
+            "sink.stream.getAudioTracks().forEach(function(track){track.stop();});" +
+            "}});" +
+            "ctx.__obsTap=sink;" +
             "return ctx.__obsTap;" +
             "}" +
             "AudioNode.prototype.connect=function(dest){" +
             "var ctx=this.context;" +
-            "if(ctx&&dest===ctx.destination){" +
+            "if(ctx&&dest===ctx.destination&&(!mixer||this!==mixer.proc)){" +
             "var tap=getTap(ctx);" +
-            "if(this!==tap.proc){" +
             "if(ctx.state==='suspended'&&ctx.resume)ctx.resume().catch(function(){});" +
-            "origConnect.call(this,tap.gain,arguments.length>1?arguments[1]:0,0);" +
+            "origConnect.call(this,tap,arguments.length>1?arguments[1]:0,0);" +
             "return dest;" +
-            "}}" +
+            "}" +
             "return origConnect.apply(this,arguments);" +
             "};" +
             "AudioNode.prototype.disconnect=function(dest){" +
             "var ctx=this.context;" +
-            "if(ctx&&dest===ctx.destination&&ctx.__obsTap&&this!==ctx.__obsTap.proc){" +
-            "try{return origDisconnect.call(this,ctx.__obsTap.gain);}catch(e){return;}" +
+            "if(ctx&&dest===ctx.destination&&ctx.__obsTap&&(!mixer||this!==mixer.proc)){" +
+            "try{return origDisconnect.call(this,ctx.__obsTap);}catch(e){return;}" +
             "}" +
             "return origDisconnect.apply(this,arguments);" +
             "};" +
@@ -137,7 +154,7 @@ public final class ObsBrowserHost {
             "try{" +
             "var ctx=getMediaCtx();" +
             "var srcNode=ctx.createMediaElementSource(el);" +
-            "origConnect.call(srcNode,getTap(ctx).gain);" +
+            "origConnect.call(srcNode,getTap(ctx));" +
             "el.__obsAttached=true;el.__obsSrcNode=srcNode;" +
             "}catch(e){}" +
             "}" +
@@ -166,10 +183,27 @@ public final class ObsBrowserHost {
     private final Object audioLock = new Object();
     private short[] audioRing;
     private int audioHead, audioTail, audioFilled;
-    private int audioRate = 48000, audioChannels = 2;
     private final boolean audioReroute;
 
     private final class AudioBridge {
+        private void pushFrameLocked(short left, short right) {
+            if (audioFilled + AUDIO_CHANNELS > audioRing.length) {
+                int drop = Math.min(AUDIO_CHANNELS, audioFilled);
+                audioTail = (audioTail + drop) % audioRing.length;
+                audioFilled -= drop;
+            }
+            audioRing[audioHead] = left;
+            audioHead = (audioHead + 1) % audioRing.length;
+            audioRing[audioHead] = right;
+            audioHead = (audioHead + 1) % audioRing.length;
+            audioFilled += AUDIO_CHANNELS;
+        }
+
+        private short readPcmSample(byte[] bytes, int frame, int ch, int channels) {
+            int idx = (frame * channels + ch) * 2;
+            return (short) ((bytes[idx + 1] << 8) | (bytes[idx] & 0xFF));
+        }
+
         @JavascriptInterface
         public void pushPcm(String base64Pcm, int sampleRate, int channels) {
             if (closed || !audioReroute || base64Pcm == null || base64Pcm.isEmpty())
@@ -192,28 +226,35 @@ public final class ObsBrowserHost {
             synchronized (audioLock) {
                 if (closed)
                     return;
-                if (audioRing == null || audioRate != sampleRate || audioChannels != channels) {
-                    audioRate = sampleRate;
-                    audioChannels = channels;
-                    audioRing = new short[(sampleRate / 2) * channels];
-                    audioHead = 0;
-                    audioTail = 0;
-                    audioFilled = 0;
+                if (audioRing == null)
+                    audioRing = new short[(AUDIO_RATE / 2) * AUDIO_CHANNELS];
+                if (sampleRate == AUDIO_RATE) {
+                    for (int f = 0; f < frames; f++) {
+                        short left = readPcmSample(bytes, f, 0, channels);
+                        short right = channels == 1 ? left : readPcmSample(bytes, f, 1, channels);
+                        pushFrameLocked(left, right);
+                    }
+                    return;
                 }
-                for (int f = 0; f < frames; f++) {
-                    if (audioFilled + channels > audioRing.length) {
-                        int drop = Math.min(channels, audioFilled);
-                        audioTail = (audioTail + drop) % audioRing.length;
-                        audioFilled -= drop;
+                final int outFrames = Math.max(1, (int) Math.round((double) frames * AUDIO_RATE / sampleRate));
+                final double step = (double) frames / outFrames;
+                for (int o = 0; o < outFrames; o++) {
+                    double pos = Math.max(0.0, (o + 0.5) * step - 0.5);
+                    int i0 = Math.min((int) Math.floor(pos), frames - 1);
+                    int i1 = Math.min(i0 + 1, frames - 1);
+                    double t = pos - i0;
+                    short l0 = readPcmSample(bytes, i0, 0, channels);
+                    short l1 = readPcmSample(bytes, i1, 0, channels);
+                    short left = (short) Math.round(l0 + (l1 - l0) * t);
+                    short right;
+                    if (channels == 1) {
+                        right = left;
+                    } else {
+                        short r0 = readPcmSample(bytes, i0, 1, channels);
+                        short r1 = readPcmSample(bytes, i1, 1, channels);
+                        right = (short) Math.round(r0 + (r1 - r0) * t);
                     }
-                    final int base = f * frameBytes;
-                    for (int ch = 0; ch < channels; ch++) {
-                        final int bOff = base + ch * 2;
-                        final short sample = (short) ((bytes[bOff + 1] << 8) | (bytes[bOff] & 0xFF));
-                        audioRing[audioHead] = sample;
-                        audioHead = (audioHead + 1) % audioRing.length;
-                        audioFilled++;
-                    }
+                    pushFrameLocked(left, right);
                 }
             }
         }
@@ -599,14 +640,14 @@ public final class ObsBrowserHost {
     }
     public int drainAudio(short[] out, int maxFrames, int[] outFormat) {
         synchronized (audioLock) {
-            if (closed || out == null || maxFrames <= 0 || audioRing == null || audioFilled < audioChannels)
+            if (closed || out == null || maxFrames <= 0 || audioRing == null || audioFilled < AUDIO_CHANNELS)
                 return 0;
-            final int availFrames = audioFilled / audioChannels;
-            final int maxOutFrames = out.length / audioChannels;
+            final int availFrames = audioFilled / AUDIO_CHANNELS;
+            final int maxOutFrames = out.length / AUDIO_CHANNELS;
             final int frames = Math.min(maxFrames, Math.min(availFrames, maxOutFrames));
             if (frames <= 0)
                 return 0;
-            final int total = frames * audioChannels;
+            final int total = frames * AUDIO_CHANNELS;
             final int first = Math.min(total, audioRing.length - audioTail);
             System.arraycopy(audioRing, audioTail, out, 0, first);
             if (total > first)
@@ -614,8 +655,8 @@ public final class ObsBrowserHost {
             audioTail = (audioTail + total) % audioRing.length;
             audioFilled -= total;
             if (outFormat != null && outFormat.length >= 2) {
-                outFormat[0] = audioRate;
-                outFormat[1] = audioChannels;
+                outFormat[0] = AUDIO_RATE;
+                outFormat[1] = AUDIO_CHANNELS;
             }
             return frames;
         }

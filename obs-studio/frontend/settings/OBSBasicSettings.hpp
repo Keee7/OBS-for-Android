@@ -188,6 +188,9 @@ private:
 	void ReloadCodecs(const FFmpegFormat &format);
 
 	void UpdateColorFormatSpaceWarning();
+#ifdef __ANDROID__
+	void UpdateAndroidHevcMain10Options();
+#endif
 
 	void LoadGeneralSettings();
 	void LoadStream1Settings();

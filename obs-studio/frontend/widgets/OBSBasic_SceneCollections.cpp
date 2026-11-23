@@ -25,7 +25,11 @@
 #include <qt-wrappers.hpp>
 
 #include <QDir>
+#include <QFile>
+#include <QUrl>
 
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -640,28 +644,77 @@ void OBSBasic::on_actionImportSceneCollection_triggered()
 	RefreshSceneCollections(true);
 }
 
+static bool WriteSceneCollectionExport(obs_data_t *collection, const QString &destinationFileName, QString &errorMessage)
+{
+	const char *json = obs_data_get_json_pretty(collection);
+	if (!json || !*json) {
+		errorMessage = QStringLiteral("Failed to serialize scene collection.");
+		return false;
+	}
+
+	if (destinationFileName.startsWith("content://")) {
+		QFile output(destinationFileName);
+		if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+			errorMessage = output.errorString();
+			return false;
+		}
+		const qint64 len = static_cast<qint64>(strlen(json));
+		if (output.write(json, len) != len || !output.flush() || output.error() != QFileDevice::NoError) {
+			errorMessage = output.errorString();
+			return false;
+		}
+		output.close();
+		if (output.error() != QFileDevice::NoError) {
+			errorMessage = output.errorString();
+			return false;
+		}
+		return true;
+	}
+
+	const QString localFileName = destinationFileName.startsWith("file://")
+					      ? QUrl(destinationFileName).toLocalFile()
+					      : destinationFileName;
+	const std::filesystem::path destinationFile = std::filesystem::u8path(localFileName.toStdString());
+	errno = 0;
+	if (!obs_data_save_json_pretty_safe(collection, destinationFile.u8string().c_str(), "tmp", "bak")) {
+		const int err = errno;
+		errorMessage = err ? QString::fromLocal8Bit(strerror(err))
+				   : QTStr("Basic.MainMenu.SceneCollection.WriteError");
+		return false;
+	}
+	return true;
+}
+
 void OBSBasic::on_actionExportSceneCollection_triggered()
 {
 	SaveProjectNow();
 
 	const SceneCollection &currentCollection = GetCurrentSceneCollection();
 
+	const QString title = QTStr("Basic.MainMenu.SceneCollection.Export");
+	const auto showError = [this, &title](const QString &reason) {
+		OBSMessageBox::warning(this, title, QTStr("Basic.MainMenu.SceneCollection.ExportError").arg(reason));
+	};
+
 	const QString home = QDir::homePath();
 
-	const QString destinationFileName = SaveFile(this, QTStr("Basic.MainMenu.SceneCollection.Export"),
-						     home + "/" + currentCollection.getFileName().c_str(),
-						     "JSON Files (*.json)");
+	const QString destinationFileName =
+		SaveFile(this, title, home + "/" + currentCollection.getFileName().c_str(), "JSON Files (*.json)");
 
 	if (!destinationFileName.isEmpty() && !destinationFileName.isNull()) {
 		const std::filesystem::path sourceFile = currentCollection.getFilePath();
-		const std::filesystem::path destinationFile =
-			std::filesystem::u8path(destinationFileName.toStdString());
 
 		OBSDataAutoRelease collection = obs_data_create_from_json_file(sourceFile.u8string().c_str());
+		if (!collection) {
+			blog(LOG_WARNING, "Failed to read exported scene collection '%s'", sourceFile.u8string().c_str());
+			showError(QTStr("Basic.MainMenu.SceneCollection.ReadError"));
+			return;
+		}
 
 		OBSDataArrayAutoRelease sources = obs_data_get_array(collection, "sources");
 		if (!sources) {
 			blog(LOG_WARNING, "No sources in exported scene collection");
+			showError(QTStr("Basic.MainMenu.SceneCollection.ReadError"));
 			return;
 		}
 
@@ -688,7 +741,13 @@ void OBSBasic::on_actionExportSceneCollection_triggered()
 		}
 
 		obs_data_set_array(collection, "sources", newSources);
-		obs_data_save_json_pretty_safe(collection, destinationFile.u8string().c_str(), "tmp", "bak");
+
+		QString errorMessage;
+		if (!WriteSceneCollectionExport(collection, destinationFileName, errorMessage)) {
+			blog(LOG_WARNING, "Failed to export scene collection to '%s': %s",
+			     QT_TO_UTF8(destinationFileName), QT_TO_UTF8(errorMessage));
+			showError(errorMessage);
+		}
 	}
 }
 

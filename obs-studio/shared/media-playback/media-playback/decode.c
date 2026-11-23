@@ -20,6 +20,10 @@
 #include "media.h"
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/pixdesc.h>
+#ifdef __ANDROID__
+#include <libavcodec/mediacodec.h>
+#include <libavutil/hwcontext_mediacodec.h>
+#endif
 
 enum AVHWDeviceType hw_priority[] = {
 	AV_HWDEVICE_TYPE_CUDA,  AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_DXVA2,        AV_HWDEVICE_TYPE_VAAPI,
@@ -66,7 +70,18 @@ static void init_hw_decoder(struct mp_decode *d, AVCodecContext *c)
 	}
 }
 
-static int mp_open_codec(struct mp_decode *d, bool hw, bool force_ndk, bool require_p010)
+#ifdef __ANDROID__
+static enum AVPixelFormat mediacodec_select_surface_format(struct AVCodecContext *s, const enum AVPixelFormat *fmt)
+{
+	for (const enum AVPixelFormat *p = fmt; *p != AV_PIX_FMT_NONE; p++) {
+		if (*p == AV_PIX_FMT_MEDIACODEC)
+			return *p;
+	}
+	return avcodec_default_get_format(s, fmt);
+}
+#endif
+
+static int mp_open_codec(struct mp_decode *d, bool hw, bool force_ndk, bool require_p010, void *android_window)
 {
 	AVCodecContext *c;
 	int ret;
@@ -82,7 +97,33 @@ static int mp_open_codec(struct mp_decode *d, bool hw, bool force_ndk, bool requ
 		goto fail;
 
 	d->hw = false;
-
+#ifdef __ANDROID__
+	d->android_surface = false;
+	if (android_window) {
+		AVBufferRef *hw_ctx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_MEDIACODEC);
+		if (!hw_ctx) {
+			ret = AVERROR(ENOMEM);
+			goto fail;
+		}
+		AVMediaCodecDeviceContext *mc_ctx =
+			(AVMediaCodecDeviceContext *)((AVHWDeviceContext *)hw_ctx->data)->hwctx;
+		mc_ctx->native_window = android_window;
+		ret = av_hwdevice_ctx_init(hw_ctx);
+		if (ret < 0) {
+			av_buffer_unref(&hw_ctx);
+			goto fail;
+		}
+		c->hw_device_ctx = av_buffer_ref(hw_ctx);
+		c->get_format = mediacodec_select_surface_format;
+		c->opaque = d;
+		d->hw_ctx = hw_ctx;
+		d->hw_format = AV_PIX_FMT_MEDIACODEC;
+		d->hw = true;
+		d->android_surface = true;
+	} else
+#else
+	UNUSED_PARAMETER(android_window);
+#endif
 	if (hw)
 		init_hw_decoder(d, c);
 
@@ -106,6 +147,12 @@ static int mp_open_codec(struct mp_decode *d, bool hw, bool force_ndk, bool requ
 	return ret;
 
 fail:
+#ifdef __ANDROID__
+	d->android_surface = false;
+	if (d->hw_ctx)
+		av_buffer_unref(&d->hw_ctx);
+#endif
+	d->hw = false;
 	avcodec_free_context(&c);
 	avcodec_free_context(&d->decoder);
 
@@ -191,15 +238,26 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 	 * 打开失败回退到 FFmpeg 原生软解；不勾选时直接用软解。 */
 	const AVCodecParameters *params = stream->codecpar;
 	const AVPixFmtDescriptor *pixdesc = av_pix_fmt_desc_get(params->format);
-	const bool main10 = id == AV_CODEC_ID_HEVC && params->profile == AV_PROFILE_HEVC_MAIN_10;
+	const bool main10 = id == AV_CODEC_ID_HEVC &&
+			    (params->profile == AV_PROFILE_HEVC_MAIN_10 || params->profile == AV_PROFILE_HEVC_REXT);
+	const bool h264_hi10 = id == AV_CODEC_ID_H264 &&
+			       (params->profile == AV_PROFILE_H264_HIGH_10 ||
+				params->profile == AV_PROFILE_H264_HIGH_10_INTRA);
+	const bool vp9_high = id == AV_CODEC_ID_VP9 && params->profile >= AV_PROFILE_VP9_2;
+	const bool hdr_trc = params->color_trc == AVCOL_TRC_SMPTE2084 ||
+			     params->color_trc == AVCOL_TRC_ARIB_STD_B67;
+	const bool hdr_colors = params->color_primaries == AVCOL_PRI_BT2020 ||
+				params->color_space == AVCOL_SPC_BT2020_NCL ||
+				params->color_space == AVCOL_SPC_BT2020_CL;
 	const bool high_bit_depth = (pixdesc && pixdesc->nb_components && pixdesc->comp[0].depth > 8) ||
-				    params->bits_per_raw_sample > 8 || params->color_trc == AVCOL_TRC_SMPTE2084 ||
-				    params->color_trc == AVCOL_TRC_ARIB_STD_B67 ||
-				    main10 ||
-				    (id == AV_CODEC_ID_VP9 && params->profile >= AV_PROFILE_VP9_2);
-	const bool try_p010 = main10 || (pixdesc && pixdesc->nb_components && pixdesc->comp[0].depth == 10) ||
-			      params->bits_per_raw_sample == 10;
-	if (hw && type == AVMEDIA_TYPE_VIDEO && (!high_bit_depth || try_p010)) {
+				    params->bits_per_raw_sample > 8 || hdr_trc || hdr_colors ||
+				    d->max_luminance > 0 || main10 || h264_hi10 || vp9_high;
+	const bool try_p010 = main10 || vp9_high ||
+			      (pixdesc && pixdesc->nb_components && pixdesc->comp[0].depth == 10) ||
+			      params->bits_per_raw_sample == 10 || hdr_trc || hdr_colors || d->max_luminance > 0;
+	const bool surface_capable = hw && type == AVMEDIA_TYPE_VIDEO && m->acquire_native_window &&
+				     m->force_range == VIDEO_RANGE_DEFAULT && !high_bit_depth && !try_p010;
+	if (hw && type == AVMEDIA_TYPE_VIDEO && (surface_capable || !high_bit_depth || try_p010)) {
 		const char *name = NULL;
 		switch (id) {
 		case AV_CODEC_ID_H264: name = "h264_mediacodec"; break;
@@ -215,15 +273,35 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 			const AVCodec *hardware = avcodec_find_decoder_by_name(name);
 			if (hardware) {
 				d->codec = hardware;
-				ret = mp_open_codec(d, false, true, try_p010);
-				if (ret >= 0) {
-					d->android_hw_first_frame_pending = true;
-					blog(LOG_INFO, "MP: hardware MediaCodec decoder opened: %s%s", name,
-					     try_p010 ? " (P010)" : "");
-					goto codec_opened;
+				if (surface_capable) {
+					void *win = m->acquire_native_window(m->opaque, params->width, params->height);
+					if (win) {
+						ret = mp_open_codec(d, false, true, false, win);
+						if (ret >= 0) {
+							d->android_hw_first_frame_pending = true;
+							blog(LOG_INFO,
+							     "MP: hardware MediaCodec surface decoder opened: %s%s",
+							     name, try_p010 ? " (10-bit)" : "");
+							goto codec_opened;
+						}
+						blog(LOG_WARNING,
+						     "MP: hardware surface decoder %s failed (%s); falling back",
+						     name, av_err2str(ret));
+						if (m->release_native_window)
+							m->release_native_window(m->opaque);
+					}
 				}
-				blog(LOG_WARNING, "MP: hardware decoder %s failed to open (%s); falling back to software", name,
-				     av_err2str(ret));
+				if (!high_bit_depth || try_p010) {
+					ret = mp_open_codec(d, false, true, try_p010, NULL);
+					if (ret >= 0) {
+						d->android_hw_first_frame_pending = true;
+						blog(LOG_INFO, "MP: hardware MediaCodec decoder opened: %s%s", name,
+						     try_p010 ? " (P010)" : "");
+						goto codec_opened;
+					}
+				}
+				blog(LOG_WARNING, "MP: hardware decoder %s failed to open (%s); falling back to software",
+				     name, av_err2str(ret));
 				d->codec = software;
 			} else {
 				blog(LOG_INFO, "MP: %s decoder not available; using software", name);
@@ -233,7 +311,7 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 	if (hw && type == AVMEDIA_TYPE_VIDEO && high_bit_depth)
 		blog(LOG_INFO, "MP: using software decode to retain HDR source precision");
 #endif
-	ret = mp_open_codec(d, hw, false, false);
+	ret = mp_open_codec(d, hw, false, false, NULL);
 	if (ret < 0) {
 		blog(LOG_WARNING, "MP: Failed to open %s decoder: %s", av_get_media_type_string(type), av_err2str(ret));
 		return false;
@@ -368,10 +446,10 @@ static int decode_packet(struct mp_decode *d, int *got_frame)
 #ifdef __ANDROID__
 	if (*got_frame && d->android_hw_first_frame_pending) {
 		const char *pixel_format = av_get_pix_fmt_name(d->in_frame->format);
-		blog(LOG_INFO, "MP: MediaCodec decoder first frame: decoder=%s hardware=true "
+		blog(LOG_INFO, "MP: MediaCodec decoder first frame: decoder=%s hardware=true surface=%s "
 			       "width=%d height=%d coded=%dx%d linesize=%d,%d,%d "
 			       "crop=%zu,%zu,%zu,%zu pixfmt=%s",
-		     d->codec->name, d->in_frame->width, d->in_frame->height,
+		     d->codec->name, d->android_surface ? "true" : "false", d->in_frame->width, d->in_frame->height,
 		     d->decoder->coded_width, d->decoder->coded_height, d->in_frame->linesize[0],
 		     d->in_frame->linesize[1], d->in_frame->linesize[2], d->in_frame->crop_top,
 		     d->in_frame->crop_bottom, d->in_frame->crop_left, d->in_frame->crop_right,
@@ -382,6 +460,12 @@ static int decode_packet(struct mp_decode *d, int *got_frame)
 	}
 #endif
 	if (*got_frame && d->hw) {
+#ifdef __ANDROID__
+		if (d->android_surface && d->hw_frame->format == AV_PIX_FMT_MEDIACODEC) {
+			d->frame = d->hw_frame;
+			return ret;
+		}
+#endif
 		if (d->hw_frame->format != d->hw_format) {
 			d->frame = d->hw_frame;
 			return ret;
@@ -495,6 +579,10 @@ bool mp_decode_next(struct mp_decode *d)
 
 void mp_decode_flush(struct mp_decode *d)
 {
+	if (d->hw_frame)
+		av_frame_unref(d->hw_frame);
+	if (d->sw_frame)
+		av_frame_unref(d->sw_frame);
 	avcodec_flush_buffers(d->decoder);
 	mp_decode_clear_packets(d);
 	d->eof = false;

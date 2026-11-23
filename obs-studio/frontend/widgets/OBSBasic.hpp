@@ -844,6 +844,9 @@ private:
 	bool IsFFmpegOutputToURL() const;
 	bool OutputPathValid();
 	void OutputPathInvalidMessage();
+#ifdef __ANDROID__
+	void NotifyAndroidSoftwareEncoderFallback(bool forStreaming, bool forRecording, bool configOnly = false);
+#endif
 
 	// TODO: Unimplemented, remove.
 	void SetupEncoders();

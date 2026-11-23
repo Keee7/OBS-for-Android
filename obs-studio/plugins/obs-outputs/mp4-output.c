@@ -20,6 +20,9 @@
 #include <inttypes.h>
 
 #include <obs-module.h>
+#ifdef __ANDROID__
+#include <obs-android.h>
+#endif
 #include <util/platform.h>
 #include <util/deque.h>
 #include <util/dstr.h>
@@ -72,6 +75,7 @@ struct mp4_output {
 	/* File splitting stuff */
 	bool split_file_enabled;
 	bool split_file_ready;
+	bool owns_replay_document;
 	volatile bool manual_split;
 
 	size_t cur_size;
@@ -273,7 +277,25 @@ static void parse_custom_options(struct mp4_output *out, const char *opts_str)
 	out->flags = flags;
 }
 
-static void generate_filename(struct mp4_output *out, struct dstr *dst, bool overwrite);
+static void finish_current_document(struct mp4_output *out, bool publish)
+{
+#ifdef __ANDROID__
+	if (!out->owns_replay_document)
+		return;
+	out->owns_replay_document = false;
+	if (out->path.len && !obs_android_finish_replay_document(out->path.array, publish)) {
+		if (publish)
+			warn("Could not publish recording document '%s'", out->path.array);
+		else
+			warn("Could not remove unfinished recording document '%s'", out->path.array);
+	}
+#else
+	UNUSED_PARAMETER(out);
+	UNUSED_PARAMETER(publish);
+#endif
+}
+
+static bool generate_filename(struct mp4_output *out, struct dstr *dst, bool overwrite);
 
 static bool mp4_output_start(void *data)
 {
@@ -293,13 +315,18 @@ static bool mp4_output_start(void *data)
 	out->allow_overwrite = obs_data_get_bool(settings, "allow_overwrite");
 	out->cur_size = 0;
 	out->start_time = 0;
+	out->owns_replay_document = false;
 
 	/* Get path */
 	const char *path = obs_data_get_string(settings, "path");
 	if (path && *path) {
 		dstr_copy(&out->path, path);
 	} else {
-		generate_filename(out, &out->path, out->allow_overwrite);
+		if (!generate_filename(out, &out->path, out->allow_overwrite)) {
+			warn("Unable to generate output path");
+			obs_data_release(settings);
+			return false;
+		}
 		info("Output path not specified. Using generated path '%s'", out->path.array);
 	}
 
@@ -316,6 +343,7 @@ static bool mp4_output_start(void *data)
 
 	if (!buffered_file_serializer_init(&out->serializer, out->path.array, out->buffer_size, out->chunk_size)) {
 		warn("Unable to open file '%s'", out->path.array);
+		finish_current_document(out, false);
 		return false;
 	}
 
@@ -335,6 +363,7 @@ static bool mp4_output_start(void *data)
 		mp4_mux_destroy(out->muxer);
 		out->muxer = NULL;
 		buffered_file_serializer_free(&out->serializer);
+		finish_current_document(out, false);
 		return false;
 	}
 
@@ -396,7 +425,7 @@ static void find_best_filename(struct dstr *path, bool space)
 	}
 }
 
-static void generate_filename(struct mp4_output *out, struct dstr *dst, bool overwrite)
+static bool generate_filename(struct mp4_output *out, struct dstr *dst, bool overwrite)
 {
 	obs_data_t *settings = obs_output_get_settings(out->output);
 	const char *dir = obs_data_get_string(settings, "directory");
@@ -405,6 +434,35 @@ static void generate_filename(struct mp4_output *out, struct dstr *dst, bool ove
 	bool space = obs_data_get_bool(settings, "allow_spaces");
 
 	char *filename = os_generate_formatted_filename(ext, space, fmt);
+	bool ok = filename && *filename;
+
+	dstr_free(dst);
+	out->owns_replay_document = false;
+
+	if (!ok)
+		goto done;
+
+#ifdef __ANDROID__
+	if (dir && *dir) {
+		char *uri = NULL;
+		ok = obs_android_create_replay_document(dir, filename, &uri);
+		if (!ok) {
+			warn("Unable to create recording document '%s' in '%s'", filename, dir);
+			goto done;
+		}
+		if (uri) {
+			dstr_copy(dst, uri);
+			bfree(uri);
+			out->owns_replay_document = true;
+			goto done;
+		}
+	}
+	if (dir && strncmp(dir, "content://", 10) == 0) {
+		warn("Unable to resolve Android document directory '%s'", dir);
+		ok = false;
+		goto done;
+	}
+#endif
 
 	dstr_copy(dst, dir);
 	dstr_replace(dst, "\\", "/");
@@ -422,8 +480,10 @@ static void generate_filename(struct mp4_output *out, struct dstr *dst, bool ove
 	if (!overwrite)
 		find_best_filename(dst, space);
 
+done:
 	bfree(filename);
 	obs_data_release(settings);
+	return ok;
 }
 
 static bool change_file(struct mp4_output *out, struct encoder_packet *pkt)
@@ -437,17 +497,23 @@ static bool change_file(struct mp4_output *out, struct encoder_packet *pkt)
 
 	/* flush/close file and destroy old muxer */
 	buffered_file_serializer_free(&out->serializer);
+	finish_current_document(out, true);
 	mp4_mux_destroy(out->muxer);
+	out->muxer = NULL;
 	mp4_clear_chapters(out);
 
 	info("File split complete. Finalization took %" PRIu64 " ms.", (os_gettime_ns() - start_time) / 1000000);
 
 	/* open new file */
-	generate_filename(out, &out->path, out->allow_overwrite);
+	if (!generate_filename(out, &out->path, out->allow_overwrite)) {
+		warn("Unable to generate next output filename");
+		return false;
+	}
 	info("Changing output file to '%s'", out->path.array);
 
 	if (!buffered_file_serializer_init(&out->serializer, out->path.array, out->buffer_size, out->chunk_size)) {
 		warn("Unable to open file '%s'", out->path.array);
+		finish_current_document(out, false);
 		return false;
 	}
 
@@ -481,11 +547,13 @@ static void mp4_mux_destroy_task(void *ptr)
 static void mp4_output_actual_stop(struct mp4_output *out, int code)
 {
 	os_atomic_set_bool(&out->active, false);
-	obs_output_remove_packet_callback(out->output, mp4_pkt_callback, NULL);
+	obs_output_remove_packet_callback(out->output, mp4_pkt_callback, (void *)out);
 
 	uint64_t start_time = os_gettime_ns();
+	const bool has_muxer = out->muxer != NULL;
 
-	mp4_mux_finalise(out->muxer);
+	if (has_muxer)
+		mp4_mux_finalise(out->muxer);
 
 	if (out->enable_bpm) {
 		obs_output_remove_packet_callback(out->output, bpm_inject, NULL);
@@ -498,12 +566,22 @@ static void mp4_output_actual_stop(struct mp4_output *out, int code)
 		obs_output_end_data_capture(out->output);
 	}
 
+	for (size_t i = 0; i < out->split_buffer.num; i++)
+		obs_encoder_packet_release(&out->split_buffer.array[i]);
+	da_free(out->split_buffer);
+	out->split_file_ready = false;
+
 	info("Waiting for file writer to finish...");
 
 	/* Flush/close output file and destroy muxer */
 	buffered_file_serializer_free(&out->serializer);
-	obs_queue_task(OBS_TASK_DESTROY, mp4_mux_destroy_task, out->muxer, false);
-	out->muxer = NULL;
+	if (has_muxer) {
+		finish_current_document(out, true);
+		obs_queue_task(OBS_TASK_DESTROY, mp4_mux_destroy_task, out->muxer, false);
+		out->muxer = NULL;
+	} else {
+		finish_current_document(out, false);
+	}
 
 	/* Clear chapter data */
 	mp4_clear_chapters(out);
