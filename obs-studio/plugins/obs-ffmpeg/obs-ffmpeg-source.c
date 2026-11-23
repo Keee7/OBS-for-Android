@@ -435,6 +435,46 @@ static void check_async_filter_cb(obs_source_t *parent, obs_source_t *filter, vo
 		*found = true;
 }
 
+static bool stage_gpu_image_to_async_frame(struct ffmpeg_source *s)
+{
+	bool staged = false;
+	uint32_t w = 0, h = 0;
+	gs_stagesurf_t *stage = NULL;
+
+	obs_enter_graphics();
+	pthread_mutex_lock(&s->gpu_mx);
+	if (s->gpu_image && !s->gpu_cleared && s->gpu_tex_width > 0 && s->gpu_tex_height > 0) {
+		w = s->gpu_tex_width;
+		h = s->gpu_tex_height;
+		stage = gs_stagesurface_create(w, h, GS_RGBA);
+		if (stage)
+			gs_stage_texture(stage, s->gpu_image);
+	}
+	pthread_mutex_unlock(&s->gpu_mx);
+
+	if (stage) {
+		uint8_t *mapped = NULL;
+		uint32_t linesize = 0;
+		if (gs_stagesurface_map(stage, &mapped, &linesize) && mapped && linesize > 0) {
+			struct obs_source_frame frame = {0};
+			frame.format = VIDEO_FORMAT_RGBA;
+			frame.width = w;
+			frame.height = h;
+			frame.data[0] = mapped;
+			frame.linesize[0] = linesize;
+			frame.full_range = true;
+			frame.timestamp = os_gettime_ns();
+			set_cpu_video_size(s, &frame);
+			obs_source_output_video(s->source, &frame);
+			gs_stagesurface_unmap(stage);
+			staged = true;
+		}
+		gs_stagesurface_destroy(stage);
+	}
+	obs_leave_graphics();
+	return staged;
+}
+
 static bool has_active_async_video_filter(obs_source_t *source)
 {
 	bool found = false;
@@ -502,7 +542,8 @@ static void ffmpeg_source_open_internal(struct ffmpeg_source *s, bool allow_gpu_
 #ifdef __ANDROID__
 		const bool use_gpu_surface = allow_gpu_surface && !os_atomic_load_long(&s->gpu_surface_disabled) &&
 					     !s->full_decode && !s->is_stinger && !s->is_track_matte &&
-					     !s->is_linear_alpha && !has_active_async_video_filter(s->source) &&
+					     !s->is_linear_alpha && s->range == VIDEO_RANGE_DEFAULT &&
+					     !has_active_async_video_filter(s->source) &&
 					     android_gpu_surface_supported();
 #endif
 		struct mp_media_info info = {
@@ -550,6 +591,13 @@ static void ffmpeg_source_start(struct ffmpeg_source *s)
 		return;
 
 	media_playback_play(s->media, s->is_looping, s->reconnecting);
+#ifdef __ANDROID__
+	if (!os_atomic_load_long(&s->gpu_active)) {
+		pthread_mutex_lock(&s->gpu_mx);
+		s->gpu_cleared = true;
+		pthread_mutex_unlock(&s->gpu_mx);
+	}
+#endif
 	if (s->is_local_file && media_playback_has_video(s->media) && (s->is_clear_on_media_end || s->is_looping))
 		obs_source_show_preloaded_video(s->source);
 	else
@@ -590,15 +638,32 @@ static void reopen_without_android_gpu_surface(struct ffmpeg_source *s, const ch
 	const enum obs_media_state prev_state = s->state;
 	const bool should_start = prev_state == OBS_MEDIA_STATE_PLAYING || prev_state == OBS_MEDIA_STATE_PAUSED;
 	const int64_t pos_ms = should_start && s->is_local_file ? media_playback_get_current_time(s->media) : 0;
+	const bool preserve_last_frame = prev_state == OBS_MEDIA_STATE_ENDED && !s->is_clear_on_media_end && !permanent;
+	bool keep_gpu_tex = false;
 	FF_BLOG(LOG_WARNING, "%s", reason);
+
+	if (preserve_last_frame && !stage_gpu_image_to_async_frame(s)) {
+		pthread_mutex_lock(&s->gpu_mx);
+		keep_gpu_tex = !s->gpu_cleared && s->gpu_image && s->gpu_tex_width > 0 && s->gpu_tex_height > 0;
+		pthread_mutex_unlock(&s->gpu_mx);
+	}
 
 	media_playback_destroy(s->media);
 	s->media = NULL;
-	destroy_android_gpu_surface(s);
+	if (keep_gpu_tex) {
+		release_android_native_window(s);
+		pthread_mutex_lock(&s->gpu_mx);
+		s->gpu_width = 0;
+		s->gpu_height = 0;
+		pthread_mutex_unlock(&s->gpu_mx);
+	} else {
+		destroy_android_gpu_surface(s);
+	}
 
 	if (!should_start && prev_state == OBS_MEDIA_STATE_ENDED && s->close_when_inactive &&
 	    !obs_source_active(s->source)) {
-		clear_video_output(s);
+		if (s->is_clear_on_media_end)
+			clear_video_output(s);
 		set_media_state(s, prev_state);
 		return;
 	}
@@ -1108,28 +1173,36 @@ static obs_missing_files_t *ffmpeg_source_missingfiles(void *data)
 }
 
 #ifdef __ANDROID__
-static uint32_t ffmpeg_source_get_width(void *data)
+static uint32_t get_android_source_dim(struct ffmpeg_source *s, bool height)
 {
-	struct ffmpeg_source *s = data;
-	if (!os_atomic_load_long(&s->gpu_active))
-		return (uint32_t)os_atomic_load_long(&s->cpu_width);
+	if (!os_atomic_load_long(&s->gpu_active)) {
+		const uint32_t cpu_dim = (uint32_t)os_atomic_load_long(height ? &s->cpu_height : &s->cpu_width);
+		if (cpu_dim)
+			return cpu_dim;
+		pthread_mutex_lock(&s->gpu_mx);
+		const uint32_t held_dim = (!s->gpu_cleared && s->gpu_image)
+						  ? (height ? s->gpu_tex_height : s->gpu_tex_width)
+						  : 0;
+		pthread_mutex_unlock(&s->gpu_mx);
+		return held_dim;
+	}
 
 	pthread_mutex_lock(&s->gpu_mx);
-	uint32_t w = s->gpu_cleared ? 0 : (s->gpu_tex_width ? s->gpu_tex_width : s->gpu_width);
+	uint32_t d = s->gpu_cleared ? 0
+				    : (height ? (s->gpu_tex_height ? s->gpu_tex_height : s->gpu_height)
+					      : (s->gpu_tex_width ? s->gpu_tex_width : s->gpu_width));
 	pthread_mutex_unlock(&s->gpu_mx);
-	return w;
+	return d;
+}
+
+static uint32_t ffmpeg_source_get_width(void *data)
+{
+	return get_android_source_dim(data, false);
 }
 
 static uint32_t ffmpeg_source_get_height(void *data)
 {
-	struct ffmpeg_source *s = data;
-	if (!os_atomic_load_long(&s->gpu_active))
-		return (uint32_t)os_atomic_load_long(&s->cpu_height);
-
-	pthread_mutex_lock(&s->gpu_mx);
-	uint32_t h = s->gpu_cleared ? 0 : (s->gpu_tex_height ? s->gpu_tex_height : s->gpu_height);
-	pthread_mutex_unlock(&s->gpu_mx);
-	return h;
+	return get_android_source_dim(data, true);
 }
 
 static void ffmpeg_source_render(void *data, gs_effect_t *effect)
@@ -1137,6 +1210,21 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 	UNUSED_PARAMETER(effect);
 	struct ffmpeg_source *s = data;
 	if (!os_atomic_load_long(&s->gpu_active)) {
+		if (!os_atomic_load_long(&s->cpu_width)) {
+			pthread_mutex_lock(&s->gpu_mx);
+			gs_texture_t *held = (!s->gpu_cleared && s->gpu_image) ? s->gpu_image : NULL;
+			const uint32_t held_w = s->gpu_tex_width;
+			const uint32_t held_h = s->gpu_tex_height;
+			pthread_mutex_unlock(&s->gpu_mx);
+			if (held && held_w && held_h) {
+				const bool prev_linear = gs_set_linear_srgb(false);
+				gs_effect_t *draw = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+				while (gs_effect_loop(draw, "Draw"))
+					obs_source_draw(held, 0, 0, held_w, held_h, false);
+				gs_set_linear_srgb(prev_linear);
+				return;
+			}
+		}
 		obs_source_draw_async_frame(s->source);
 		return;
 	}

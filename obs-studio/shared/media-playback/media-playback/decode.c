@@ -256,7 +256,7 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 			      (pixdesc && pixdesc->nb_components && pixdesc->comp[0].depth == 10) ||
 			      params->bits_per_raw_sample == 10 || hdr_trc || hdr_colors || d->max_luminance > 0;
 	const bool surface_capable = hw && type == AVMEDIA_TYPE_VIDEO && m->acquire_native_window &&
-				     !high_bit_depth && !try_p010;
+				     m->force_range == VIDEO_RANGE_DEFAULT && !high_bit_depth && !try_p010;
 	if (hw && type == AVMEDIA_TYPE_VIDEO && (surface_capable || !high_bit_depth || try_p010)) {
 		const char *name = NULL;
 		switch (id) {
