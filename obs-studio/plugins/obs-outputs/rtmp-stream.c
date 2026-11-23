@@ -245,10 +245,8 @@ static inline bool get_next_packet(struct rtmp_stream *stream, struct encoder_pa
 	return new_packet;
 }
 
-static bool process_recv_data(struct rtmp_stream *stream, size_t size)
+static bool process_recv_data(struct rtmp_stream *stream)
 {
-	UNUSED_PARAMETER(size);
-
 	RTMP *rtmp = &stream->rtmp;
 	RTMPPacket packet = {0};
 
@@ -263,10 +261,11 @@ static bool process_recv_data(struct rtmp_stream *stream, size_t size)
 	}
 
 	if (packet.m_body) {
-		/* do processing here */
+		if (RTMPPacket_IsReady(&packet))
+			RTMP_ClientPacket(rtmp, &packet);
 		RTMPPacket_Free(&packet);
 	}
-	return true;
+	return RTMP_IsConnected(rtmp);
 }
 
 #ifdef TEST_FRAMEDROPS
@@ -382,20 +381,21 @@ retry_send:
 
 static int handle_socket_read(struct rtmp_stream *stream)
 {
+	if (stream->new_socket_loop)
+		return 0;
+
 	int ret = 0;
-	int recv_size = 0;
-	if (!stream->new_socket_loop) {
+	/* A read during publish can already have buffered later control packets. */
+	int recv_size = stream->rtmp.m_sb.sb_size;
+	if (!recv_size) {
 #ifdef _WIN32
 		ret = ioctlsocket(stream->rtmp.m_sb.sb_socket, FIONREAD, (u_long *)&recv_size);
 #else
 		ret = ioctl(stream->rtmp.m_sb.sb_socket, FIONREAD, &recv_size);
 #endif
-
-		if (ret >= 0 && recv_size > 0) {
-			if (!process_recv_data(stream, (size_t)recv_size))
-				return -1;
-		}
 	}
+	if (ret >= 0 && recv_size > 0 && !process_recv_data(stream))
+		return -1;
 	return 0;
 }
 

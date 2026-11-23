@@ -4353,20 +4353,20 @@ RTMP_Close(RTMP *r)
             {
                 i = r->Link.streams[idx].id;
                 r->Link.streams[idx].id = 0;
-                if ((r->Link.protocol & RTMP_FEATURE_WRITE))
-                    SendFCUnpublish(r, idx);
-                SendDeleteStream(r, (double)i);
+                if ((r->Link.protocol & RTMP_FEATURE_WRITE) && !SendFCUnpublish(r, idx))
+                    break;
+                if (!SendDeleteStream(r, (double)i))
+                    break;
             }
         }
-        if (r->m_clientID.av_val)
-        {
+        if (r->m_clientID.av_val && RTMP_IsConnected(r))
             HTTP_Post(r, RTMPT_CLOSE, "", 1);
-            free(r->m_clientID.av_val);
-            r->m_clientID.av_val = NULL;
-            r->m_clientID.av_len = 0;
-        }
         RTMPSockBuf_Close(&r->m_sb);
     }
+
+    free(r->m_clientID.av_val);
+    r->m_clientID.av_val = NULL;
+    r->m_clientID.av_len = 0;
 
     for (int idx = 0; idx < r->Link.nStreams; idx++)
         r->Link.streams[idx].id = -1;
@@ -4564,9 +4564,9 @@ RTMPSockBuf_Close(RTMPSockBuf *sb)
         sb->sb_ssl = NULL;
     }
 #endif
-    if (sb->sb_socket != INVALID_SOCKET)
-        return closesocket(sb->sb_socket);
-    return 0;
+    SOCKET socket = sb->sb_socket;
+    sb->sb_socket = INVALID_SOCKET;
+    return socket == INVALID_SOCKET ? 0 : closesocket(socket);
 }
 
 #define HEX2BIN(a)	(((a)&0x40)?((a)&0xf)+9:((a)&0xf))
