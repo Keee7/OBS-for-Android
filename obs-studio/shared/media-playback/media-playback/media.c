@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <libavcodec/mediacodec.h>
 #endif
 
 #include "media-playback.h"
@@ -300,6 +301,18 @@ static bool mp_media_update_scaling(mp_media_t *m)
 		memset(m->scale_pic, 0, sizeof(m->scale_pic));
 		memset(m->scale_linesizes, 0, sizeof(m->scale_linesizes));
 		m->scale_initialized = false;
+#ifdef __ANDROID__
+		if (f->format == AV_PIX_FMT_MEDIACODEC) {
+			m->scale_format = f->format;
+			m->scale_input_width = f->width;
+			m->scale_input_height = f->height;
+			m->scale_input_format = f->format;
+			m->scale_input_colorspace = f->colorspace;
+			m->scale_input_range = f->color_range;
+			m->scale_initialized = true;
+			return true;
+		}
+#endif
 		m->scale_format = closest_format(f->format);
 		if (m->scale_format != f->format && !mp_media_init_scaling(m))
 			return false;
@@ -445,6 +458,50 @@ void mp_media_next_video(mp_media_t *m, bool preload)
 		     f->width, f->height);
 		return;
 	}
+
+#ifdef __ANDROID__
+	if (d->android_surface && f->format == AV_PIX_FMT_MEDIACODEC) {
+		new_space = convert_color_space(f->colorspace, f->color_trc, f->color_primaries);
+		new_range = m->force_range == VIDEO_RANGE_DEFAULT ? convert_color_range(f->color_range)
+								  : m->force_range;
+		enum video_trc trc = VIDEO_TRC_DEFAULT;
+		switch (f->color_trc) {
+		case AVCOL_TRC_BT709:
+		case AVCOL_TRC_GAMMA22:
+		case AVCOL_TRC_GAMMA28:
+		case AVCOL_TRC_SMPTE170M:
+		case AVCOL_TRC_SMPTE240M:
+		case AVCOL_TRC_IEC61966_2_1:
+			trc = VIDEO_TRC_SRGB;
+			break;
+		case AVCOL_TRC_SMPTE2084:
+			trc = VIDEO_TRC_PQ;
+			break;
+		case AVCOL_TRC_ARIB_STD_B67:
+			trc = VIDEO_TRC_HLG;
+			break;
+		default:
+			break;
+		}
+		if (!m->is_local_file && !d->got_first_keyframe) {
+			if (!(f->flags & AV_FRAME_FLAG_KEY))
+				return;
+			d->got_first_keyframe = true;
+		}
+		AVMediaCodecBuffer *mc_buf = (AVMediaCodecBuffer *)f->data[3];
+		int v_width = f->width;
+		int v_height = f->height;
+		if (mc_buf)
+			av_mediacodec_release_buffer(mc_buf, 1);
+		av_frame_unref(f);
+		if (preload)
+			d->frame_ready = false;
+		if (m->v_gpu_cb)
+			m->v_gpu_cb(m->opaque, (uint32_t)v_width, (uint32_t)v_height, new_space, new_range, trc,
+				    preload);
+		return;
+	}
+#endif
 
 	bool flip = false;
 	if (m->swscale) {
@@ -959,6 +1016,11 @@ bool mp_media_init(mp_media_t *media, const struct mp_media_info *info)
 	media->v_cb = info->v_cb;
 	media->a_cb = info->a_cb;
 	media->stop_cb = info->stop_cb;
+#ifdef __ANDROID__
+	media->acquire_native_window = info->acquire_native_window;
+	media->release_native_window = info->release_native_window;
+	media->v_gpu_cb = info->v_gpu_cb;
+#endif
 	media->ffmpeg_options = info->ffmpeg_options;
 	media->v_seek_cb = info->v_seek_cb;
 	media->v_preload_cb = info->v_preload_cb;

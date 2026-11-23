@@ -24,6 +24,13 @@ typedef struct media_playback media_playback_t;
 typedef void (*mp_video_cb)(void *opaque, struct obs_source_frame *frame);
 typedef void (*mp_audio_cb)(void *opaque, struct obs_source_audio *audio);
 typedef void (*mp_stop_cb)(void *opaque);
+#ifdef __ANDROID__
+typedef void *(*mp_android_window_cb)(void *opaque, int width, int height);
+typedef void (*mp_android_release_window_cb)(void *opaque);
+typedef void (*mp_android_gpu_video_cb)(void *opaque, uint32_t width, uint32_t height,
+					enum video_colorspace space, enum video_range_type range,
+					enum video_trc trc, bool preload);
+#endif
 
 struct mp_media_info {
 	void *opaque;
@@ -33,6 +40,11 @@ struct mp_media_info {
 	mp_video_cb v_seek_cb;
 	mp_audio_cb a_cb;
 	mp_stop_cb stop_cb;
+#ifdef __ANDROID__
+	mp_android_window_cb acquire_native_window;
+	mp_android_release_window_cb release_native_window;
+	mp_android_gpu_video_cb v_gpu_cb;
+#endif
 
 	const char *path;
 	const char *format;

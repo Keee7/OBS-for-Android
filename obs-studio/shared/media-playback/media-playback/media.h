@@ -51,6 +51,11 @@ struct mp_media {
 	mp_video_cb v_cb;
 	mp_audio_cb a_cb;
 	void *opaque;
+#ifdef __ANDROID__
+	mp_android_window_cb acquire_native_window;
+	mp_android_release_window_cb release_native_window;
+	mp_android_gpu_video_cb v_gpu_cb;
+#endif
 
 	char *path;
 	char *format_name;

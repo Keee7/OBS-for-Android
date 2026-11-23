@@ -5,6 +5,7 @@
 #include <EGL/eglext.h>
 #include <android/native_window.h>
 #include <android/hardware_buffer.h>
+#include <dlfcn.h>
 #include <string.h>
 #include "gl-subsystem.h"
 
@@ -357,6 +358,18 @@ static void restore_state(const struct gl_state *s)
 		set_enabled(GL_FRAMEBUFFER_SRGB_EXT, s->srgb);
 }
 
+#define EGL_IMAGE_CACHE_CAP 24
+
+typedef int (*pfn_ahardwarebuffer_get_id_t)(const AHardwareBuffer *, uint64_t *);
+
+struct external_image_slot {
+	AHardwareBuffer *buffer;
+	uint64_t id;
+	bool has_id;
+	EGLImageKHR image;
+	uint32_t last_use;
+};
+
 struct external_texture {
 	GLuint external, program, vao, fbo;
 	GLint transform, image;
@@ -364,9 +377,13 @@ struct external_texture {
 	uint32_t width, height;
 	/* Set only when frames arrive as AHardwareBuffers (reader mode). */
 	EGLDisplay egl_display;
-	EGLImageKHR egl_image;
 	PFNEGLCREATEIMAGEKHRPROC create_image;
 	PFNEGLDESTROYIMAGEKHRPROC destroy_image;
+	PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC get_native_client_buffer;
+	pfn_ahardwarebuffer_get_id_t get_buffer_id;
+	bool get_buffer_id_probed;
+	struct external_image_slot image_cache[EGL_IMAGE_CACHE_CAP];
+	uint32_t cache_tick;
 };
 
 gs_android_external_texture_t *device_android_external_texture_create(gs_device_t *device, uint32_t width,
@@ -467,75 +484,114 @@ bool device_android_external_texture_set_buffer(gs_android_external_texture_t *t
 		return false;
 	}
 
-	/* Replace one frame late on purpose: the command stream submitted last
-	 * frame may still be sampling the previous image, and the producer only
-	 * recycles a buffer once its AHardwareBuffer is released. */
-	if (t->egl_image != EGL_NO_IMAGE_KHR) {
-		t->destroy_image(t->egl_display, t->egl_image);
-		t->egl_image = EGL_NO_IMAGE_KHR;
-	}
-	/* EGL_IMAGE_PRESERVED_KHR is not part of EGL_ANDROID_image_native_buffer
-	 * and the driver rejects it for AHardwareBuffers (EGL_BAD_PARAMETER), so
-	 * no attributes are passed. */
-	/* Different drivers want different inputs here, so try the four documented
-	 * combinations once and remember the one that works: an AHardwareBuffer is
-	 * either wrapped by eglGetNativeClientBufferANDROID or passed directly, and
-	 * the call either takes the current context or EGL_NO_CONTEXT. */
-	static int working = -1;
-	static bool probed;
-	if (!probed) {
-		probed = true;
-		PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC wrap =
+	if (!t->get_native_client_buffer)
+		t->get_native_client_buffer =
 			(PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC)eglGetProcAddress("eglGetNativeClientBufferANDROID");
-		EGLClientBuffer wrapped = wrap ? wrap((AHardwareBuffer *)hardware_buffer) : NULL;
-		EGLContext ctx = eglGetCurrentContext();
-		const struct {
-			EGLClientBuffer buffer;
-			EGLContext context;
-			const char *name;
-		} variants[] = {
-			{wrapped, ctx, "wrapped+context"},
-			{wrapped, EGL_NO_CONTEXT, "wrapped"},
-			{(EGLClientBuffer)hardware_buffer, ctx, "direct+context"},
-			{(EGLClientBuffer)hardware_buffer, EGL_NO_CONTEXT, "direct"},
-		};
-		for (int i = 0; i < 4 && working < 0; i++) {
-			if (!variants[i].buffer)
-				continue;
-			EGLImageKHR image = t->create_image(t->egl_display, variants[i].context,
-							    EGL_NATIVE_BUFFER_ANDROID, variants[i].buffer, NULL);
-			const EGLint error = eglGetError();
-			if (image != EGL_NO_IMAGE_KHR) {
-				working = i;
-				blog(LOG_INFO, "Android interop: EGL image via %s", variants[i].name);
-				t->egl_image = image;
+	if (!t->get_buffer_id_probed) {
+		t->get_buffer_id_probed = true;
+		t->get_buffer_id = (pfn_ahardwarebuffer_get_id_t)dlsym(RTLD_DEFAULT, "AHardwareBuffer_getId");
+	}
+
+	AHardwareBuffer *hb = (AHardwareBuffer *)hardware_buffer;
+	uint64_t hb_id = 0;
+	const bool has_id = (t->get_buffer_id && t->get_buffer_id(hb, &hb_id) == 0);
+	EGLImageKHR image = EGL_NO_IMAGE_KHR;
+	for (size_t i = 0; i < EGL_IMAGE_CACHE_CAP; i++) {
+		if (t->image_cache[i].image == EGL_NO_IMAGE_KHR || !t->image_cache[i].buffer)
+			continue;
+		const bool match = has_id ? (t->image_cache[i].has_id && t->image_cache[i].id == hb_id)
+					  : (t->image_cache[i].buffer == hb);
+		if (match) {
+			image = t->image_cache[i].image;
+			t->image_cache[i].last_use = ++t->cache_tick;
+			break;
+		}
+	}
+
+	if (image == EGL_NO_IMAGE_KHR) {
+		/* EGL_IMAGE_PRESERVED_KHR is not part of EGL_ANDROID_image_native_buffer
+		 * and the driver rejects it for AHardwareBuffers (EGL_BAD_PARAMETER), so
+		 * no attributes are passed. */
+		/* Different drivers want different inputs here, so try the four documented
+		 * combinations once and remember the one that works: an AHardwareBuffer is
+		 * either wrapped by eglGetNativeClientBufferANDROID or passed directly, and
+		 * the call either takes the current context or EGL_NO_CONTEXT. */
+		static int working = -1;
+		static bool probed;
+		if (!probed) {
+			probed = true;
+			EGLClientBuffer wrapped =
+				t->get_native_client_buffer ? t->get_native_client_buffer(hb) : NULL;
+			EGLContext ctx = eglGetCurrentContext();
+			const struct {
+				EGLClientBuffer buffer;
+				EGLContext context;
+				const char *name;
+			} variants[] = {
+				{wrapped, ctx, "wrapped+context"},
+				{wrapped, EGL_NO_CONTEXT, "wrapped"},
+				{(EGLClientBuffer)hb, ctx, "direct+context"},
+				{(EGLClientBuffer)hb, EGL_NO_CONTEXT, "direct"},
+			};
+			for (int i = 0; i < 4 && working < 0; i++) {
+				if (!variants[i].buffer)
+					continue;
+				EGLImageKHR candidate = t->create_image(t->egl_display, variants[i].context,
+									EGL_NATIVE_BUFFER_ANDROID,
+									variants[i].buffer, NULL);
+				const EGLint error = eglGetError();
+				if (candidate != EGL_NO_IMAGE_KHR) {
+					working = i;
+					blog(LOG_INFO, "Android interop: EGL image via %s", variants[i].name);
+					image = candidate;
+					break;
+				}
+				blog(LOG_INFO, "Android interop: EGL image via %s failed (0x%x)",
+				     variants[i].name, error);
+			}
+			if (working < 0) {
+				AHardwareBuffer_Desc desc = {0};
+				AHardwareBuffer_describe(hb, &desc);
+				blog(LOG_ERROR, "Android interop: no EGL image path for %ux%u format=%u usage=0x%llx",
+				     desc.width, desc.height, desc.format, (unsigned long long)desc.usage);
+				return false;
+			}
+		} else if (working >= 0) {
+			EGLClientBuffer client = (EGLClientBuffer)hb;
+			if (working <= 1 && t->get_native_client_buffer)
+				client = t->get_native_client_buffer(hb);
+			const EGLContext ctx =
+				(working == 0 || working == 2) ? eglGetCurrentContext() : EGL_NO_CONTEXT;
+			image = t->create_image(t->egl_display, ctx, EGL_NATIVE_BUFFER_ANDROID, client, NULL);
+		}
+		if (image == EGL_NO_IMAGE_KHR)
+			return false;
+
+		size_t slot = 0;
+		for (size_t i = 0; i < EGL_IMAGE_CACHE_CAP; i++) {
+			if (!t->image_cache[i].buffer) {
+				slot = i;
 				break;
 			}
-			blog(LOG_INFO, "Android interop: EGL image via %s failed (0x%x)", variants[i].name, error);
+			if (t->image_cache[i].last_use < t->image_cache[slot].last_use)
+				slot = i;
 		}
-		if (working < 0) {
-			AHardwareBuffer_Desc desc = {0};
-			AHardwareBuffer_describe((const AHardwareBuffer *)hardware_buffer, &desc);
-			blog(LOG_ERROR, "Android interop: no EGL image path for %ux%u format=%u usage=0x%llx",
-			     desc.width, desc.height, desc.format, (unsigned long long)desc.usage);
-			return false;
-		}
-	} else if (working >= 0) {
-		PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC wrap =
-			(PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC)eglGetProcAddress("eglGetNativeClientBufferANDROID");
-		EGLClientBuffer client = (EGLClientBuffer)hardware_buffer;
-		if (working <= 1 && wrap)
-			client = wrap((AHardwareBuffer *)hardware_buffer);
-		const EGLContext ctx = (working == 0 || working == 2) ? eglGetCurrentContext() : EGL_NO_CONTEXT;
-		t->egl_image = t->create_image(t->egl_display, ctx, EGL_NATIVE_BUFFER_ANDROID, client, NULL);
+		if (t->image_cache[slot].image != EGL_NO_IMAGE_KHR)
+			t->destroy_image(t->egl_display, t->image_cache[slot].image);
+		if (t->image_cache[slot].buffer)
+			AHardwareBuffer_release(t->image_cache[slot].buffer);
+		AHardwareBuffer_acquire(hb);
+		t->image_cache[slot].buffer = hb;
+		t->image_cache[slot].id = hb_id;
+		t->image_cache[slot].has_id = has_id;
+		t->image_cache[slot].image = image;
+		t->image_cache[slot].last_use = ++t->cache_tick;
 	}
-	if (t->egl_image == EGL_NO_IMAGE_KHR)
-		return false;
 
 	struct gl_state state;
 	save_state(&state);
 	glBindTexture(GL_TEXTURE_EXTERNAL_OES, t->external);
-	glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)t->egl_image);
+	glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)image);
 	const bool ok = glGetError() == GL_NO_ERROR;
 	restore_state(&state);
 	if (!ok) {
@@ -553,9 +609,15 @@ void device_android_external_texture_destroy(gs_android_external_texture_t *text
 	struct external_texture *t = texture;
 	if (!t)
 		return;
-	if (t->egl_image != EGL_NO_IMAGE_KHR && t->destroy_image && t->egl_display != EGL_NO_DISPLAY) {
-		t->destroy_image(t->egl_display, t->egl_image);
-		t->egl_image = EGL_NO_IMAGE_KHR;
+	for (size_t i = 0; i < EGL_IMAGE_CACHE_CAP; i++) {
+		if (t->image_cache[i].buffer) {
+			if (t->image_cache[i].image != EGL_NO_IMAGE_KHR && t->destroy_image &&
+			    t->egl_display != EGL_NO_DISPLAY)
+				t->destroy_image(t->egl_display, t->image_cache[i].image);
+			AHardwareBuffer_release(t->image_cache[i].buffer);
+		}
+		t->image_cache[i].image = EGL_NO_IMAGE_KHR;
+		t->image_cache[i].buffer = NULL;
 	}
 	if (t->fbo)
 		glDeleteFramebuffers(1, &t->fbo);

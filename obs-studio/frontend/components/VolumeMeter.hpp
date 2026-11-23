@@ -6,6 +6,8 @@
 #include <QPixmap>
 #include <QWidget>
 
+#include <atomic>
+
 #define FADER_PRECISION 4096.0
 
 class VolumeMeter : public QWidget {
@@ -130,6 +132,10 @@ private:
 
 	uint64_t lastRedrawTime{0};
 	int channels{0};
+	std::atomic<bool> needsRedraw{true};
+	std::atomic<bool> settledAtFloor{false};
+	std::atomic<uint64_t> lastUpdateTimeNs{0};
+	bool lastPaintedIdle{true};
 	bool clipping{false};
 	bool vertical{false};
 	bool hidden{false};
@@ -193,6 +199,7 @@ public:
 	void setPeakMeterType(enum obs_peak_meter_type peakMeterType);
 
 	virtual void resizeEvent(QResizeEvent *event) override;
+	virtual void showEvent(QShowEvent *event) override;
 	virtual void mousePressEvent(QMouseEvent *event) override;
 	virtual void wheelEvent(QWheelEvent *event) override;
 

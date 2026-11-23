@@ -212,7 +212,11 @@ void MediaControls::StartMediaTimer()
 	}
 
 	if (!mediaTimer.isActive()) {
+#ifdef __ANDROID__
+		mediaTimer.start(compact ? 100 : 50);
+#else
 		mediaTimer.start(compact ? 50 : 16);
+#endif
 	}
 }
 
@@ -354,6 +358,10 @@ void MediaControls::SetSource(OBSSource source)
 
 void MediaControls::SetSliderPosition()
 {
+	if (!isVisible()) {
+		return;
+	}
+
 	OBSSource source = OBSGetStrongRef(weakSource);
 	if (!source) {
 		return;
