@@ -364,6 +364,15 @@ static void release_android_native_window(void *opaque)
 	pthread_mutex_unlock(&s->gpu_mx);
 }
 
+static void on_android_gpu_fail(void *opaque)
+{
+	struct ffmpeg_source *s = opaque;
+	FF_BLOG(LOG_WARNING, "Android MediaCodec Surface output unusable; falling back to non-Surface decode");
+	os_atomic_set_long(&s->gpu_surface_disabled, 1);
+	os_atomic_set_long(&s->gpu_active, 0);
+	os_atomic_set_long(&s->gpu_fallback_pending, 1);
+}
+
 static void on_android_gpu_frame(void *opaque, uint32_t width, uint32_t height, enum video_colorspace space,
 				 enum video_range_type range, enum video_trc trc, bool preload)
 {
@@ -371,10 +380,7 @@ static void on_android_gpu_frame(void *opaque, uint32_t width, uint32_t height, 
 	UNUSED_PARAMETER(range);
 
 	if (space == VIDEO_CS_2100_PQ || space == VIDEO_CS_2100_HLG || trc == VIDEO_TRC_PQ || trc == VIDEO_TRC_HLG) {
-		FF_BLOG(LOG_INFO, "HDR output detected on Android Surface path; falling back to P010/CPU decode");
-		os_atomic_set_long(&s->gpu_surface_disabled, 1);
-		os_atomic_set_long(&s->gpu_active, 0);
-		os_atomic_set_long(&s->gpu_fallback_pending, 1);
+		on_android_gpu_fail(s);
 		return;
 	}
 
@@ -510,6 +516,7 @@ static void ffmpeg_source_open_internal(struct ffmpeg_source *s, bool allow_gpu_
 			.acquire_native_window = use_gpu_surface ? acquire_android_native_window : NULL,
 			.release_native_window = release_android_native_window,
 			.v_gpu_cb = on_android_gpu_frame,
+			.v_gpu_fail_cb = on_android_gpu_fail,
 #endif
 			.path = s->input,
 			.format = s->input_format,
@@ -569,8 +576,6 @@ static void *ffmpeg_source_reconnect(void *data)
 	return NULL;
 }
 
-static void ffmpeg_source_start(struct ffmpeg_source *s);
-
 #ifdef __ANDROID__
 static void reopen_without_android_gpu_surface(struct ffmpeg_source *s, const char *reason, bool permanent)
 {
@@ -582,24 +587,42 @@ static void reopen_without_android_gpu_surface(struct ffmpeg_source *s, const ch
 	if (!s->media)
 		return;
 
-	const bool was_paused = s->state == OBS_MEDIA_STATE_PAUSED;
-	const int64_t pos_ms = s->is_local_file ? media_playback_get_current_time(s->media) : 0;
+	const enum obs_media_state prev_state = s->state;
+	const bool should_start = prev_state == OBS_MEDIA_STATE_PLAYING || prev_state == OBS_MEDIA_STATE_PAUSED;
+	const int64_t pos_ms = should_start && s->is_local_file ? media_playback_get_current_time(s->media) : 0;
 	FF_BLOG(LOG_WARNING, "%s", reason);
 
 	media_playback_destroy(s->media);
 	s->media = NULL;
 	destroy_android_gpu_surface(s);
 
-	ffmpeg_source_open_internal(s, false);
-	if (!s->media)
+	if (!should_start && prev_state == OBS_MEDIA_STATE_ENDED && s->close_when_inactive &&
+	    !obs_source_active(s->source)) {
+		clear_video_output(s);
+		set_media_state(s, prev_state);
 		return;
+	}
+
+	ffmpeg_source_open_internal(s, false);
+	if (!s->media) {
+		set_media_state(s, prev_state);
+		return;
+	}
+
+	if (!should_start) {
+		if (prev_state == OBS_MEDIA_STATE_STOPPED ||
+		    (prev_state == OBS_MEDIA_STATE_ENDED && s->is_clear_on_media_end))
+			clear_video_output(s);
+		set_media_state(s, prev_state);
+		return;
+	}
 
 	ffmpeg_source_start(s);
 	if (s->is_local_file && pos_ms > 0) {
 		const int64_t seek_ms = s->speed_percent != 100 ? pos_ms * 100 / s->speed_percent : pos_ms;
 		media_playback_seek(s->media, seek_ms);
 	}
-	if (was_paused) {
+	if (prev_state == OBS_MEDIA_STATE_PAUSED) {
 		media_playback_play_pause(s->media, true);
 		set_media_state(s, OBS_MEDIA_STATE_PAUSED);
 	}

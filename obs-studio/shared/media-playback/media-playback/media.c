@@ -493,11 +493,25 @@ void mp_media_next_video(mp_media_t *m, bool preload)
 		int v_height = f->height;
 		const bool is_hdr_surface = new_space == VIDEO_CS_2100_PQ || new_space == VIDEO_CS_2100_HLG ||
 					    trc == VIDEO_TRC_PQ || trc == VIDEO_TRC_HLG;
-		if (mc_buf)
-			av_mediacodec_release_buffer(mc_buf, is_hdr_surface ? 0 : 1);
+		const int rel = mc_buf ? av_mediacodec_release_buffer(mc_buf, is_hdr_surface ? 0 : 1)
+				       : AVERROR_INVALIDDATA;
 		av_frame_unref(f);
 		if (preload)
 			d->frame_ready = false;
+		if (is_hdr_surface) {
+			if (m->v_gpu_fail_cb)
+				m->v_gpu_fail_cb(m->opaque);
+			else if (m->v_gpu_cb)
+				m->v_gpu_cb(m->opaque, (uint32_t)v_width, (uint32_t)v_height, new_space, new_range,
+					    trc, preload);
+			return;
+		}
+		if (rel < 0) {
+			blog(LOG_WARNING, "MP: av_mediacodec_release_buffer failed (%d)", rel);
+			if (m->v_gpu_fail_cb)
+				m->v_gpu_fail_cb(m->opaque);
+			return;
+		}
 		if (m->v_gpu_cb)
 			m->v_gpu_cb(m->opaque, (uint32_t)v_width, (uint32_t)v_height, new_space, new_range, trc,
 				    preload);
@@ -1022,6 +1036,7 @@ bool mp_media_init(mp_media_t *media, const struct mp_media_info *info)
 	media->acquire_native_window = info->acquire_native_window;
 	media->release_native_window = info->release_native_window;
 	media->v_gpu_cb = info->v_gpu_cb;
+	media->v_gpu_fail_cb = info->v_gpu_fail_cb;
 #endif
 	media->ffmpeg_options = info->ffmpeg_options;
 	media->v_seek_cb = info->v_seek_cb;

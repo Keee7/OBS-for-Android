@@ -55,6 +55,7 @@ struct mp_media {
 	mp_android_window_cb acquire_native_window;
 	mp_android_release_window_cb release_native_window;
 	mp_android_gpu_video_cb v_gpu_cb;
+	mp_android_gpu_error_cb v_gpu_fail_cb;
 #endif
 
 	char *path;

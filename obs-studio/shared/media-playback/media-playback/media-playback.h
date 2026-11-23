@@ -30,6 +30,7 @@ typedef void (*mp_android_release_window_cb)(void *opaque);
 typedef void (*mp_android_gpu_video_cb)(void *opaque, uint32_t width, uint32_t height,
 					enum video_colorspace space, enum video_range_type range,
 					enum video_trc trc, bool preload);
+typedef void (*mp_android_gpu_error_cb)(void *opaque);
 #endif
 
 struct mp_media_info {
@@ -44,6 +45,7 @@ struct mp_media_info {
 	mp_android_window_cb acquire_native_window;
 	mp_android_release_window_cb release_native_window;
 	mp_android_gpu_video_cb v_gpu_cb;
+	mp_android_gpu_error_cb v_gpu_fail_cb;
 #endif
 
 	const char *path;
