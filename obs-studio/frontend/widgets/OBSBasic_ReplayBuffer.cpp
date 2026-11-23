@@ -94,8 +94,12 @@ void OBSBasic::StartReplayBuffer()
 
 	SaveProject();
 
-	if (outputHandler->StartReplayBuffer() && os_atomic_load_bool(&recording_paused)) {
-		ShowReplayBufferPauseWarning();
+	if (outputHandler->StartReplayBuffer()) {
+#ifdef __ANDROID__
+		NotifyAndroidSoftwareEncoderFallback(false, true);
+#endif
+		if (os_atomic_load_bool(&recording_paused))
+			ShowReplayBufferPauseWarning();
 	}
 }
 

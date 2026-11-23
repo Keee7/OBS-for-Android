@@ -296,11 +296,11 @@ void MediaControls::RefreshControls()
 		show();
 	}
 
-	bool has_playlist = !compact && strcmp(id, "ffmpeg_source") != 0;
+	isSlideshow = strcmp(id, "slideshow") == 0;
+	const bool has_playlist = isSlideshow || (!compact && strcmp(id, "ffmpeg_source") != 0);
 	ui->previousButton->setVisible(has_playlist);
 	ui->nextButton->setVisible(has_playlist);
 
-	isSlideshow = strcmp(id, "slideshow") == 0;
 	ui->slider->setVisible(!isSlideshow);
 	ui->emptySpaceAgain->setVisible(!compact && isSlideshow);
 

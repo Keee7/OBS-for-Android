@@ -365,6 +365,9 @@ bool buffered_file_serializer_init(struct serializer *s, const char *path, size_
 
 void buffered_file_serializer_free(struct serializer *s)
 {
+	if (!s)
+		return;
+
 	struct file_output_data *out = s->data;
 
 	if (!out)
@@ -391,4 +394,5 @@ void buffered_file_serializer_free(struct serializer *s)
 
 	dstr_free(&out->filename);
 	bfree(out);
+	memset(s, 0, sizeof(*s));
 }

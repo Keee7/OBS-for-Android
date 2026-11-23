@@ -7,6 +7,12 @@
 extern "C" {
 #endif
 
+/* Android MediaCodecInfo.CodecProfileLevel values. */
+static inline int obs_android_hevc_main10_profile(bool pq)
+{
+	return pq ? 4096 : 2;
+}
+
 /* Android 无 root 的 USB / 音频设备通路（plan.md 第四节 阶段 2）。
  *
  * 约束：插件是纯 C 的 .so，只链 libobs，拿不到 Qt 也没有 JavaVM；而 USB 设备只能

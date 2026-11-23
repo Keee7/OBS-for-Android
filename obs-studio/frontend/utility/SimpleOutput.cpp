@@ -68,7 +68,7 @@ void SimpleOutput::LoadRecordingPreset_Lossless()
 void SimpleOutput::LoadRecordingPreset_Lossy(const char *encoderId)
 {
 #ifdef __ANDROID__
-	encoderId = OBSAndroidEncoderForVideo(encoderId);
+	encoderId = OBSAndroidEncoderForVideo(encoderId, true, &androidRecordingSoftwareFallback);
 #endif
 	videoRecording = obs_video_encoder_create(encoderId, "simple_video_recording", nullptr, nullptr);
 	if (!videoRecording) {
@@ -80,7 +80,7 @@ void SimpleOutput::LoadRecordingPreset_Lossy(const char *encoderId)
 void SimpleOutput::LoadStreamingPreset_Lossy(const char *encoderId)
 {
 #ifdef __ANDROID__
-	encoderId = OBSAndroidEncoderForVideo(encoderId);
+	encoderId = OBSAndroidEncoderForVideo(encoderId, true, &androidStreamingSoftwareFallback);
 #endif
 	videoStreaming = obs_video_encoder_create(encoderId, "simple_video_stream", nullptr, nullptr);
 	if (!videoStreaming) {
@@ -175,6 +175,9 @@ void SimpleOutput::LoadRecordingPreset()
 		videoRecording = videoStreaming;
 		audioRecording = audioStreaming;
 		usingRecordingPreset = false;
+#ifdef __ANDROID__
+		androidRecordingSoftwareFallback = androidStreamingSoftwareFallback;
+#endif
 		return;
 
 	} else if (strcmp(quality, "Lossless") == 0) {
@@ -319,7 +322,11 @@ void SimpleOutput::Update()
 	bool enforceBitrate = !config_get_bool(main->Config(), "Stream1", "IgnoreRecommended");
 	const char *custom = config_get_string(main->Config(), "SimpleOutput", "x264Settings");
 	const char *encoder = config_get_string(main->Config(), "SimpleOutput", "StreamEncoder");
-	const char *encoder_id = obs_encoder_get_id(videoStreaming);
+	const char *encoder_id = videoStreaming ? obs_encoder_get_id(videoStreaming) : "";
+#ifdef __ANDROID__
+	if (IsSimpleMediaCodecEncoder(encoder) && strcmp(encoder_id, "ffmpeg_x265") == 0)
+		encoder = SIMPLE_ENCODER_SOFTWARE_HEVC;
+#endif
 	const char *presetType;
 	const char *preset;
 
@@ -584,14 +591,20 @@ void SimpleOutput::UpdateRecordingSettings()
 	bool ultra_hq = (videoQuality == "HQ");
 	int crf = CalcCRF(ultra_hq ? 16 : 23);
 
-	if (videoEncoder == SIMPLE_ENCODER_SOFTWARE_HEVC || videoEncoder == SIMPLE_ENCODER_SOFTWARE_AV1) {
+	std::string_view encoder = videoEncoder;
+#ifdef __ANDROID__
+	if (IsSimpleMediaCodecEncoder(videoEncoder) && videoRecording &&
+	    strcmp(obs_encoder_get_id(videoRecording), "ffmpeg_x265") == 0)
+		encoder = SIMPLE_ENCODER_SOFTWARE_HEVC;
+#endif
+	if (encoder == SIMPLE_ENCODER_SOFTWARE_HEVC || encoder == SIMPLE_ENCODER_SOFTWARE_AV1) {
 		OBSDataAutoRelease settings = obs_data_create();
 		obs_data_set_string(settings, "rate_control", "CQP");
-		if (videoEncoder == SIMPLE_ENCODER_SOFTWARE_HEVC)
+		if (encoder == SIMPLE_ENCODER_SOFTWARE_HEVC)
 			obs_data_set_int(settings, "crf", crf);
 		else
 			obs_data_set_int(settings, "cqp", ultra_hq ? 30 : 40);
-		ApplySimpleSoftwarePreset(main->Config(), settings, videoEncoder, true);
+		ApplySimpleSoftwarePreset(main->Config(), settings, encoder, true);
 		obs_encoder_update(videoRecording, settings);
 	} else if (IsSimpleMediaCodecEncoder(videoEncoder)) {
 		OBSDataAutoRelease settings = obs_data_create();

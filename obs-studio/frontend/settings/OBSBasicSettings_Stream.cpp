@@ -1917,4 +1917,7 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 		s3.unblock();
 		ui->simpleOutStrAEncoder->setCurrentIndex(idx);
 	}
+#ifdef __ANDROID__
+	UpdateAndroidHevcMain10Options();
+#endif
 }

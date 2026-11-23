@@ -73,13 +73,17 @@ AdvancedOutput::AdvancedOutput(OBSBasic *main_) : BasicOutputHandler(main_)
 	translate_macvth264_encoder(recordEncoder);
 #endif
 #ifdef __ANDROID__
-	streamEncoder = OBSAndroidEncoderForVideo(streamEncoder);
-	recordEncoder = OBSAndroidEncoderForVideo(recordEncoder);
+	streamEncoder = OBSAndroidEncoderForVideo(streamEncoder, false, &androidStreamingSoftwareFallback);
+	bool recFallback = false;
+	recordEncoder = OBSAndroidEncoderForVideo(recordEncoder, false, &recFallback);
 #endif
 
 	ffmpegOutput = astrcmpi(recType, "FFmpeg") == 0;
 	ffmpegRecording = ffmpegOutput && config_get_bool(main->Config(), "AdvOut", "FFOutputToFile");
 	useStreamEncoder = astrcmpi(recordEncoder, "none") == 0;
+#ifdef __ANDROID__
+	androidRecordingSoftwareFallback = useStreamEncoder ? androidStreamingSoftwareFallback : recFallback;
+#endif
 	useStreamAudioEncoder = astrcmpi(recAudioEncoder, "none") == 0;
 
 	OBSData streamEncSettings = GetDataFromJsonFile("streamEncoder.json");

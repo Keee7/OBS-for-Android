@@ -655,15 +655,31 @@ static const struct uvc_quirk uvc_quirks[] = {
 	{0x2b89, 0x5348, QUIRK_PREFER_YUYV},
 };
 
-static uint32_t quirks_for(const char *usb_id /* "2b89:5348" 形（label 前缀） */)
+static uint32_t device_quirks(libusb_device_handle *handle)
 {
-	unsigned vid = 0, pid = 0;
-	if (!usb_id || sscanf(usb_id, "%x:%x", &vid, &pid) != 2)
+	libusb_device *dev = handle ? libusb_get_device(handle) : NULL;
+	struct libusb_device_descriptor descriptor;
+	if (!dev || libusb_get_device_descriptor(dev, &descriptor) != 0)
 		return 0;
 	for (size_t i = 0; i < sizeof(uvc_quirks) / sizeof(uvc_quirks[0]); i++)
-		if (uvc_quirks[i].vid == vid && uvc_quirks[i].pid == pid)
+		if (uvc_quirks[i].vid == descriptor.idVendor && uvc_quirks[i].pid == descriptor.idProduct)
 			return uvc_quirks[i].flags;
 	return 0;
+}
+
+static bool mode_is_usable(uint32_t quirks, enum uvc_mode_kind kind)
+{
+	return !(quirks & QUIRK_PREFER_YUYV) || (kind != MODE_NV12 && kind != MODE_MJPEG);
+}
+
+static int copy_usable_modes(struct uvc_mode *out, const struct uvc_dev *device)
+{
+	int count = 0;
+	for (int i = 0; i < device->n_modes; ++i) {
+		if (mode_is_usable(device->quirks, device->modes[i].kind))
+			out[count++] = device->modes[i];
+	}
+	return count;
 }
 
 /* ---------------- 模式选择（优先用户设置，回退 MJPEG 1080p → 最大 MJPEG → 最大未压缩） ---------------- */
@@ -720,6 +736,12 @@ static bool mode_has_interval(const struct uvc_mode *mode, uint32_t interval)
 
 static int choose_mode(struct uvc_dev *d, const struct uvc_source *s)
 {
+	if ((s->requested_interval || raw_low_latency(s)) &&
+	    !mode_is_usable(d->quirks, (enum uvc_mode_kind)s->prefer_fmt)) {
+		blog(LOG_WARNING, "uvc: 此设备已知 %s 输出黑场，请选择 YUYV",
+		     mode_kind_name((enum uvc_mode_kind)s->prefer_fmt));
+		return -1;
+	}
 	if (s->requested_interval) {
 		for (int i = 0; i < d->n_modes; ++i) {
 			const struct uvc_mode *mode = &d->modes[i];
@@ -730,10 +752,6 @@ static int choose_mode(struct uvc_dev *d, const struct uvc_source *s)
 		return -1;
 	}
 	if (raw_low_latency(s) || is_rgb24(s->prefer_fmt)) {
-		if ((d->quirks & QUIRK_PREFER_YUYV) && s->prefer_fmt == MODE_NV12) {
-			blog(LOG_WARNING, "uvc: 此设备已知 NV12 输出黑场，请明确选择 YUYV");
-			return -1;
-		}
 		int selected = -1;
 		uint64_t best_delta = UINT64_MAX;
 		for (int i = 0; i < d->n_modes; i++) {
@@ -758,6 +776,8 @@ static int choose_mode(struct uvc_dev *d, const struct uvc_source *s)
 
 	for (int i = 0; i < d->n_modes; i++) {
 		const struct uvc_mode *m = &d->modes[i];
+		if (!mode_is_usable(d->quirks, m->kind))
+			continue;
 		const int score = mode_score(d, i, s);
 		if (score > best_score) {
 			best_score = score;
@@ -1840,24 +1860,6 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		}
 	}
 
-	/* 怪癖表：命中后先算"生效参数"。设置还是出厂默认（MJPEG 1080p60 未动过）时，
-	 * 按怪癖改有效默认（这台卡仅 YUYV 出图，720p60 是平板实测稳定档；1080p60 YUYV
-	 * ≈250MB/s 平板喂不饱）；用户显式改过任何一项都尊重他的选择 */
-	d.quirks = quirks_for(s->usb_id);
-	d.eff_fmt = s->prefer_fmt;
-	d.eff_w = s->width;
-	d.eff_h = s->height;
-	d.eff_fps = s->fps;
-	if (!s->requested_interval && (d.quirks & QUIRK_PREFER_YUYV) && s->prefer_fmt == MODE_MJPEG && s->width == 1920 && s->height == 1080 &&
-	    s->fps == 60) {
-		d.eff_fmt = MODE_YUYV;
-		d.eff_w = 1280;
-		d.eff_h = 720;
-		d.eff_fps = 60;
-		blog(LOG_WARNING,
-		     "uvc: 怪癖命中 %s（仅 YUYV 出图），出厂默认已按怪癖改为 YUYV %dx%d@%d（属性页显示不变，可手改）",
-		     s->usb_id, d.eff_w, d.eff_h, d.eff_fps);
-	}
 	if (!devs[sel].has_permission) {
 		const char *args[] = {open_name};
 		set_status_key(s, "Status.Unauthorized", args, 1);
@@ -1917,14 +1919,28 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 						     : "未知");
 	}
 
+	d.quirks = device_quirks(d.h);
+	d.eff_fmt = s->prefer_fmt;
+	d.eff_w = s->width;
+	d.eff_h = s->height;
+	d.eff_fps = s->fps;
+	/* 720p60 YUYV is the tested default for this device; 1080p60 can exceed USB bandwidth. */
+	if (!s->requested_interval && (d.quirks & QUIRK_PREFER_YUYV) && s->prefer_fmt == MODE_MJPEG &&
+	    s->width == 1920 && s->height == 1080 && s->fps == 60) {
+		d.eff_fmt = MODE_YUYV;
+		d.eff_w = 1280;
+		d.eff_h = 720;
+		blog(LOG_WARNING, "uvc: 怪癖命中 %s，出厂默认改为 YUYV %dx%d@%d", s->usb_id, d.eff_w,
+		     d.eff_h, d.eff_fps);
+	}
+
 	/* ---- 3. 描述符扫描 + 模式选择 ---- */
 	if (!uvc_scan_device(&d)) {
 		set_status_key(s, "Status.UnsupportedDevice", NULL, 0);
 		goto out;
 	}
 	pthread_mutex_lock(&s->mtx);
-	memcpy(s->device_modes, d.modes, (size_t)d.n_modes * sizeof(*d.modes));
-	s->device_mode_count = d.n_modes;
+	s->device_mode_count = copy_usable_modes(s->device_modes, &d);
 	snprintf(s->mode_device, sizeof(s->mode_device), "%s", open_name);
 	pthread_mutex_unlock(&s->mtx);
 	d.chosen = choose_mode(&d, s);
@@ -2991,8 +3007,8 @@ static int read_device_modes(struct uvc_source *s, const char *name, struct uvc_
 	if (libusb_init_context(&device.ctx, options, 1) == 0) {
 		if (libusb_wrap_sys_device(device.ctx, (intptr_t)fd, &device.h) == 0) {
 			if (uvc_scan_device(&device)) {
-				count = device.n_modes;
-				memcpy(modes, device.modes, (size_t)count * sizeof(*modes));
+				device.quirks = device_quirks(device.h);
+				count = copy_usable_modes(modes, &device);
 			}
 			libusb_close(device.h);
 		}

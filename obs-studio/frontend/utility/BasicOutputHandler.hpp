@@ -68,6 +68,9 @@ struct BasicOutputHandler {
 	OBSSignal replayBufferSaved;
 #ifdef __ANDROID__
 	OBSSignal replayBufferSaveFailed;
+	bool androidStreamingSoftwareFallback = false;
+	bool androidRecordingSoftwareFallback = false;
+	bool androidSoftwareFallbackNotified = false;
 #endif
 
 	BasicOutputHandler(OBSBasic *main_);

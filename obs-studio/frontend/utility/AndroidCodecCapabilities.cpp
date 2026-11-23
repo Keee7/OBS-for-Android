@@ -53,6 +53,12 @@ static bool hasHardwareEncoder(const char *mime, jint mode, jint profile = 0, bo
 		"hasHardwareEncoderProfile", "(Ljava/lang/String;IIZ)Z", type.object<jstring>(), mode, profile, jboolean(p010));
 }
 
+bool OBSAndroidHevcMain10Available(bool pq, bool cbr)
+{
+	return obs_get_encoder_codec("android_mediacodec_hevc_main10") &&
+	       hasHardwareEncoder("video/hevc", cbr ? 2 : -1, obs_android_hevc_main10_profile(pq), true);
+}
+
 bool OBSAndroidCbrEncoderAvailable(const char *id)
 {
 	const char *codec = obs_get_encoder_codec(id);
@@ -61,7 +67,7 @@ bool OBSAndroidCbrEncoderAvailable(const char *id)
 	if (strcmp(codec, "h264") == 0)
 		return hasHardwareEncoder("video/avc", 2);
 	if (strcmp(id, "android_mediacodec_hevc_main10") == 0)
-		return hasHardwareEncoder("video/hevc", 2, 2, true);
+		return OBSAndroidHevcMain10Available(false, true) || OBSAndroidHevcMain10Available(true, true);
 	if (strcmp(codec, "hevc") == 0)
 		return hasHardwareEncoder("video/hevc", 2);
 	if (strcmp(codec, "av1") == 0)
@@ -71,19 +77,39 @@ bool OBSAndroidCbrEncoderAvailable(const char *id)
 	return false;
 }
 
-bool OBSAndroidHdrVideoActive()
+video_colorspace OBSAndroidVideoColorSpace()
 {
 	obs_video_info video;
-	return obs_get_video_info(&video) &&
-	       (video.colorspace == VIDEO_CS_2100_PQ || video.colorspace == VIDEO_CS_2100_HLG);
+	return obs_get_video_info(&video) ? video.colorspace : VIDEO_CS_DEFAULT;
 }
 
-const char *OBSAndroidEncoderForVideo(const char *id)
+bool OBSAndroidEncoderUsesSoftwareFallback(const char *id, video_colorspace space, bool cbr)
 {
+	if (!id || (strcmp(id, "android_mediacodec_hevc") != 0 && strcmp(id, "android_mediacodec_hevc_main10") != 0))
+		return false;
+	const bool pq = space == VIDEO_CS_2100_PQ;
+	const bool hlg = space == VIDEO_CS_2100_HLG;
+	return (pq || hlg) && !OBSAndroidHevcMain10Available(pq, cbr) && obs_get_encoder_codec("ffmpeg_x265") != nullptr;
+}
+
+const char *OBSAndroidEncoderForVideo(const char *id, bool cbr, bool *fellBackToSoftware)
+{
+	if (fellBackToSoftware)
+		*fellBackToSoftware = false;
 	constexpr auto hevcMain10 = "android_mediacodec_hevc_main10";
-	if (id && strcmp(id, "android_mediacodec_hevc") == 0 && OBSAndroidHdrVideoActive() &&
-	    obs_get_encoder_codec(hevcMain10))
+	if (!id || (strcmp(id, "android_mediacodec_hevc") != 0 && strcmp(id, hevcMain10) != 0))
+		return id;
+	const auto space = OBSAndroidVideoColorSpace();
+	const bool pq = space == VIDEO_CS_2100_PQ;
+	if ((pq || space == VIDEO_CS_2100_HLG) && OBSAndroidHevcMain10Available(pq, cbr))
 		return hevcMain10;
+	if (OBSAndroidEncoderUsesSoftwareFallback(id, space, cbr)) {
+		blog(LOG_WARNING,
+		     "MediaCodec HEVC Main10 unavailable for the active HDR color space. Using software HEVC (x265).");
+		if (fellBackToSoftware)
+			*fellBackToSoftware = true;
+		return "ffmpeg_x265";
+	}
 	return id;
 }
 

@@ -24,6 +24,53 @@
 #include <QDir>
 #ifdef __ANDROID__
 #include "OBSAndroidPath.hpp"
+#include <utility/AndroidCodecCapabilities.hpp>
+#endif
+
+#ifdef __ANDROID__
+extern const char *get_simple_output_encoder(const char *encoder);
+
+void OBSBasic::NotifyAndroidSoftwareEncoderFallback(bool forStreaming, bool forRecording, bool configOnly)
+{
+	if (!outputHandler)
+		return;
+	bool activeFallback = (!configOnly && ((forStreaming && outputHandler->androidStreamingSoftwareFallback) ||
+					       (forRecording && outputHandler->androidRecordingSoftwareFallback)));
+	if (configOnly) {
+		const auto space = OBSAndroidVideoColorSpace();
+		const bool advanced = strcmp(config_get_string(activeConfiguration, "Output", "Mode"), "Advanced") == 0;
+		if (advanced) {
+			const char *streamEnc = config_get_string(activeConfiguration, "AdvOut", "Encoder");
+			const char *recEnc = config_get_string(activeConfiguration, "AdvOut", "RecEncoder");
+			const bool useStream = strcmp(recEnc, "none") == 0;
+			const bool custom = strcmp(config_get_string(activeConfiguration, "AdvOut", "RecType"), "FFmpeg") == 0;
+			activeFallback =
+				(forStreaming && OBSAndroidEncoderUsesSoftwareFallback(streamEnc, space, false)) ||
+				(forRecording && !custom &&
+				 OBSAndroidEncoderUsesSoftwareFallback(useStream ? streamEnc : recEnc, space, false));
+		} else {
+			const char *streamEnc =
+				get_simple_output_encoder(config_get_string(activeConfiguration, "SimpleOutput", "StreamEncoder"));
+			const char *recQuality = config_get_string(activeConfiguration, "SimpleOutput", "RecQuality");
+			const bool recUsesStream = strcmp(recQuality, "Stream") == 0;
+			const bool lossless = strcmp(recQuality, "Lossless") == 0;
+			const char *recEnc =
+				get_simple_output_encoder(config_get_string(activeConfiguration, "SimpleOutput", "RecEncoder"));
+			activeFallback =
+				(forStreaming && OBSAndroidEncoderUsesSoftwareFallback(streamEnc, space, true)) ||
+				(forRecording && !lossless &&
+				 OBSAndroidEncoderUsesSoftwareFallback(recUsesStream ? streamEnc : recEnc, space, true));
+		}
+	}
+	if (!activeFallback)
+		return;
+	ShowStatusBarMessage(QTStr("Output.AndroidHevcSoftwareFallback.Status"));
+	if (outputHandler->androidSoftwareFallbackNotified)
+		return;
+	outputHandler->androidSoftwareFallbackNotified = true;
+	OBSMessageBox::warning(this, QTStr("Output.AndroidHevcSoftwareFallback.Title"),
+			       QTStr("Output.AndroidHevcSoftwareFallback.Text"));
+}
 #endif
 
 void OBSBasic::ResetOutputs()
