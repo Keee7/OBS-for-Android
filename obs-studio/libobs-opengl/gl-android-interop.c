@@ -393,9 +393,27 @@ gs_android_external_texture_t *device_android_external_texture_create(gs_device_
 		blog(LOG_ERROR, "Android interop: external OES ESSL3 textures unavailable");
 		return NULL;
 	}
+	EGLDisplay egl_display = eglGetCurrentDisplay();
+	if (egl_display == EGL_NO_DISPLAY)
+		egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+	PFNEGLCREATEIMAGEKHRPROC create_image =
+		(PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+	PFNEGLDESTROYIMAGEKHRPROC destroy_image =
+		(PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
+	if (egl_display == EGL_NO_DISPLAY || !create_image || !destroy_image || !glEGLImageTargetTexture2DOES) {
+		blog(LOG_ERROR,
+		     "Android interop: EGL image entry points unavailable (display=%p create=%p destroy=%p)",
+		     (void *)egl_display, (void *)create_image, (void *)destroy_image);
+		return NULL;
+	}
 	struct external_texture *t = bzalloc(sizeof(*t));
 	t->width = width;
 	t->height = height;
+	t->egl_display = egl_display;
+	t->create_image = create_image;
+	t->destroy_image = destroy_image;
+	t->get_native_client_buffer =
+		(PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC)eglGetProcAddress("eglGetNativeClientBufferANDROID");
 	struct gl_state state;
 	save_state(&state);
 	glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);

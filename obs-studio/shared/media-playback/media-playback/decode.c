@@ -238,15 +238,25 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 	 * 打开失败回退到 FFmpeg 原生软解；不勾选时直接用软解。 */
 	const AVCodecParameters *params = stream->codecpar;
 	const AVPixFmtDescriptor *pixdesc = av_pix_fmt_desc_get(params->format);
-	const bool main10 = id == AV_CODEC_ID_HEVC && params->profile == AV_PROFILE_HEVC_MAIN_10;
-	const bool hdr_trc = params->color_trc == AVCOL_TRC_SMPTE2084 || params->color_trc == AVCOL_TRC_ARIB_STD_B67;
+	const bool main10 = id == AV_CODEC_ID_HEVC &&
+			    (params->profile == AV_PROFILE_HEVC_MAIN_10 || params->profile == AV_PROFILE_HEVC_REXT);
+	const bool h264_hi10 = id == AV_CODEC_ID_H264 &&
+			       (params->profile == AV_PROFILE_H264_HIGH_10 ||
+				params->profile == AV_PROFILE_H264_HIGH_10_INTRA);
+	const bool vp9_high = id == AV_CODEC_ID_VP9 && params->profile >= AV_PROFILE_VP9_2;
+	const bool hdr_trc = params->color_trc == AVCOL_TRC_SMPTE2084 ||
+			     params->color_trc == AVCOL_TRC_ARIB_STD_B67;
+	const bool hdr_colors = params->color_primaries == AVCOL_PRI_BT2020 ||
+				params->color_space == AVCOL_SPC_BT2020_NCL ||
+				params->color_space == AVCOL_SPC_BT2020_CL;
 	const bool high_bit_depth = (pixdesc && pixdesc->nb_components && pixdesc->comp[0].depth > 8) ||
-				    params->bits_per_raw_sample > 8 || hdr_trc || main10 ||
-				    (id == AV_CODEC_ID_VP9 && params->profile >= AV_PROFILE_VP9_2);
-	const bool try_p010 = main10 || (pixdesc && pixdesc->nb_components && pixdesc->comp[0].depth == 10) ||
-			      params->bits_per_raw_sample == 10;
+				    params->bits_per_raw_sample > 8 || hdr_trc || hdr_colors ||
+				    d->max_luminance > 0 || main10 || h264_hi10 || vp9_high;
+	const bool try_p010 = main10 || vp9_high ||
+			      (pixdesc && pixdesc->nb_components && pixdesc->comp[0].depth == 10) ||
+			      params->bits_per_raw_sample == 10 || hdr_trc || hdr_colors || d->max_luminance > 0;
 	const bool surface_capable = hw && type == AVMEDIA_TYPE_VIDEO && m->acquire_native_window &&
-				     (!hdr_trc || !high_bit_depth || try_p010);
+				     !high_bit_depth && !try_p010;
 	if (hw && type == AVMEDIA_TYPE_VIDEO && (surface_capable || !high_bit_depth || try_p010)) {
 		const char *name = NULL;
 		switch (id) {

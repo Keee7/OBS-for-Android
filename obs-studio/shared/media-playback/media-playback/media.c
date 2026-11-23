@@ -491,8 +491,10 @@ void mp_media_next_video(mp_media_t *m, bool preload)
 		AVMediaCodecBuffer *mc_buf = (AVMediaCodecBuffer *)f->data[3];
 		int v_width = f->width;
 		int v_height = f->height;
+		const bool is_hdr_surface = new_space == VIDEO_CS_2100_PQ || new_space == VIDEO_CS_2100_HLG ||
+					    trc == VIDEO_TRC_PQ || trc == VIDEO_TRC_HLG;
 		if (mc_buf)
-			av_mediacodec_release_buffer(mc_buf, 1);
+			av_mediacodec_release_buffer(mc_buf, is_hdr_surface ? 0 : 1);
 		av_frame_unref(f);
 		if (preload)
 			d->frame_ready = false;
