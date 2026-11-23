@@ -13,8 +13,8 @@
   <h1>OBS for Android</h1>
 
   <p>
-    <b>专为移动端重构的高性能 Android 版 OBS Studio</b><br />
-    <sub>基于 OBS Studio 33 · MediaCodec 硬件加速 · GPU 零拷贝采集 · 横屏自适应布局</sub>
+    <b>Android 平台高性能直播推流与本地录制工具</b><br />
+    <sub>基于 OBS Studio 33 · MediaCodec 硬件加速 · OpenGL ES · 自适应横屏交互</sub>
   </p>
 
   <p>
@@ -31,121 +31,68 @@
     <a href="README_CN.md"><b>简体中文</b></a> &nbsp;•&nbsp;
     <a href="https://github.com/Keee7/OBS-for-Android/releases"><b>下载安装包</b></a> &nbsp;•&nbsp;
     <a href="BUILDING.md"><b>构建指南</b></a> &nbsp;•&nbsp;
+    <a href="IMPLEMENTATION_ANDROID.md"><b>架构实现</b></a> &nbsp;•&nbsp;
     <a href="CONTRIBUTING.md"><b>参与贡献</b></a>
   </p>
 
   <br />
 
   <p align="center">
-    <img src="screenshot.png" alt="OBS for Android Preview" width="90%" style="max-width: 840px; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.2);" />
-  </p>
-
-  <p align="center">
-    <code>⚡ MediaCodec 硬编解码</code> &nbsp;•&nbsp;
-    <code>📱 响应式横屏布局</code> &nbsp;•&nbsp;
-    <code>🎥 GPU 屏幕采集</code> &nbsp;•&nbsp;
-    <code>🌐 WebView 浏览器源</code> &nbsp;•&nbsp;
-    <code>🔌 UVC 1080p60 采集</code>
+    <img src="screenshot.png" alt="OBS for Android 预览截图" width="90%" style="max-width: 840px; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.2);" />
   </p>
 
 </div>
 
 ---
 
-OBS Studio 的 Android 平台移植版本，支持场景编辑、多来源输入、本地录像与 RTMP 实时推流。
-
-本分支基于 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android)，并已同步至 [OBS Studio 33](https://github.com/obsproject/obs-studio) 上游基线。在此基础上，新增了 **MediaCodec 硬件编解码、HEVC/AV1 软件编码、GPU 屏幕采集、WebView 浏览器源、UVC 采集卡输入优化、Android 共享存储录像以及多设备横屏自适应响应式布局**。
-
-> **开源说明**：本项目为社区维护的开源移植版本，遵循 **GPL-2.0-or-later** 许可证，并非 OBS Project 官方 Android 发行版。完整保留原项目提交历史、作者署名与开源许可证。
-
----
+[OBS Studio](https://github.com/obsproject/obs-studio)（`v33` 基线）的 Android 移植版本，在 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android) 基础上整合了硬件编解码、GPU 采集、外接设备输入与自适应横屏界面，支持场景合成、本地录制与直播推流。
 
 ## 核心特性
 
-| 功能模块 | 说明与实现细节 |
+| 模块 | 能力摘要 |
 | --- | --- |
-| **MediaCodec 硬件编码** | 支持 H.264、HEVC (H.265)、AV1 与 VP9 硬件编码。采用 Surface 输入，避免整帧 CPU 回读。简单模式只列出支持 CBR 的硬编，高级模式提供设备支持的 CBR、VBR、CQ 与质量设置。AV1 可用于兼容的推流服务与混合 MP4 录像，VP9 可用于混合 MP4 录像。 |
-| **H.265 / AV1 软件编码** | 集成 x265 (3.6) 与 libaom (3.10.0)。支持推流与录像独立配置编码预设，提供多线程与速度优化选项。 |
-| **GPU 屏幕采集** | 基于 Android MediaProjection API，通过 SurfaceTexture / OES 纹理直入 OBS 渲染合成管线，失败后退避重试，保留手动选择 CPU 采集的选项。 |
-| **单应用捕获与 Alpha 透明通道** | 支持 Android 14+ 单应用内容尺寸自适应；提供直通 Alpha 与预乘 Alpha 合成模式，透明合成取决于 Android 交付帧是否保留 Alpha。 |
-| **WebView 浏览器源** | 基于系统 WebView 渲染并接入 GPU 纹理，支持自定义 URL、分辨率、帧率上限、CSS 注入与基本触摸交互；透明背景模式通过 ImageReader + EGLImage 实现零拷贝合成。 |
-| **音频输入与路由** | 基于 AAudio 音频引擎，支持内置麦克风、有线耳机及 USB 声卡 / 采集卡 UAC 音频输入的动态枚举与选择。 |
-| **媒体播放与硬件解码** | 支持 Android 文档 URI 输入；FFmpeg 优先选用平台硬件 MediaCodec 解码器（H.264、HEVC、VP8、VP9、AV1），初始化失败时回退到软解，AV1 使用 libaom。 |
-| **媒体源拉流** | 支持通过 OBS 媒体源拉取 HTTP/HTTPS 媒体、HLS、DASH、RTSP/RTSPS、RTMP/RTMPS、UDP、RTP、TCP、SRT 和 RIST。 |
-| **Android 共享存储录像** | 深度适配 MediaStore 与 Storage Access Framework (SAF)，可直接将混合 MP4/MOV 录制至 `Download/obs` 等公共共享目录，解决分区存储容量误判问题。 |
-| **UVC 采集卡高速通道** | 针对 USB 3.0 / SuperSpeed 1080p60 采集卡重构数据泵：独立收包线程、有界缓冲交接、Raw YUV (YUYV/NV12) 直接重组与断流自动看门狗恢复。 |
-| **响应式布局与横屏交互** | 内置基于动态断点（`952×552` 逻辑像素）的自适应布局引擎。专为横屏场景设计，在手机横屏紧凑模式（32px 行高、折叠空闲工具栏）与平板宽松触控模式（48px 行高）之间无缝切换，并对悬浮小窗与多任务分屏进行边界几何对齐。 |
-| **Qt 界面与输入法适配** | 统一窗口坐标几何系统；优化软键盘事件处理，解决连续退格请求风暴、光标手柄偏移及对话框关闭后残影问题。 |
+| **MediaCodec 硬件编码** | 支持 H.264、HEVC（Android 13+ HDR 下支持 Main10）、AV1（推流与 Hybrid MP4）及 VP9（Hybrid MP4），采用零拷贝 Surface 输入，支持 `CBR` / `VBR` / `CQ`。 |
+| **软件编码器** | 内置 `x264`、`x265`（`3.6`，8/10-bit）与 `libaom`（`3.10.0`）AV1。 |
+| **10-bit HDR 管线** | 支持 Rec. 2100 PQ/HLG 合成、`P010` 硬件编解码与 `I010` 软编路径，并在 Hybrid MP4 中保留 HDR 色彩元数据。 |
+| **屏幕与单应用采集** | MediaProjection GPU 零拷贝采集（`SurfaceTexture`/OES，可选 CPU 回退），支持 Android 14+ 单应用内容尺寸自适应及直通/预乘 Alpha 透明合成。 |
+| **WebView 浏览器源** | 系统 WebView GPU 纹理采集，支持网页/本地 HTML、自定义 CSS、触摸交互、零拷贝透明背景及“通过 OBS 控制音频”。 |
+| **USB 与相机采集** | 支持 USB 3.0 UVC 采集卡/摄像头（`YUYV`、`NV12`、`RGB24`、`BGR24`、`MJPEG`，自动匹配 UAC 音频并具备断流恢复）、内置 Camera2 NDK 与 Nikon Z 系列 PTP 实时取景。 |
+| **媒体与网络拉流** | FFmpeg MediaCodec 硬件解码（H.264、HEVC、VP8、VP9、AV1，失败自动回退软解）；支持文档 URI 与 `HTTP(S)`、`HLS`、`DASH`、`RTSP(S)`、`RTMP(S)`、`SRT`、`RIST`、`UDP`/`RTP`/`TCP` 拉流。 |
+| **音频路由** | 原生 AAudio 引擎，支持内置麦克风、有线耳机与 USB 声卡/采集卡音频输入。 |
+| **共享存储录制** | 通过 MediaStore / SAF 文件描述符桥接，直接将 Hybrid MP4/MOV 写入 `Download/obs` 等公共目录。 |
+| **自适应横屏界面** | 基于 Qt `6.12` 的响应式布局（逻辑分辨率 `< 952×552` 自动切换手机紧凑模式，平板展开宽松布局），适配分屏、小窗与输入法交互。 |
 
----
+## 运行环境
 
-## 运行环境与设备形态
-
-* **架构**：`arm64-v8a`
-* **系统版本**：Android 10+（API 29+），目标 API 35
-* **设备形态适配**：
-  * **手机设备**：横屏握持下自动启用**横屏紧凑布局**，将列表行高压缩至 32px，并动态折叠空闲工具栏，为小屏幕换取最大的视频画布预览空间；
-  * **平板与大屏设备**：自动展开为多栏**宽松触控布局**（48px 行高），提供直观高效的大屏操作体验；
-  * **多任务分屏与小窗**：界面根据窗口实际尺寸在紧凑与宽松模式间平滑过渡，具备 48px 滞回保护以消除临界闪烁。
-* **依赖组件**：浏览器源需要系统 WebView。硬件编解码选项取决于设备能力。
-
----
+* **目标架构与系统**：`arm64-v8a`，Android 10+（API 29+），目标 API 35（编译 API 36）。
+* **运行依赖**：浏览器源依赖 Android 系统 WebView；硬件编解码档位与 10-bit HDR 渲染目标取决于设备硬件支持。
 
 ## 快速上手
 
-1. **获取安装包**：从 [Releases](https://github.com/Keee7/OBS-for-Android/releases) 下载最新的测试 APK，或参考 [构建说明](BUILDING.md) 自行编译。
-2. **安装**：
+1. **安装应用**：从 [Releases](https://github.com/Keee7/OBS-for-Android/releases) 下载 APK 并执行 `adb install -r path/to/obs-android.apk`，或参考 [BUILDING.md](BUILDING.md) 自行编译。
+2. **推荐初始配置**：
+   * **视频**：`1920×1080` @ `60 FPS`，`SDR BT.709`（启用 10-bit HDR 时，在 **设置 → 高级 → 视频** 选择 `Rec. 2100 (PQ)` 或 `Rec. 2100 (HLG)`，配合 `P010` + `MediaCodec HEVC Main10` 或 `I010` + `x265` / `libaom`）。
+   * **输出**：推流选择 `Android MediaCodec H.264`（`CBR`）；录像建议 `Hybrid MP4`，保存路径设为 `/storage/emulated/0/Download/obs`。
+3. **添加来源**：
+   * 按需添加 **屏幕采集（MediaProjection）**（授予录屏权限，取消后可在源属性中点击“请求屏幕共享授权”重新拉起）、**UVC 摄像头（Android USB）**、**内置摄像头（Camera2）**、**Nikon Webcam（Z 系列）** 或 **安卓浏览器**。
+   * 拉取网络流时，添加 **媒体源** 并取消勾选 **本地文件**，填入 `HTTP(S)`、`HLS`、`DASH`、`RTSP`、`RTMP`、`SRT` 或 `RIST` 地址（必要时在 **FFmpeg 选项** 填写如 `rtsp_transport=tcp`）。
+4. **验证硬件编码** *（可选）*：
    ```sh
-   adb install -r path/to/obs-android.apk
+   adb logcat -v threadtime -d -s 'OBS-MediaCodec:*'
    ```
-3. **推荐初始设置**：
-   * **视频**：基础画布与输出分辨率设为 `1920×1080`，FPS 设为 `60`，色彩空间选择 `SDR BT.709`。
-   * **输出（推流）**：编码器选用 `Android MediaCodec H.264`，码率控制选择 `CBR`。
-   * **录像存储**：录像格式建议选择 `Hybrid MP4`，路径设为 `/storage/emulated/0/Download/obs`。
-4. **添加采集源**：
-   * 点击来源面板添加“屏幕采集”，并在系统弹窗中授予录屏权限。
-   * 若需采集 USB 采集卡画面，添加“UVC 摄像头”并选择对应的分辨率与 YUV 格式。
-   * 在 UVC 源属性的「色彩范围」中选择「默认」「有限」或「完整」，与采集卡实际输出的未压缩信号匹配。修改实时生效。MJPEG 按完整范围解码。
-   * Android 能识别对应的音频设备时，UVC 源会自动匹配同一张采集卡的音频，也可在源属性中按设备名称手动选择。启用输入后，混音器以源名称显示这一路音频。全新安装时默认关闭麦克风/辅助音频。
-   * 若需拉取网络流，添加“媒体源”，取消勾选“本地文件”，在“输入”中填写拉流地址。“输入格式”留空即可自动识别。若要通过 TCP 传输 RTSP 媒体，在“FFmpeg 选项”中填写 `rtsp_transport=tcp`。
-   * SRT 的 Caller 模式填写发送端地址。Listener 模式可用 `srt://0.0.0.0:9000?mode=listener` 监听手机的端口。Rendezvous 模式要求两端都设为 `mode=rendezvous`，各自填写对端 IP，并使用同一个 UDP 端口。
+   确认日志包含 `event=started hardware=true software=false input=Surface`、`event=first-packet headers=valid keyframe=1`，且 `event=progress` 帧数与字节数持续增长。
 
-在「设置 → 高级 → 视频」中选择「Rec. 2100 (PQ)」或「Rec. 2100 (HLG)」即可配置 10-bit HDR。搭载 Android 13 或更新版本且 MediaCodec 兼容的设备可选 **P010、有限范围、Android MediaCodec HEVC Main10**。使用 x265 或 AOM AV1 软编时选 **I010**，可省去编码前的 YUV 布局转换。Hybrid MP4 会记录色彩信息和标称峰值亮度。
+## 已知限制
 
-媒体源可保留兼容文件或网络流的 HDR 信息。Android 屏幕采集按设置中的 SDR 白电平混入 HDR 场景。取消或停止共享后，可在屏幕采集源的属性中点「请求屏幕共享授权」，重新打开系统授权窗口。
+* **HDR / 10-bit**：依赖 GPU 对 16-bit 归一化纹理与浮点渲染目标的支持；界面预览与 Android 屏幕采集仍按配置的 SDR 白电平以 SDR 混入场景，P010 USB 采集需采集卡硬件支持。
+* **浏览器源**：暂不支持多指触控手势；跨域网页音频路由到 OBS 混音器需服务端支持 CORS。
+* **推流服务**：Twitch / YouTube OAuth 快捷登录已禁用，请使用“自定义”服务手动填写 RTMP 服务器与推流码。
 
-兼容设备在启用 HDR 后会将普通 MediaCodec HEVC 选项自动切到 Main10，原有配置也适用。
+## 文档与开源许可
 
----
+* [BUILDING.md](BUILDING.md) — GitHub Actions、Linux/WSL 与 Windows 构建说明
+* [IMPLEMENTATION_ANDROID.md](IMPLEMENTATION_ANDROID.md) — EGL/MediaCodec、MediaProjection、UVC、SAF 存储与 Qt 界面架构细节
+* [CONTRIBUTING.md](CONTRIBUTING.md) — 问题反馈与贡献规范
+* [NOTICE.md](NOTICE.md) — 第三方依赖许可证与商标声明
 
-## 硬件编码状态验证
-
-可通过 ADB 日志确认 MediaCodec 硬件加速正在正常工作：
-
-```sh
-adb logcat -v threadtime -d -s 'OBS-MediaCodec:*'
-```
-
-正常工作时的关键日志特征：
-* `event=started hardware=true software=false input=Surface`（硬件组件已加载且输入为 Surface）
-* `event=first-packet headers=valid keyframe=1`（已输出首个关键帧）
-* `event=progress` 中输出帧计数和字节数持续递增。
-
-也可以用 `ffprobe` 核对保存的录像所使用的编码格式。
-
----
-
-## 已知局限与计划
-
-* **HDR / 10-bit**：合成需要 GPU 支持 16-bit 归一化纹理和浮点渲染目标。HDR 媒体源优先协商 MediaCodec P010 输出，初始化失败时使用保留位深的软件解码。UVC 的 P010 输入需要采集卡支持。预览显示和 Android 屏幕采集使用 SDR。
-* **浏览器源高级能力**：暂未集成独立网页音频通道及多指触控手势。
-* **推流服务集成**：Twitch / YouTube 账户快捷登录暂未启用，请使用“自定义”服务输入 RTMP 服务器地址与推流码。
-
----
-
-## 许可证与致谢
-
-本项目遵循 **GPL-2.0-or-later** 许可证。详情请参阅 [LICENSE](LICENSE) 与 [NOTICE.md](NOTICE.md)。
-
-* 感谢 [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android) 奠定的初始 Android 移植基础。
-* 感谢 [OBS Studio](https://github.com/obsproject/obs-studio) 官方团队及各上游开源组件作者。
+本项目遵循 **GPL-2.0-or-later** 许可证（[LICENSE](LICENSE)），为社区维护的独立移植版本，与 OBS Project 无关。

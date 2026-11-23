@@ -13,8 +13,8 @@
   <h1>OBS for Android</h1>
 
   <p>
-    <b>High-Performance Live Streaming & Recording Studio for Android</b><br />
-    <sub>Powered by OBS Studio 33 · Accelerated by MediaCodec & OpenGL ES · Responsive Landscape Architecture</sub>
+    <b>Live Streaming & Recording Studio for Android</b><br />
+    <sub>Powered by OBS Studio 33 · MediaCodec Hardware Acceleration · OpenGL ES · Adaptive Landscape UI</sub>
   </p>
 
   <p>
@@ -31,6 +31,7 @@
     <a href="README_CN.md"><b>简体中文</b></a> &nbsp;•&nbsp;
     <a href="https://github.com/Keee7/OBS-for-Android/releases"><b>Download APK</b></a> &nbsp;•&nbsp;
     <a href="BUILDING.md"><b>Build Guide</b></a> &nbsp;•&nbsp;
+    <a href="IMPLEMENTATION_ANDROID.md"><b>Architecture</b></a> &nbsp;•&nbsp;
     <a href="CONTRIBUTING.md"><b>Contributing</b></a>
   </p>
 
@@ -40,112 +41,58 @@
     <img src="screenshot.png" alt="OBS for Android Preview" width="90%" style="max-width: 840px; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.2);" />
   </p>
 
-  <p align="center">
-    <code>⚡ MediaCodec HW Encoding</code> &nbsp;•&nbsp;
-    <code>📱 Responsive Landscape UI</code> &nbsp;•&nbsp;
-    <code>🎥 Zero-Copy GPU Capture</code> &nbsp;•&nbsp;
-    <code>🌐 WebView Browser Source</code> &nbsp;•&nbsp;
-    <code>🔌 High-Speed UVC Ingestion</code>
-  </p>
-
 </div>
 
 ---
 
-An Android port of OBS Studio providing scene composition, multi-source input, local recording, and RTMP live streaming.
-
-Based on [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android) and updated to the [OBS Studio 33](https://github.com/obsproject/obs-studio) upstream baseline. This fork introduces **MediaCodec hardware encoding and decoding, HEVC and AV1 software encoding, GPU screen capture, a WebView browser source, high-speed UVC capture ingestion, Android shared storage recording, and a responsive landscape layout engine across mobile phones and tablets**.
-
-> **Open Source Notice**: This is a community-driven open source project licensed under **GPL-2.0-or-later**. It is not an official release from the OBS Project. Original commit history, author attributions, and licenses are fully preserved.
-
----
+An Android port of [OBS Studio](https://github.com/obsproject/obs-studio) (`v33` baseline) built upon [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android), delivering scene compositing, multi-source capture, local recording, and live streaming in an adaptive landscape interface.
 
 ## Features
 
-| Feature | Details |
+| Capability | Summary |
 | --- | --- |
-| **MediaCodec Hardware Encoding** | Hardware H.264, HEVC (H.265), AV1, and VP9 encoding. Surface input avoids full-frame CPU readback. Simple mode lists CBR-capable encoders. Advanced mode exposes supported CBR, VBR and CQ options and hardware quality controls. AV1 works with compatible streaming services and Hybrid MP4. VP9 is available for Hybrid MP4 recording. |
-| **Software HEVC & AV1** | Integrated x265 (3.6) and libaom (3.10.0) software encoders with independent presets for streaming and recording. |
-| **GPU Screen Capture** | Android MediaProjection routed via SurfaceTexture/OES directly into the OBS composition pipeline, with retry backoff. CPU capture is available as a manual option. |
-| **Window Capture with Alpha** | Android 14+ content-size callbacks with straight and premultiplied Alpha modes. Transparency depends on whether Android supplies Alpha in the captured frames. |
-| **WebView Browser Source** | GPU texture integration of the Android System WebView with custom URLs, dimensions, frame rates, custom CSS, and touch interaction. Features a zero-copy ImageReader + EGLImage transparent background pipeline. |
-| **Audio Routing** | AAudio engine supporting dynamic selection of built-in microphones, wired headsets, and USB audio / capture-card UAC sources. |
-| **Hardware Video Decoding** | Android document URI playback using FFmpeg with hardware-accelerated MediaCodec decoders (H.264, HEVC, VP8, VP9, AV1), with software fallback during initialization, including libaom for AV1. |
-| **Network Media Sources** | Pull HTTP/HTTPS media, HLS, DASH, RTSP/RTSPS, RTMP/RTMPS, UDP, RTP, TCP, SRT and RIST through the OBS Media Source. |
-| **Shared Storage Recording** | MediaStore and Storage Access Framework (SAF) integration for recording directly to shared folders such as `Download/obs` with Hybrid MP4/MOV, avoiding scoped storage quota false alarms. |
-| **High-Speed UVC Ingestion** | Multi-threaded pipeline for USB 3.0 / SuperSpeed 1080p60 capture cards, bounded buffer handoff, raw YUV (YUYV/NV12) reassembly, and automated watchdog recovery. |
-| **Responsive Landscape UI** | Dynamic breakpoint engine (`952×552` logical pixels) tailored for landscape interaction. Automatically adapts between a compact landscape mode for smartphones (32px touch rows, auto-collapsed idle toolbars) and a spacious touch layout for tablets (48px rows), based on window size, including split-screen and floating windows. |
-| **Qt UI & IME Adaptations** | Unified window coordinate geometry; optimized virtual keyboard event handling, addressing repeated keyboard requests, cursor offsets and dialog close artifacts. |
+| **MediaCodec Hardware Encoding** | H.264, HEVC (with Main10 HDR on Android 13+), AV1 (streaming & Hybrid MP4), and VP9 (Hybrid MP4) via zero-copy Surface input (`CBR` / `VBR` / `CQ`). |
+| **Software Encoders** | Integrated `x264`, `x265` (`3.6`, 8/10-bit), and `libaom` (`3.10.0`) AV1. |
+| **10-bit HDR Pipeline** | Rec. 2100 PQ/HLG compositing with `P010` hardware decode/encode, `I010` software encoding, and Hybrid MP4 color metadata. |
+| **Screen & Window Capture** | Zero-copy MediaProjection GPU capture (`SurfaceTexture`/OES, with optional CPU fallback), Android 14+ single-app resize, and Straight/Premultiplied Alpha compositing. |
+| **WebView Browser Source** | Android System WebView GPU capture with URL/local HTML loading, custom CSS, touch interaction, zero-copy transparent backgrounds, and OBS mixer audio routing. |
+| **USB & Camera Sources** | USB 3.0 UVC capture cards/webcams (`YUYV`, `NV12`, `RGB24`, `BGR24`, `MJPEG` with auto-matched UAC audio and watchdog recovery), built-in Camera2 NDK, and Nikon Z-series PTP Live View. |
+| **Media & Network Playback** | MediaCodec hardware decoding (H.264, HEVC, VP8, VP9, AV1) with software fallback; Document URI playback and `HTTP(S)`, `HLS`, `DASH`, `RTSP(S)`, `RTMP(S)`, `SRT`, `RIST`, `UDP`/`RTP`/`TCP` streams. |
+| **Audio Routing** | Native AAudio input for built-in microphones, wired headsets, and USB audio / capture cards. |
+| **Shared Storage Recording** | MediaStore / SAF bridge for direct Hybrid MP4/MOV recording to public folders such as `Download/obs`. |
+| **Adaptive Landscape UI** | Qt `6.12` responsive layout (`< 952×552` logical px compact phone mode vs. tablet workspace) with split-screen, floating-window, and IME adaptations. |
 
----
+## Requirements
 
-## Form Factors & System Requirements
+* **Architecture & OS**: `arm64-v8a`, Android 10+ (API 29+), Target SDK 35 (Compile SDK 36).
+* **Prerequisites**: Android System WebView (required for the Browser Source). Available MediaCodec profiles and 10-bit HDR render targets depend on device hardware.
 
-* **Architecture**: `arm64-v8a`
-* **OS Version**: Android 10+ (API 29+), Target SDK 35
-* **Form Factor Adaptation**:
-  * **Smartphones**: In landscape orientation, automatically engages **compact landscape layout** with optimized 32px touch rows and auto-collapsing idle toolbars, maximizing canvas preview area on smaller screens.
-  * **Tablets & Large Displays**: Expands into a **spacious touch layout** (48px rows) offering a desktop-grade workflow.
-  * **Split-Screen & Floating Windows**: Dynamically transitions between compact and spacious layouts based on active window geometry, protected by a 48px hysteresis band against jitter.
-* **Prerequisites**: Android System WebView for the browser source. Hardware codec options depend on the device.
+## Quick Start
 
----
-
-## Getting Started
-
-1. **Obtain the APK**: Download the latest build from [Releases](https://github.com/Keee7/OBS-for-Android/releases), or build from source following [BUILDING.md](BUILDING.md).
-2. **Installation**:
+1. **Install**: Download an APK from [Releases](https://github.com/Keee7/OBS-for-Android/releases) and run `adb install -r path/to/obs-android.apk`, or compile from source using [BUILDING.md](BUILDING.md).
+2. **Baseline Setup**:
+   * **Video**: `1920×1080` @ `60 FPS`, `SDR BT.709` (for 10-bit HDR, switch to `Rec. 2100 (PQ)` or `Rec. 2100 (HLG)` in **Settings → Advanced → Video** with `P010` + `MediaCodec HEVC Main10`, or `I010` for `x265` / `libaom`).
+   * **Output**: `Android MediaCodec H.264` (`CBR`) for streaming; `Hybrid MP4` targeting `/storage/emulated/0/Download/obs` for recording.
+3. **Add Sources**:
+   * Add **Screen Capture (MediaProjection)** (grant system consent; use *Request screen sharing permission* in properties to re-authorize), **UVC Camera (Android USB)**, **Built-in Camera (Camera2)**, **Nikon Webcam**, or **Android Browser**.
+   * For network streams, add **Media Source**, clear **Local File**, and enter an `HTTP(S)`, `HLS`, `DASH`, `RTSP`, `RTMP`, `SRT`, or `RIST` URL (pass FFmpeg flags such as `rtsp_transport=tcp` in **FFmpeg Options** when needed).
+4. **Verify Hardware Encoding** *(optional)*:
    ```sh
-   adb install -r path/to/obs-android.apk
+   adb logcat -v threadtime -d -s 'OBS-MediaCodec:*'
    ```
-3. **Recommended Initial Setup**:
-   * **Video**: Set Base Canvas and Output Resolution to `1920×1080`, FPS to `60`, Color Space to `SDR BT.709`.
-   * **Output (Streaming)**: Select `Android MediaCodec H.264` with `CBR` rate control.
-   * **Recording**: Use `Hybrid MP4` and set the destination path to `/storage/emulated/0/Download/obs`.
-4. **Adding Sources**:
-   * Add a "Screen Capture" source and grant permission in the system prompt.
-   * For capture cards, add a "UVC Camera" source and configure the desired YUV resolution and frame rate.
-   * In UVC source properties, set **Color Range** to **Default**, **Limited** or **Full** to match the raw signal from the capture card. The change takes effect while capturing. MJPEG is decoded in full range.
-   * UVC sources automatically match audio from the same capture card when Android can identify it. You can also choose a named audio input in the source properties. Enabled inputs appear under the source name in the Audio Mixer. Mic/Aux starts disabled on fresh installations.
-   * To pull a network stream, add a "Media Source", clear **Local File**, and enter the stream URL in **Input**. Leave **Input Format** empty for automatic detection. To carry RTSP media over TCP, enter `rtsp_transport=tcp` in **FFmpeg Options**.
-   * For SRT, use the sender address in Caller mode, or `srt://0.0.0.0:9000?mode=listener` to listen on the Android device. With Rendezvous, set `mode=rendezvous` on both endpoints, enter the peer address on each side, and use the same UDP port.
-
-For 10-bit HDR, select **Rec. 2100 (PQ)** or **Rec. 2100 (HLG)** in **Settings → Advanced → Video**. On Android 13 or later with a compatible MediaCodec encoder, use **P010**, **Limited** range and **Android MediaCodec HEVC Main10**. For software x265 or AOM AV1, use **I010** to avoid converting the YUV layout before encoding. Hybrid MP4 records the color information and nominal peak luminance.
-
-Media sources retain HDR from compatible files or streams. Android screen capture is composited as SDR at the configured SDR white level in an HDR scene. To reopen Android's consent prompt after canceling or stopping screen sharing, use **Request screen sharing permission** in the screen capture source properties.
-
-On compatible devices, enabling HDR switches the standard MediaCodec HEVC option to Main10, including in existing profiles.
-
----
-
-## Verifying Hardware Encoding
-
-Verify that hardware encoding is active via ADB:
-
-```sh
-adb logcat -v threadtime -d -s 'OBS-MediaCodec:*'
-```
-
-Look for the following key indicators:
-* `event=started hardware=true software=false input=Surface`
-* `event=first-packet headers=valid keyframe=1`
-* Monotonically increasing frame and byte counters in `event=progress`.
-
-Use `ffprobe` on a saved recording to confirm the output codec.
-
----
+   Confirm `event=started hardware=true software=false input=Surface`, `event=first-packet headers=valid keyframe=1`, and rising counters in `event=progress`.
 
 ## Known Limitations
 
-* **HDR / 10-bit**: The pipeline requires GPU support for 16-bit normalized textures and floating-point render targets. HDR media sources use MediaCodec when it negotiates P010 and fall back to software decoding if initialization fails. P010 USB input requires a compatible capture device. Preview display and Android screen capture are SDR.
-* **Browser Audio & Gestures**: Multi-touch gestures and dedicated browser audio routing are not yet supported in the current browser source.
-* **Service Integrations**: Direct Twitch/YouTube account OAuth integrations are disabled; please configure RTMP server URLs and stream keys manually.
+* **HDR / 10-bit**: Requires GPU support for 16-bit normalized textures and floating-point render targets. Preview output and Android screen capture are composited as SDR at the configured SDR white level; P010 USB input requires compatible capture hardware.
+* **Browser Source**: Multi-touch gestures are not yet supported; capturing cross-origin page audio requires server CORS headers.
+* **Streaming Services**: Twitch and YouTube OAuth logins are disabled; configure RTMP server URLs and stream keys manually via the **Custom** service option.
 
----
+## Documentation & License
 
-## License and Attribution
+* [BUILDING.md](BUILDING.md) — GitHub Actions, Linux/WSL, and Windows build instructions
+* [IMPLEMENTATION_ANDROID.md](IMPLEMENTATION_ANDROID.md) — Architecture of the EGL/MediaCodec, MediaProjection, UVC, SAF storage, and Qt UI layers
+* [CONTRIBUTING.md](CONTRIBUTING.md) — Issue reporting and PR guidelines
+* [NOTICE.md](NOTICE.md) — Third-party licenses and trademark notices
 
-Licensed under **GPL-2.0-or-later**. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md) for details.
-
-* Based on [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android).
-* Thanks to the [OBS Studio](https://github.com/obsproject/obs-studio) team and all upstream contributors.
+Licensed under **GPL-2.0-or-later** ([LICENSE](LICENSE)). This is an independent community port and is not affiliated with the OBS Project.
