@@ -63,6 +63,7 @@ public final class ObsAudioHost {
     private static int hotplugEvents = 0;
     private static String lastAction = "<none>";
     private static int lastCallbackOnMain = -1; // -1 = 回调一次都没跑过
+    private static volatile Runnable routeChangeListener;
 
     private ObsAudioHost() {}
 
@@ -93,6 +94,9 @@ public final class ObsAudioHost {
             f.addAction(AudioManager.ACTION_HEADSET_PLUG);
             f.addAction(AudioManager.ACTION_MICROPHONE_MUTE_CHANGED);
             f.addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
+            f.addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED);
+            f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+            f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
             f.addAction(TEST_UPDATE_ACTION);
             /* Android 14 起注册非系统广播必须声明导出性；这里全是系统广播或自己发的，
                NOT_EXPORTED 够用，也不需要新权限（与 ObsUsbHost 同一处理）。 */
@@ -121,6 +125,14 @@ public final class ObsAudioHost {
 
     public static synchronized int hotplugEvents() {
         return hotplugEvents;
+    }
+
+    public static synchronized long routeRevision() {
+        return ((long) hotplugEvents << 1) | (hasRecordPermission() ? 1L : 0L);
+    }
+
+    public static void setRouteChangeListener(Runnable listener) {
+        routeChangeListener = listener;
     }
 
     public static synchronized String lastAction() {
@@ -846,10 +858,16 @@ public final class ObsAudioHost {
     }
 
     private static void refresh(String why) {
-        lastAction = why;
-        hotplugEvents++;
+        final Runnable listener;
+        synchronized (ObsAudioHost.class) {
+            lastAction = why;
+            hotplugEvents++;
+            listener = routeChangeListener;
+        }
         Log.i(TAG, "刷新音频输入清单（" + why + "）：共 " + (manager == null ? -1 : inputs().length)
                        + " 台，RECORD_AUDIO=" + hasRecordPermission() + describeInputs());
+        if (listener != null)
+            listener.run();
     }
 
     private static final class DeviceCallback extends AudioDeviceCallback {

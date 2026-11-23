@@ -121,6 +121,8 @@ struct obs_android_audio_host {
 	int (*get_output_devices)(void *param, struct obs_android_audio_device *out, int max);
 	/** 匹配 USB 设备路径对应的音频输入 ID，无法确认时返回 -1。 */
 	int (*find_usb_input)(void *param, const char *usb_device);
+	/** 返回音频设备/路由变更版本号，未提供时返回 0。 */
+	uint64_t (*get_route_revision)(void *param);
 };
 
 /** App 启动时调用；传 NULL 可注销。 */
@@ -134,6 +136,12 @@ EXPORT int obs_android_audio_enum_output_devices(struct obs_android_audio_device
 EXPORT int obs_android_audio_find_usb_input(const char *usb_device);
 /** 总线未注册时也返回 false："问不到"不等于"有权限"，调用方先判 obs_android_audio_ready()。 */
 EXPORT bool obs_android_audio_has_permission(void);
+
+typedef void (*obs_android_audio_route_cb)(void *param);
+EXPORT void obs_android_audio_notify_route_change(void);
+EXPORT uint64_t obs_android_audio_route_revision(void);
+EXPORT void obs_android_audio_add_route_callback(obs_android_audio_route_cb cb, void *param);
+EXPORT void obs_android_audio_remove_route_callback(obs_android_audio_route_cb cb, void *param);
 
 /* ------------------------------------------------------------------------- */
 /* P-17：内置摄像头（Camera2 NDK）的权限总线                                    */

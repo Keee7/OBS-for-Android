@@ -50,6 +50,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include <obs-module.h>
 #include "../android-common/android-locale.h"
@@ -1503,7 +1504,58 @@ static aaudio_data_callback_result_t uvc_audio_data(AAudioStream *stream, void *
 	return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
-static AAudioStream *uvc_audio_open(struct uvc_source *s, const char *usb_device, bool first_attempt)
+struct uvc_audio_worker {
+	struct uvc_source *s;
+	char usb_device[OBS_ANDROID_USB_NAME_LEN];
+	pthread_t thread;
+	bool started;
+	bool sync_init;
+	pthread_mutex_t mtx;
+	pthread_cond_t cond;
+	volatile long stop;
+	atomic_bool error_disconnected;
+};
+
+static void uvc_audio_worker_signal(struct uvc_audio_worker *w)
+{
+	if (!w || !w->sync_init)
+		return;
+	pthread_mutex_lock(&w->mtx);
+	pthread_cond_signal(&w->cond);
+	pthread_mutex_unlock(&w->mtx);
+}
+
+static void uvc_audio_route_cb(void *param)
+{
+	uvc_audio_worker_signal((struct uvc_audio_worker *)param);
+}
+
+static void uvc_audio_error_cb(AAudioStream *stream, void *context, aaudio_result_t error)
+{
+	UNUSED_PARAMETER(stream);
+	UNUSED_PARAMETER(error);
+	struct uvc_audio_worker *w = context;
+	if (!w)
+		return;
+	atomic_store_explicit(&w->error_disconnected, true, memory_order_release);
+	uvc_audio_worker_signal(w);
+}
+
+static bool uvc_audio_wait_deadline(struct timespec *ts, uint32_t timeout_ms)
+{
+	if (clock_gettime(CLOCK_MONOTONIC, ts) != 0)
+		return false;
+	ts->tv_sec += timeout_ms / 1000U;
+	ts->tv_nsec += (long)(timeout_ms % 1000U) * 1000000L;
+	if (ts->tv_nsec >= 1000000000L) {
+		ts->tv_sec += 1;
+		ts->tv_nsec -= 1000000000L;
+	}
+	return true;
+}
+
+static AAudioStream *uvc_audio_open(struct uvc_source *s, const char *usb_device, bool first_attempt,
+				    struct uvc_audio_worker *worker, const volatile long *stop_flag)
 {
 	if (s->audio_device == UVC_AUDIO_DISABLED)
 		return NULL;
@@ -1543,6 +1595,8 @@ static AAudioStream *uvc_audio_open(struct uvc_source *s, const char *usb_device
 	aaudio_result_t last_result = AAUDIO_OK;
 
 	for (size_t i = 0; i < sizeof(attempts) / sizeof(attempts[0]); ++i) {
+		if (stop_flag && os_atomic_load_long(stop_flag))
+			return NULL;
 		AAudioStreamBuilder *builder = NULL;
 		last_result = AAudio_createStreamBuilder(&builder);
 		if (last_result != AAUDIO_OK || !builder) {
@@ -1558,6 +1612,8 @@ static AAudioStream *uvc_audio_open(struct uvc_source *s, const char *usb_device
 		if (attempts[i].channels > 0)
 			AAudioStreamBuilder_setChannelCount(builder, attempts[i].channels);
 		AAudioStreamBuilder_setDataCallback(builder, uvc_audio_data, s);
+		if (worker)
+			AAudioStreamBuilder_setErrorCallback(builder, uvc_audio_error_cb, worker);
 
 		AAudioStream *candidate = NULL;
 		last_result = AAudioStreamBuilder_openStream(builder, &candidate);
@@ -1603,6 +1659,112 @@ static AAudioStream *uvc_audio_open(struct uvc_source *s, const char *usb_device
 	return stream;
 }
 
+static void *uvc_audio_worker_main(void *arg)
+{
+	struct uvc_audio_worker *w = arg;
+	struct uvc_source *s = w->s;
+	AAudioStream *stream = NULL;
+	bool first_attempt = true;
+
+	while (!os_atomic_load_long(&w->stop) && !os_atomic_load_long(&s->shutting_down)) {
+		const uint64_t attempt_rev = obs_android_audio_route_revision();
+		const bool attempt_perm = obs_android_audio_has_permission();
+		atomic_store_explicit(&w->error_disconnected, false, memory_order_release);
+		stream = uvc_audio_open(s, w->usb_device, first_attempt, w, &w->stop);
+		first_attempt = false;
+
+		if (stream) {
+			pthread_mutex_lock(&w->mtx);
+			while (!os_atomic_load_long(&w->stop) && !os_atomic_load_long(&s->shutting_down) &&
+			       !atomic_exchange_explicit(&w->error_disconnected, false, memory_order_acq_rel) &&
+			       AAudioStream_getState(stream) != AAUDIO_STREAM_STATE_DISCONNECTED) {
+				struct timespec ts;
+				if (uvc_audio_wait_deadline(&ts, 2000))
+					pthread_cond_timedwait(&w->cond, &w->mtx, &ts);
+				else
+					pthread_cond_wait(&w->cond, &w->mtx);
+			}
+			pthread_mutex_unlock(&w->mtx);
+
+			AAudioStream_close(stream);
+			stream = NULL;
+			continue;
+		}
+
+		/* Do not hammer AAudio periodically when nothing changed; wait for a
+		 * device/route change or microphone permission grant before re-probing. */
+		pthread_mutex_lock(&w->mtx);
+		while (!os_atomic_load_long(&w->stop) && !os_atomic_load_long(&s->shutting_down)) {
+			const uint64_t now_rev = obs_android_audio_route_revision();
+			const bool now_perm = obs_android_audio_has_permission();
+			if (now_rev != attempt_rev || now_perm != attempt_perm)
+				break;
+			struct timespec ts;
+			if (uvc_audio_wait_deadline(&ts, 1000))
+				pthread_cond_timedwait(&w->cond, &w->mtx, &ts);
+			else
+				pthread_cond_wait(&w->cond, &w->mtx);
+		}
+		pthread_mutex_unlock(&w->mtx);
+	}
+
+	return NULL;
+}
+
+static void uvc_audio_worker_start(struct uvc_audio_worker *w, struct uvc_source *s, const char *usb_device)
+{
+	memset(w, 0, sizeof(*w));
+	w->s = s;
+	if (!usb_device || !*usb_device || s->audio_device == UVC_AUDIO_DISABLED)
+		return;
+	snprintf(w->usb_device, sizeof(w->usb_device), "%s", usb_device);
+
+	pthread_condattr_t attr;
+	bool have_attr = pthread_condattr_init(&attr) == 0;
+	bool cond_ok = false;
+	if (pthread_mutex_init(&w->mtx, NULL) == 0) {
+		if (have_attr && pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0)
+			cond_ok = pthread_cond_init(&w->cond, &attr) == 0;
+		else
+			cond_ok = pthread_cond_init(&w->cond, NULL) == 0;
+		if (!cond_ok)
+			pthread_mutex_destroy(&w->mtx);
+	}
+	if (have_attr)
+		pthread_condattr_destroy(&attr);
+	if (!cond_ok) {
+		blog(LOG_WARNING, "uvc: failed to initialize audio worker sync primitives");
+		return;
+	}
+	w->sync_init = true;
+	obs_android_audio_add_route_callback(uvc_audio_route_cb, w);
+	if (pthread_create(&w->thread, NULL, uvc_audio_worker_main, w) != 0) {
+		blog(LOG_WARNING, "uvc: failed to start audio helper thread");
+		obs_android_audio_remove_route_callback(uvc_audio_route_cb, w);
+		pthread_cond_destroy(&w->cond);
+		pthread_mutex_destroy(&w->mtx);
+		w->sync_init = false;
+		return;
+	}
+	w->started = true;
+}
+
+static void uvc_audio_worker_stop(struct uvc_audio_worker *w)
+{
+	if (!w || !w->sync_init)
+		return;
+	os_atomic_set_long(&w->stop, 1);
+	uvc_audio_worker_signal(w);
+	if (w->started) {
+		pthread_join(w->thread, NULL);
+		w->started = false;
+	}
+	obs_android_audio_remove_route_callback(uvc_audio_route_cb, w);
+	pthread_cond_destroy(&w->cond);
+	pthread_mutex_destroy(&w->mtx);
+	w->sync_init = false;
+}
+
 /* A reconnected device may have a new USB path. Prefer the configured path. */
 static int find_usb_device(const struct obs_android_usb_device *devs, int count, const char *path,
 			   const char *usb_id)
@@ -1633,7 +1795,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	uint8_t *bgra = NULL;
 	size_t bgra_size = 0;
 	tjhandle tj = NULL;
-	AAudioStream *audio = NULL;
+	struct uvc_audio_worker audio_worker = {0};
 	bool streaming = false;
 	bool vs_claimed = false;
 	bool progress = false;
@@ -1904,7 +2066,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	     d.payload_size, obs_source_async_unbuffered(s->source));
 
 	streaming = true;
-	audio = uvc_audio_open(s, open_name, true);
+	uvc_audio_worker_start(&audio_worker, s, open_name);
 	set_capture_status(s, "Status.Capturing", mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h, 0);
 	blog(LOG_INFO, "uvc: 进入 bulk 流循环（端点 0x%02X，%d 个读并发，transfer=%u 字节，帧缓冲 %zu 字节）", d.ep_in,
 	     XFER_IN_FLIGHT, raw_packets ? d.payload_size : (unsigned)BULK_CHUNK_SIZE,
@@ -2424,12 +2586,6 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			break;
 		const uint64_t stats_now = os_gettime_ns();
 		if (stats_now - stats_start_ns >= 5000000000ULL) {
-			if (audio && AAudioStream_getState(audio) == AAUDIO_STREAM_STATE_DISCONNECTED) {
-				AAudioStream_close(audio);
-				audio = uvc_audio_open(s, open_name, false);
-			} else if (!audio && s->audio_device == UVC_AUDIO_AUTO) {
-				audio = uvc_audio_open(s, open_name, false);
-			}
 			struct uvc_bulk_stats stats;
 			uvc_bulk_pump_snapshot(pump, &stats);
 			blog(LOG_INFO,
@@ -2475,8 +2631,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	}
 
 out:
-	if (audio)
-		AAudioStream_close(audio);
+	uvc_audio_worker_stop(&audio_worker);
 	/* All callbacks must finish before closing the device/context or freeing parser buffers. */
 	uvc_bulk_pump_stop(pump);
 	if (tj)
@@ -2729,8 +2884,15 @@ static void uvc_update(void *data, obs_data_t *settings)
 	const bool manual_change =
 		!s->requested_interval && (new_w != s->width || new_h != s->height || new_fps != s->fps ||
 					   new_fmt != s->prefer_fmt);
+	const bool dev_changed = strcmp(dev ? dev : "", s->usb_device) != 0;
+	bool path_synced = false;
+	if (dev_changed && dev && *dev) {
+		pthread_mutex_lock(&s->mtx);
+		path_synced = s->mode_device[0] && strcmp(dev, s->mode_device) == 0 && s->usb_id[0];
+		pthread_mutex_unlock(&s->mtx);
+	}
 	const bool unbuffered = obs_data_get_bool(settings, "yuv_unbuffered");
-	bool changed = strcmp(dev ? dev : "", s->usb_device) != 0 || manual_change ||
+	bool changed = (dev_changed && !path_synced) || manual_change ||
 		       strcmp(obs_data_get_string(settings, "device_mode"), s->mode_setting) != 0 ||
 		       obs_data_get_bool(settings, "yuv_low_latency") != s->yuv_low_latency ||
 		       obs_data_get_int(settings, "yuv_colorspace") != s->colorspace ||
@@ -2739,6 +2901,11 @@ static void uvc_update(void *data, obs_data_t *settings)
 		uvc_stop_thread(s);
 	atomic_store_explicit(&s->color_range, uvc_color_range(settings), memory_order_relaxed);
 	if (!changed) {
+		if (path_synced) {
+			pthread_mutex_lock(&s->mtx);
+			snprintf(s->usb_device, sizeof(s->usb_device), "%s", dev);
+			pthread_mutex_unlock(&s->mtx);
+		}
 		obs_source_set_async_unbuffered(s->source, raw_low_latency(s) && unbuffered);
 		return;
 	}
@@ -2767,12 +2934,47 @@ static bool on_request_permission(obs_properties_t *props, obs_property_t *prope
 	return false;
 }
 
+/* Resolve an older stored USB path to the live device path after replug. */
+static bool resolve_usb_device_path(struct uvc_source *s, const char *path, char resolved[OBS_ANDROID_USB_NAME_LEN])
+{
+	resolved[0] = '\0';
+	if (!path || !*path)
+		return false;
+	snprintf(resolved, OBS_ANDROID_USB_NAME_LEN, "%s", path);
+
+	char usb_id[sizeof(s->usb_id)] = {0};
+	char mode_device[OBS_ANDROID_USB_NAME_LEN] = {0};
+	if (s) {
+		pthread_mutex_lock(&s->mtx);
+		if (strcmp(path, s->usb_device) == 0) {
+			memcpy(usb_id, s->usb_id, sizeof(usb_id));
+			memcpy(mode_device, s->mode_device, sizeof(mode_device));
+		}
+		pthread_mutex_unlock(&s->mtx);
+	}
+
+	struct obs_android_usb_device devs[8];
+	const int count = obs_android_usb_enum_devices(devs, (int)(sizeof(devs) / sizeof(devs[0])));
+	if (count > 0) {
+		const int selected = find_usb_device(devs, count, path, usb_id);
+		if (selected >= 0)
+			snprintf(resolved, OBS_ANDROID_USB_NAME_LEN, "%s", devs[selected].name);
+	} else if (count < 0 && mode_device[0]) {
+		snprintf(resolved, OBS_ANDROID_USB_NAME_LEN, "%s", mode_device);
+	}
+	return true;
+}
+
 /* The USB host rejects descriptor leases while another source owns the device. */
 static int read_device_modes(struct uvc_source *s, const char *name, struct uvc_mode modes[MAX_MODES])
 {
+	char resolved[OBS_ANDROID_USB_NAME_LEN];
+	if (!resolve_usb_device_path(s, name, resolved))
+		return 0;
+
 	if (s) {
 		pthread_mutex_lock(&s->mtx);
-		const int count = strcmp(name, s->mode_device) == 0 ? s->device_mode_count : 0;
+		const int count = strcmp(resolved, s->mode_device) == 0 ? s->device_mode_count : 0;
 		if (count)
 			memcpy(modes, s->device_modes, (size_t)count * sizeof(*modes));
 		pthread_mutex_unlock(&s->mtx);
@@ -2780,7 +2982,7 @@ static int read_device_modes(struct uvc_source *s, const char *name, struct uvc_
 			return count;
 	}
 
-	const int fd = obs_android_usb_open(name);
+	const int fd = obs_android_usb_open(resolved);
 	if (fd < 0)
 		return 0;
 	struct uvc_dev device = {0};
@@ -2837,20 +3039,9 @@ static bool on_mode_change(obs_properties_t *props, obs_property_t *property, ob
 static void load_audio_inputs(struct uvc_source *s, obs_property_t *list, const char *path)
 {
 	int matched = -1;
-	if (*path) {
-		char usb_id[sizeof(s->usb_id)] = {0};
-		if (s) {
-			pthread_mutex_lock(&s->mtx);
-			if (strcmp(path, s->usb_device) == 0)
-				memcpy(usb_id, s->usb_id, sizeof(usb_id));
-			pthread_mutex_unlock(&s->mtx);
-		}
-		struct obs_android_usb_device devs[8];
-		const int count = obs_android_usb_enum_devices(devs, sizeof(devs) / sizeof(devs[0]));
-		const int selected = find_usb_device(devs, count, path, usb_id);
-		if (selected >= 0)
-			matched = obs_android_audio_find_usb_input(devs[selected].name);
-	}
+	char resolved[OBS_ANDROID_USB_NAME_LEN];
+	if (resolve_usb_device_path(s, path, resolved))
+		matched = obs_android_audio_find_usb_input(resolved);
 
 	obs_property_list_clear(list);
 	obs_property_list_add_int(list, obs_module_text("AudioInput.Disabled"), UVC_AUDIO_DISABLED);
@@ -2889,13 +3080,17 @@ static bool on_usb_device_change(void *data, obs_properties_t *props, obs_proper
 {
 	UNUSED_PARAMETER(property);
 	const char *name = obs_data_get_string(settings, "usb_device");
+	char resolved[OBS_ANDROID_USB_NAME_LEN] = {0};
+	if (resolve_usb_device_path(data, name, resolved) && strcmp(resolved, name) != 0)
+		obs_data_set_string(settings, "usb_device", resolved);
+	const char *effective = resolved[0] ? resolved : name;
 	const char *selected = obs_data_get_string(settings, "device_mode");
 	obs_property_t *list = obs_properties_get(props, "device_mode");
 	obs_property_list_clear(list);
 	obs_property_list_add_string(list, obs_module_text("DeviceMode.Manual"), "");
-	if (*name) {
+	if (*effective) {
 		struct uvc_mode modes[MAX_MODES];
-		const int count = read_device_modes(data, name, modes);
+		const int count = read_device_modes(data, effective, modes);
 		for (int i = 0; i < count; ++i) {
 			const struct uvc_mode *mode = &modes[i];
 			for (int j = 0; j < mode->n_intervals; ++j)
@@ -2920,7 +3115,7 @@ static bool on_usb_device_change(void *data, obs_properties_t *props, obs_proper
 			obs_property_list_item_disable(list, item, true);
 		}
 	}
-	load_audio_inputs(data, obs_properties_get(props, "audio_device"), name);
+	load_audio_inputs(data, obs_properties_get(props, "audio_device"), effective);
 	return on_mode_change(props, list, settings);
 }
 

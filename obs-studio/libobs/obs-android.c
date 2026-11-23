@@ -326,6 +326,15 @@ void obs_android_usb_close(int fd)
  * UI 线程，等价于 relaxed store/load；真正会变的"设备清单"在 Java 侧，不在这个指针里。 */
 static const struct obs_android_audio_host *audio_host;
 
+struct audio_route_callback_entry {
+	obs_android_audio_route_cb cb;
+	void *param;
+};
+
+static pthread_mutex_t audio_route_mtx = PTHREAD_MUTEX_INITIALIZER;
+static DARRAY(struct audio_route_callback_entry) audio_route_callbacks = {0};
+static volatile long audio_route_notify_seq = 0;
+
 void obs_android_set_audio_host(const struct obs_android_audio_host *host)
 {
 	audio_host = host;
@@ -382,6 +391,56 @@ bool obs_android_audio_has_permission(void)
 	if (!h || !h->has_capture_permission)
 		return false;
 	return h->has_capture_permission(h->param);
+}
+
+void obs_android_audio_notify_route_change(void)
+{
+	os_atomic_inc_long(&audio_route_notify_seq);
+	pthread_mutex_lock(&audio_route_mtx);
+	for (size_t i = 0; i < audio_route_callbacks.num; i++) {
+		struct audio_route_callback_entry entry = audio_route_callbacks.array[i];
+		if (entry.cb)
+			entry.cb(entry.param);
+	}
+	pthread_mutex_unlock(&audio_route_mtx);
+}
+
+uint64_t obs_android_audio_route_revision(void)
+{
+	const uint64_t local_seq = (uint64_t)(unsigned long)os_atomic_load_long(&audio_route_notify_seq);
+	const struct obs_android_audio_host *h = audio_host;
+	const uint64_t host_seq = (h && h->get_route_revision) ? h->get_route_revision(h->param) : 0ULL;
+	return local_seq + host_seq;
+}
+
+void obs_android_audio_add_route_callback(obs_android_audio_route_cb cb, void *param)
+{
+	if (!cb)
+		return;
+	pthread_mutex_lock(&audio_route_mtx);
+	for (size_t i = 0; i < audio_route_callbacks.num; i++) {
+		if (audio_route_callbacks.array[i].cb == cb && audio_route_callbacks.array[i].param == param) {
+			pthread_mutex_unlock(&audio_route_mtx);
+			return;
+		}
+	}
+	struct audio_route_callback_entry *entry = da_push_back_new(audio_route_callbacks);
+	entry->cb = cb;
+	entry->param = param;
+	pthread_mutex_unlock(&audio_route_mtx);
+}
+
+void obs_android_audio_remove_route_callback(obs_android_audio_route_cb cb, void *param)
+{
+	if (!cb)
+		return;
+	pthread_mutex_lock(&audio_route_mtx);
+	for (size_t i = audio_route_callbacks.num; i > 0; i--) {
+		size_t idx = i - 1;
+		if (audio_route_callbacks.array[idx].cb == cb && audio_route_callbacks.array[idx].param == param)
+			da_erase(audio_route_callbacks, idx);
+	}
+	pthread_mutex_unlock(&audio_route_mtx);
 }
 
 /* ------------------------------------------------------------------------- */
