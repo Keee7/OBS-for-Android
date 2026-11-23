@@ -44,7 +44,9 @@
 #include <qt-wrappers.hpp>
 #include <plain-text-edit.hpp>
 #include <slider-ignorewheel.hpp>
+#ifndef __ANDROID__
 #include <IconLabel.hpp>
+#endif
 #include <cstdlib>
 #include <initializer_list>
 #include <obs-data.h>
@@ -340,10 +342,19 @@ static QWidget *CreatePropertyHelp(QWidget *parent, const char *title, const cha
 #ifdef __ANDROID__
 	auto *help = new QToolButton(parent);
 	const QString label = QT_UTF8(title);
+	help->setObjectName(QStringLiteral("propertyHelpButton"));
 	help->setIconSize(QSize(16, 16));
-	help->setMinimumSize(QSize(32, 32));
+	help->setMinimumSize(QSize(28, 28));
 	help->setAutoRaise(true);
 	help->setFocusPolicy(Qt::StrongFocus);
+	help->setStyleSheet(QStringLiteral(
+		"QToolButton, QToolButton:hover, QToolButton:focus, QToolButton:pressed, QToolButton:disabled {"
+		"  background-color: transparent;"
+		"  background: transparent;"
+		"  border: none;"
+		"  padding: 0px;"
+		"  margin: 0px;"
+		"}"));
 	help->setAccessibleName(label);
 	help->setAccessibleDescription(text);
 	QObject::connect(help, &QToolButton::clicked, help,
