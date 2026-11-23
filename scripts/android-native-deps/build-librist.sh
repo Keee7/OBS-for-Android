@@ -57,8 +57,22 @@ setup=(setup --cross-file "$(native_path "$cross_file")")
 if [ -f "$build_dir/meson-private/coredata.dat" ]; then
   setup+=(--reconfigure)
 fi
-"${meson_command[@]}" "${setup[@]}" "$(native_path "$build_dir")" "$(native_path "$source_dir")" \
-  --prefix "$(native_path "$prefix")" --libdir lib --buildtype release \
+install_prefix=$(native_path "$prefix")
+install_args=()
+conv_excl=()
+case "$install_prefix" in
+  [A-Za-z]:/*|[A-Za-z]:\\*)
+    install_prefix=/
+    install_args=(--destdir "$(native_path "$prefix")")
+    conv_excl=(env MSYS2_ARG_CONV_EXCL=*)
+    ;;
+esac
+
+"${conv_excl[@]}" "${meson_command[@]}" "${setup[@]}" "$(native_path "$build_dir")" "$(native_path "$source_dir")" \
+  --prefix "$install_prefix" --libdir lib --buildtype release \
   --default-library static --wrap-mode nodownload -Dtest=false -Dbuilt_tools=false -Dfallback_builtin=false
 "${meson_command[@]}" compile -C "$(native_path "$build_dir")" -j "$jobs"
-"${meson_command[@]}" install -C "$(native_path "$build_dir")" --no-rebuild
+"${meson_command[@]}" install -C "$(native_path "$build_dir")" --no-rebuild "${install_args[@]}"
+if [ "${#install_args[@]}" -gt 0 ] && [ -f "$prefix/lib/pkgconfig/librist.pc" ]; then
+  sed -i "s|^prefix=.*|prefix=$(native_path "$prefix")|" "$prefix/lib/pkgconfig/librist.pc"
+fi

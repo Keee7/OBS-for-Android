@@ -79,10 +79,16 @@ targets=" ${*:-x264 x265 aom ffmpeg} "
 NDK_ROOT=${NDK_ROOT:-$(cd "$SYSROOT/../../../../.." && pwd)}
 cmake_android() {
   local source=$1 build=$2; shift 2
+  local prefix_win
+  prefix_win="$(cygpath -m "$prefix")"
   cmake -S "$(cygpath -m "$source")" -B "$(cygpath -m "$build")" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$(cygpath -m "$NDK_ROOT/build/cmake/android.toolchain.cmake")" \
     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM="android-$API" -DANDROID_STL=c++_static \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$(cygpath -m "$prefix")" \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix_win" \
+    -DCMAKE_PREFIX_PATH="$prefix_win" \
+    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+    -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
+    -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_SHARED_LIBS=OFF \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "$@"
   cmake --build "$(cygpath -m "$build")" --parallel "$JOBS"
