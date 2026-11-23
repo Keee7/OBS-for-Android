@@ -48,7 +48,6 @@
 #include <QJsonObject>
 #include <QJniObject>
 #include <QLabel>
-#include <QMetaObject>
 #include <QPointer>
 #include <QPushButton>
 #include <QTextBrowser>
@@ -57,6 +56,7 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <vector>
 #endif
 
@@ -524,11 +524,10 @@ void OBSBasic::TimedCheckForUpdates()
 		CheckForUpdates(false);
 	}
 #elif defined(__ANDROID__)
-	QPointer<OBSBasic> weakThis(this);
-	QTimer::singleShot(800, this, [weakThis]() {
-		if (!weakThis || g_androidShutdownRequested.load())
+	QTimer::singleShot(800, this, [this]() {
+		if (g_androidShutdownRequested.load() || isClosing())
 			return;
-		weakThis->CheckForUpdates(false);
+		CheckForUpdates(false);
 	});
 #endif
 }
@@ -556,7 +555,7 @@ void OBSBasic::CheckForUpdates(bool manualUpdate)
 	updateCheckThread.reset(mut);
 	updateCheckThread->start();
 #elif defined(__ANDROID__)
-	if (App()->IsUpdaterDisabled() || g_androidShutdownRequested.load()) {
+	if (App()->IsUpdaterDisabled() || g_androidShutdownRequested.load() || isClosing()) {
 		return;
 	}
 	bool expected = false;
@@ -568,28 +567,25 @@ void OBSBasic::CheckForUpdates(bool manualUpdate)
 	}
 
 	const QString currentVersion = GetAndroidInstalledVersionName();
-	const QPointer<OBSBasic> weakThis(this);
-	QThread *worker = QThread::create([weakThis, manualUpdate, currentVersion]() {
+	auto resultJson = std::make_shared<QString>();
+	QThread *worker = QThread::create([resultJson]() {
 		const QJniObject repoArg = QJniObject::fromString(QString::fromUtf8(ANDROID_GITHUB_REPO));
 		const QJniObject jsonObj = QJniObject::callStaticObjectMethod(
 			"com/obsproject/studio/ObsUpdateHost", "fetchLatestRelease",
 			"(Ljava/lang/String;)Ljava/lang/String;", repoArg.object<jstring>());
-		const QString rawJson = jsonObj.isValid() ? jsonObj.toString() : QString();
+		*resultJson = jsonObj.isValid() ? jsonObj.toString() : QString();
 		g_androidUpdateInFlight.store(false);
-
-		if (!weakThis || g_androidShutdownRequested.load())
-			return;
-		QMetaObject::invokeMethod(
-			weakThis,
-			[weakThis, manualUpdate, currentVersion, rawJson]() {
-				if (!weakThis || g_androidShutdownRequested.load())
-					return;
-				weakThis->updateCheckFinished();
-				ShowAndroidUpdateResultDialog(weakThis.data(), manualUpdate, currentVersion, rawJson);
-			},
-			Qt::QueuedConnection);
 	});
 	worker->setParent(nullptr);
+	connect(
+		worker, &QThread::finished, this,
+		[this, manualUpdate, currentVersion, resultJson]() {
+			if (g_androidShutdownRequested.load() || isClosing())
+				return;
+			updateCheckFinished();
+			ShowAndroidUpdateResultDialog(this, manualUpdate, currentVersion, *resultJson);
+		},
+		Qt::QueuedConnection);
 	connect(worker, &QThread::finished, worker, &QObject::deleteLater);
 	worker->start();
 #else
