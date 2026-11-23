@@ -304,75 +304,82 @@ public final class ObsAudioHost {
         if (exactBest != null)
             return exactBest.id;
 
-        if (target.hasAudio) {
-            // 2) ALSA usbid (vid:pid) match if sysfs/procfs exposes it cleanly.
-            String targetVidPid = target.vidPid();
-            int sameVidPidCount = 0;
-            for (UsbDevInfo dev : audioUsbDevs) {
-                if (targetVidPid.equals(dev.vidPid()))
-                    sameVidPidCount++;
-            }
-            if (sameVidPidCount == 1) {
-                List<AudioInInfo> vidPidMatches = new ArrayList<>();
-                for (AudioInInfo in : audioInputs) {
-                    if (!in.cardUsbId.isEmpty() && targetVidPid.equals(in.cardUsbId))
-                        vidPidMatches.add(in);
-                }
-                AudioInInfo unique = uniqueCardWinner(vidPidMatches);
-                if (unique != null)
-                    return unique.id;
-            }
+        if (!target.hasAudio)
+            return -1;
 
-            // 3) Product / ALSA card name match (tolerant to prefixes, punctuation, and
-            // multiple AudioDeviceInfo entries like TYPE_USB_DEVICE + TYPE_USB_HEADSET on one card).
-            if (!target.productName.isEmpty() && !isGenericAudioName(target.productName, phoneModel)) {
-                int bestScore = 0;
-                List<AudioInInfo> scored = new ArrayList<>();
-                for (AudioInInfo in : audioInputs) {
-                    int score = Math.max(
-                            scoreProductMatch(target.productName, in.productName, phoneModel),
-                            scoreProductMatch(target.productName, in.cardAlsaName, phoneModel));
-                    if (score <= 0)
-                        continue;
-                    if (score > bestScore) {
-                        bestScore = score;
-                        scored.clear();
-                        scored.add(in);
-                    } else if (score == bestScore) {
-                        scored.add(in);
-                    }
-                }
-                AudioInInfo winner = uniqueCardWinner(scored);
-                if (winner != null && isUniqueAudioUsbProduct(target, audioUsbDevs))
-                    return winner.id;
-            }
+        // Disqualify any input whose resolved USB path or VID:PID explicitly
+        // identifies a different physical USB device.
+        String targetVidPid = target.vidPid();
+        List<AudioInInfo> eligibleInputs = new ArrayList<>();
+        for (AudioInInfo in : audioInputs) {
+            if (!belongsToDifferentUsbDevice(in, usbDeviceName, targetVidPid))
+                eligibleInputs.add(in);
+        }
+        if (eligibleInputs.isEmpty())
+            return -1;
 
-            // 4) Unambiguous single USB-audio device fallback (e.g. SELinux hides /proc/asound
-            // and HAL reports generic "USB Audio" or phone Build.MODEL instead of USB product name).
-            if (audioUsbDevs.size() == 1 && hasAtMostOneUsbAudioCard(audioInputs)) {
-                AudioInInfo best = null;
-                for (AudioInInfo in : audioInputs) {
-                    if (isBetterCandidate(in, best))
-                        best = in;
-                }
-                if (best != null)
-                    return best.id;
+        // 2) ALSA usbid (vid:pid) match if sysfs/procfs exposes it cleanly.
+        int sameVidPidCount = 0;
+        for (UsbDevInfo dev : audioUsbDevs) {
+            if (targetVidPid.equals(dev.vidPid()))
+                sameVidPidCount++;
+        }
+        if (sameVidPidCount == 1) {
+            List<AudioInInfo> vidPidMatches = new ArrayList<>();
+            for (AudioInInfo in : eligibleInputs) {
+                if (!in.cardUsbId.isEmpty() && targetVidPid.equals(in.cardUsbId))
+                    vidPidMatches.add(in);
             }
-        } else if (audioUsbDevs.size() == 1 && hasAtMostOneUsbAudioCard(audioInputs)) {
-            // 5) Split hub dongle where UVC and UAC sit on adjacent VID-matched USB devices.
-            UsbDevInfo audioDev = audioUsbDevs.get(0);
-            if (audioDev.vendorId == target.vendorId) {
-                AudioInInfo best = null;
-                for (AudioInInfo in : audioInputs) {
-                    if (isBetterCandidate(in, best))
-                        best = in;
+            AudioInInfo unique = uniqueCardWinner(vidPidMatches);
+            if (unique != null)
+                return unique.id;
+        }
+
+        // 3) Product / ALSA card name match (tolerant to prefixes, punctuation, and
+        // multiple AudioDeviceInfo entries like TYPE_USB_DEVICE + TYPE_USB_HEADSET on one card).
+        if (!target.productName.isEmpty() && !isGenericAudioName(target.productName, phoneModel)) {
+            int bestScore = 0;
+            List<AudioInInfo> scored = new ArrayList<>();
+            for (AudioInInfo in : eligibleInputs) {
+                int score = Math.max(
+                        scoreProductMatch(target.productName, in.productName, phoneModel),
+                        scoreProductMatch(target.productName, in.cardAlsaName, phoneModel));
+                if (score <= 0)
+                    continue;
+                if (score > bestScore) {
+                    bestScore = score;
+                    scored.clear();
+                    scored.add(in);
+                } else if (score == bestScore) {
+                    scored.add(in);
                 }
-                if (best != null)
-                    return best.id;
             }
+            AudioInInfo winner = uniqueCardWinner(scored);
+            if (winner != null && isUniqueAudioUsbProduct(target, winner, audioUsbDevs, phoneModel))
+                return winner.id;
+        }
+
+        // 4) Unambiguous single USB-audio device fallback (e.g. SELinux hides /proc/asound
+        // and HAL reports generic "USB Audio" or phone Build.MODEL instead of USB product name).
+        if (audioUsbDevs.size() == 1 && hasAtMostOneUsbAudioCard(audioInputs)) {
+            AudioInInfo best = null;
+            for (AudioInInfo in : eligibleInputs) {
+                if (isBetterCandidate(in, best))
+                    best = in;
+            }
+            if (best != null)
+                return best.id;
         }
 
         return -1;
+    }
+
+    private static boolean belongsToDifferentUsbDevice(AudioInInfo in, String targetUsbPath, String targetVidPid) {
+        if (!in.resolvedUsbPath.isEmpty() && !targetUsbPath.equals(in.resolvedUsbPath))
+            return true;
+        if (!in.cardUsbId.isEmpty() && !targetVidPid.isEmpty() && !targetVidPid.equals(in.cardUsbId))
+            return true;
+        return false;
     }
 
     private static boolean isUsbAudioType(int type) {
@@ -438,7 +445,8 @@ public final class ObsAudioHost {
         return uniqueCardWinner(inputs) != null;
     }
 
-    private static boolean isUniqueAudioUsbProduct(UsbDevInfo target, List<UsbDevInfo> audioUsbDevs) {
+    private static boolean isUniqueAudioUsbProduct(UsbDevInfo target, AudioInInfo winner,
+                                                   List<UsbDevInfo> audioUsbDevs, String phoneModel) {
         String targetNorm = normalizeAlnum(target.productName);
         for (UsbDevInfo other : audioUsbDevs) {
             if (target.deviceName.equals(other.deviceName))
@@ -446,6 +454,10 @@ public final class ObsAudioHost {
             if (target.vidPid().equals(other.vidPid()))
                 return false;
             if (!targetNorm.isEmpty() && targetNorm.equals(normalizeAlnum(other.productName)))
+                return false;
+            if (!other.productName.isEmpty() &&
+                (scoreProductMatch(other.productName, winner.productName, phoneModel) > 0 ||
+                 scoreProductMatch(other.productName, winner.cardAlsaName, phoneModel) > 0))
                 return false;
         }
         return true;
