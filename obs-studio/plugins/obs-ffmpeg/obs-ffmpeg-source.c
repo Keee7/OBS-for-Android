@@ -215,7 +215,10 @@ static obs_properties_t *ffmpeg_source_getproperties(void *data)
 					     1);
 	obs_property_int_set_suffix(prop, " S");
 
-	obs_properties_add_bool(props, "hw_decode", obs_module_text("HardwareDecode"));
+	prop = obs_properties_add_bool(props, "hw_decode", obs_module_text("HardwareDecode"));
+#ifdef __ANDROID__
+	obs_property_set_long_description(prop, obs_module_text("HardwareDecode.ToolTip.Android"));
+#endif
 
 	obs_properties_add_bool(props, "clear_on_media_end", obs_module_text("ClearOnMediaEnd"));
 
@@ -231,6 +234,9 @@ static obs_properties_t *ffmpeg_source_getproperties(void *data)
 	obs_property_list_add_int(prop, obs_module_text("ColorRange.Auto"), VIDEO_RANGE_DEFAULT);
 	obs_property_list_add_int(prop, obs_module_text("ColorRange.Partial"), VIDEO_RANGE_PARTIAL);
 	obs_property_list_add_int(prop, obs_module_text("ColorRange.Full"), VIDEO_RANGE_FULL);
+#ifdef __ANDROID__
+	obs_property_set_long_description(prop, obs_module_text("ColorRange.ToolTip.Android"));
+#endif
 
 	obs_properties_add_bool(props, "linear_alpha", obs_module_text("LinearAlpha"));
 

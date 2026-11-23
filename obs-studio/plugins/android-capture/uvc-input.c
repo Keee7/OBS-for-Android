@@ -2956,6 +2956,7 @@ static obs_properties_t *uvc_properties(void *data)
 	obs_property_t *mode = obs_properties_add_list(props, "device_mode", obs_module_text("DeviceMode"),
 						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(mode, obs_module_text("DeviceMode.Manual"), "");
+	obs_property_set_long_description(mode, obs_module_text("DeviceMode.Description"));
 	obs_property_set_modified_callback(mode, on_mode_change);
 	obs_property_set_modified_callback2(dev_list, on_usb_device_change, s);
 
@@ -2973,6 +2974,7 @@ static obs_properties_t *uvc_properties(void *data)
 	obs_property_list_add_string(p, obs_module_text("VideoFormat.Rgb24"), "rgb24");
 	obs_property_list_add_string(p, obs_module_text("VideoFormat.Bgr24"), "bgr24");
 	obs_property_list_add_string(p, obs_module_text("VideoFormat.Auto"), "");
+	obs_property_set_long_description(p, obs_module_text("VideoFormat.Description"));
 
 	obs_property_t *color = obs_properties_add_list(props, "yuv_colorspace", obs_module_text("YuvColorSpace"),
 							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -2991,8 +2993,9 @@ static obs_properties_t *uvc_properties(void *data)
 	obs_property_list_add_int(range, obs_module_text("ColorRange.Full"), VIDEO_RANGE_FULL);
 	obs_property_set_long_description(range, obs_module_text("ColorRange.Description"));
 
-	obs_properties_add_list(props, "audio_device", obs_module_text("AudioInput"), OBS_COMBO_TYPE_LIST,
-				OBS_COMBO_FORMAT_INT);
+	obs_property_t *audio = obs_properties_add_list(props, "audio_device", obs_module_text("AudioInput"),
+							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_set_long_description(audio, obs_module_text("AudioInput.Description"));
 
 	obs_property_t *latency = obs_properties_add_bool(props, "yuv_low_latency", obs_module_text("YuvPassthrough"));
 	obs_property_set_long_description(
