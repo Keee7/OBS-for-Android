@@ -426,23 +426,36 @@ public final class ObsAudioHost {
     }
 
     private static boolean hasAtMostOneUsbAudioCard(List<AudioInInfo> inputs) {
-        int cardNum = -1;
+        if (inputs == null || inputs.isEmpty())
+            return false;
+        String confirmedUsbPath = null;
+        int confirmedCardNum = -1;
         for (AudioInInfo in : inputs) {
-            if (in.cardNum >= 0) {
-                if (cardNum < 0)
-                    cardNum = in.cardNum;
-                else if (cardNum != in.cardNum)
+            final boolean hasPath = !in.resolvedUsbPath.isEmpty();
+            final boolean hasCard = in.cardNum >= 0;
+            if (!hasPath && !hasCard)
+                return false;
+            if (hasPath) {
+                if (confirmedUsbPath == null)
+                    confirmedUsbPath = in.resolvedUsbPath;
+                else if (!confirmedUsbPath.equals(in.resolvedUsbPath))
+                    return false;
+            }
+            if (hasCard) {
+                if (confirmedCardNum < 0)
+                    confirmedCardNum = in.cardNum;
+                else if (confirmedCardNum != in.cardNum)
                     return false;
             }
         }
-        if (cardNum >= 0) {
+        // Reject mixed path-only + card-only entries with no shared confirming field.
+        if (confirmedUsbPath != null && confirmedCardNum >= 0) {
             for (AudioInInfo in : inputs) {
-                if (in.cardNum < 0 && !in.resolvedUsbPath.isEmpty())
+                if (in.resolvedUsbPath.isEmpty() || in.cardNum < 0)
                     return false;
             }
-            return true;
         }
-        return uniqueCardWinner(inputs) != null;
+        return true;
     }
 
     private static boolean isUniqueAudioUsbProduct(UsbDevInfo target, AudioInInfo winner,
