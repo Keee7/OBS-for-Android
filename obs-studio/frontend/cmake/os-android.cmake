@@ -220,6 +220,8 @@ set_target_properties(
     # package 是独立安装用的 application ID；应用代码和 JNI descriptor 继续使用旧 Java 包名。
     QT_ANDROID_PACKAGE_SOURCE_DIR "${OBS_ANDROID_PACKAGE_SOURCE_DIR}"
     QT_ANDROID_PACKAGE_NAME "${OBS_ANDROID_PACKAGE_NAME}"
+    # Compress native libraries in the download. Android extracts them at install time.
+    QT_ANDROID_LEGACY_PACKAGING TRUE
     # 真正生效的是 cmake/android/AndroidManifest.xml 里那对 versionCode/versionName
     # （设了 QT_ANDROID_PACKAGE_SOURCE_DIR 之后 androiddeployqt 用自带清单，不再拿模板覆盖）。
     # 这两行只是 androiddeployqt 的默认值，出包前必须与清单保持一致，否则 aapt2 报的版本
