@@ -395,36 +395,55 @@ if(ANDROID AND TARGET FFmpeg::avcodec)
   endif()
 endif()
 
-# Android's static libavformat needs the transport library and its crypto backend.
+# Keep the private dependencies of Android's static libavformat on its imported target.
 if(ANDROID AND TARGET FFmpeg::avformat)
   find_library(FFmpeg_SRT_LIBRARY NAMES srt)
-  if(FFmpeg_SRT_LIBRARY)
+  find_library(FFmpeg_RIST_LIBRARY NAMES rist)
+  find_library(FFmpeg_XML2_LIBRARY NAMES xml2)
+  if(NOT FFmpeg_SRT_LIBRARY OR NOT FFmpeg_RIST_LIBRARY OR NOT FFmpeg_XML2_LIBRARY)
+    execute_process(
+      COMMAND "${CMAKE_NM}" -g --defined-only "${FFmpeg_avformat_LIBRARY}"
+      RESULT_VARIABLE _avformat_nm_result OUTPUT_VARIABLE _avformat_symbols ERROR_QUIET
+    )
+    if(NOT _avformat_nm_result EQUAL 0)
+      message(FATAL_ERROR "Unable to inspect Android libavformat for network input dependencies")
+    endif()
+    if(NOT FFmpeg_SRT_LIBRARY AND _avformat_symbols MATCHES "ff_libsrt_protocol")
+      message(FATAL_ERROR "Android libavformat requires the missing SRT static library")
+    endif()
+    if(NOT FFmpeg_RIST_LIBRARY AND _avformat_symbols MATCHES "ff_librist_protocol")
+      message(FATAL_ERROR "Android libavformat requires the missing librist static library")
+    endif()
+    if(NOT FFmpeg_XML2_LIBRARY AND _avformat_symbols MATCHES "ff_dash_demuxer")
+      message(FATAL_ERROR "Android libavformat requires the missing libxml2 static library")
+    endif()
+  endif()
+  foreach(_library IN ITEMS FFmpeg_SRT_LIBRARY FFmpeg_RIST_LIBRARY FFmpeg_XML2_LIBRARY)
+    if(${_library})
+      set_property(TARGET FFmpeg::avformat APPEND PROPERTY INTERFACE_LINK_LIBRARIES "${${_library}}")
+    endif()
+  endforeach()
+  if(FFmpeg_RIST_LIBRARY)
+    find_library(FFmpeg_CJSON_LIBRARY NAMES cjson)
+    if(FFmpeg_CJSON_LIBRARY)
+      set_property(TARGET FFmpeg::avformat APPEND PROPERTY INTERFACE_LINK_LIBRARIES "${FFmpeg_CJSON_LIBRARY}")
+    endif()
+  endif()
+  if(FFmpeg_SRT_LIBRARY OR FFmpeg_RIST_LIBRARY OR _avformat_symbols MATCHES "ff_tls_protocol")
     find_package(MbedTLS 3...<4 CONFIG QUIET)
     if(NOT MbedTLS_FOUND)
       find_package(MbedTLS 3...<4 REQUIRED)
     endif()
-    set_property(
-      TARGET FFmpeg::avformat APPEND PROPERTY INTERFACE_LINK_LIBRARIES
-      "${FFmpeg_SRT_LIBRARY}" MbedTLS::mbedtls
-    )
+    set_property(TARGET FFmpeg::avformat APPEND PROPERTY INTERFACE_LINK_LIBRARIES MbedTLS::mbedtls)
+  endif()
+  if(FFmpeg_SRT_LIBRARY)
     if(ANDROID_STL STREQUAL "c++_static" OR CMAKE_ANDROID_STL_TYPE STREQUAL "c++_static")
       set_property(TARGET FFmpeg::avformat APPEND PROPERTY INTERFACE_LINK_LIBRARIES c++_static c++abi unwind)
     else()
       set_property(TARGET FFmpeg::avformat APPEND PROPERTY INTERFACE_LINK_LIBRARIES c++_shared)
     endif()
-  else()
-    execute_process(
-      COMMAND "${CMAKE_NM}" -g --defined-only "${FFmpeg_avformat_LIBRARY}"
-      RESULT_VARIABLE _srt_nm_result OUTPUT_VARIABLE _avformat_symbols ERROR_QUIET
-    )
-    if(NOT _srt_nm_result EQUAL 0)
-      message(FATAL_ERROR "Unable to inspect Android libavformat for SRT support")
-    endif()
-    if(_avformat_symbols MATCHES "ff_libsrt_protocol")
-      message(FATAL_ERROR "Android libavformat requires the missing SRT static library")
-    endif()
-    unset(_avformat_symbols)
   endif()
+  unset(_avformat_symbols)
 endif()
 
 # The GPL FFmpeg build enables the pp filter, which uses libpostproc. Static

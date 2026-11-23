@@ -124,6 +124,7 @@ struct screen_source {
 
 	uint64_t next_try_ns;   // 退避的那道闸，见 RETRY_INTERVAL_NS
 	bool consent_asked;     // 一次 activate episode 只弹一次同意框，见 try_start 那段
+	volatile long manual_consent_requested;
 	bool display_started;
 
 	/* 第一帧那台仪器的三个读数，都在 open_capture 里起、在 video_tick 里判。
@@ -775,6 +776,18 @@ static bool open_capture(struct screen_source *c)
 /* 一次"要不要开、能不能开、开不起来就什么时候再试"的判断。activate 与 tick 共用它，
  * 这样同意框刚被用户点掉的那一拍（下一根 tick，最多 1 秒后）画面就自己出来了，
  * 不需要用户再把源关一次开一次。 */
+static int request_screen_consent(struct screen_source *c)
+{
+	const int result = obs_android_screen_request_consent();
+	if (c && result < 0) {
+		char code[16];
+		snprintf(code, sizeof(code), "%d", result);
+		const char *args[] = {code};
+		set_error_key(c, "Err.ConsentFailed", args, 1);
+	}
+	return result;
+}
+
 static void try_start(struct screen_source *c)
 {
 	if (!obs_source_active(c->source))
@@ -798,27 +811,19 @@ static void try_start(struct screen_source *c)
 	}
 
 	if (!obs_android_screen_has_consent()) {
-		/* 一次 episode 只弹一次：这一格下面直接 startActivity 起代理 Activity，
-		 * 而代理 Activity 自己**不判重**（它只在 onCreate 里置意图位）—— 不设这道闸，
-		 * 60Hz 的 tick 就能把同意框起成一串。
-		 * 之后系统把令牌收回（用户按"停止共享"）也不自动再弹：用户刚说过"停"，
-		 * 追着弹是骚扰。要再采就把源切走再切回来，activate 会把这个位清掉。 */
+		/* Each activation asks once. After a cancellation or revocation,
+		 * the properties button can open the consent dialog again. */
 		if (!c->consent_asked) {
 			c->consent_asked = true;
-			const int r = obs_android_screen_request_consent();
-			if (r < 0) {
-				char result[16];
-				snprintf(result, sizeof(result), "%d", r);
-				const char *args[] = {result};
-				set_error_key(c, "Err.ConsentFailed", args, 1);
-			} else
+			const int r = request_screen_consent(c);
+			if (r > 0)
 				blog(LOG_INFO, "android-screen: 尚未获取投影授权，已发起系统授权请求（返回值=%d）", r);
 		}
 		return;
 	}
 
 	if (!open_capture(c)) {
-		// A failed display may invalidate consent. Re-enable the source to ask again.
+		// A failed display may invalidate consent. Wait for another request.
 		c->consent_asked = true;
 		return;
 	}
@@ -982,6 +987,13 @@ static void screen_video_tick(void *data, float seconds)
 	 * 轮询每拍两回总线往返（问令牌、问尺寸），尺寸那一格在 Java 侧还要现读一次显示模式；
 	 * 按 60Hz 的 tick 跑就是每秒 120 趟，为两件一秒内不会变的事不值这一笔。 */
 	pthread_mutex_lock(&c->lifecycle_mx);
+	if (os_atomic_exchange_long(&c->manual_consent_requested, 0)) {
+		close_capture(c, "new screen capture consent requested");
+		os_atomic_set_long(&c->gpu_runtime_failed, 0);
+		c->gpu_retries = 0;
+		c->consent_asked = true;
+		c->next_try_ns = 0;
+	}
 	bool requested = os_atomic_load_long(&c->gpu_requested) != 0;
 	if (requested != c->gpu_applied) {
 		close_capture(c, "GPU 采集设置变化");
@@ -1093,12 +1105,17 @@ static void screen_render(void *data, gs_effect_t *effect)
 			const bool straight = alpha_mode == SCREEN_ALPHA_STRAIGHT;
 			const bool scrgb = space == GS_CS_709_SCRGB;
 			const char *technique = "Draw";
+			if (scrgb) {
+				/* The projection delivers SDR. Scale its linear RGB to the
+				 * configured SDR white level in the HDR composition. */
+				gs_set_linear_srgb(true);
+				technique = straight ? "DrawNonlinearAlphaMultiply" : "DrawMultiply";
+				gs_effect_set_float(gs_effect_get_param_by_name(draw, "multiplier"),
+						    obs_get_video_sdr_white_level() / 80.0f);
+			}
 			if (straight || premultiplied) {
 				gs_set_linear_srgb(linear);
-				if (scrgb) {
-					technique = straight ? "DrawNonlinearAlphaMultiply" : "DrawMultiply";
-					gs_effect_set_float(gs_effect_get_param_by_name(draw, "multiplier"), obs_get_video_sdr_white_level() / 80.0f);
-				} else if (linear && straight) {
+				if (!scrgb && linear && straight) {
 					technique = "DrawNonlinearAlpha";
 				}
 				gs_blend_state_push();
@@ -1124,9 +1141,22 @@ static void screen_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "alpha_mode", SCREEN_ALPHA_COMPAT);
 }
 
+static bool on_request_screen_consent(obs_properties_t *props, obs_property_t *property, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(property);
+	struct screen_source *c = data;
+	const int result = request_screen_consent(c);
+	if (c && result > 0)
+		os_atomic_set_long(&c->manual_consent_requested, 1);
+	return result < 0;
+}
+
 static obs_properties_t *screen_properties(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
+	obs_properties_add_button2(props, "request_consent", obs_module_text("RequestConsent"),
+				   on_request_screen_consent, data);
 	struct screen_source *c = data;
 	struct dstr state;
 	struct dstr audio;

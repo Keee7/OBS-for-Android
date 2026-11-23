@@ -14,10 +14,12 @@ This repository is an Android port of [OBS Studio](https://github.com/obsproject
 * **OBS Studio and Port Code**: Licensed under the **GNU General Public License v2.0 or later** (GPL-2.0-or-later). See [LICENSE](LICENSE), [obs-studio/COPYING](obs-studio/COPYING), and [obs-studio/AUTHORS](obs-studio/AUTHORS) for details.
 * **Third-Party Libraries & Dependencies**:
   * **Qt**: Licensed under LGPLv3 / GPLv3.
-  * **FFmpeg**: Licensed under GPLv2+ (incorporating x264 and x265).
+  * **FFmpeg**: The Android build uses GPL-3.0-or-later with `--enable-gpl` and `--enable-version3`.
   * **x264 / x265**: Licensed under GPLv2.
   * **libaom**: Licensed under BSD-2-Clause and Alliance for Open Media Patent License 1.0.
   * **SRT**: MPL-2.0. [Upstream license](https://github.com/Haivision/srt/blob/v1.5.4/LICENSE)
+  * **librist**: BSD-2-Clause. [Source package and license](https://sources.debian.org/src/librist/)
+  * **libxml2 / cJSON**: MIT. [libxml2 license](https://gitlab.gnome.org/GNOME/libxml2/-/blob/v2.15.4/Copyright), [cJSON license](https://github.com/DaveGamble/cJSON/blob/v1.7.19/LICENSE)
   * **libusb**: LGPL-2.1-or-later. [Upstream license](https://github.com/libusb/libusb/blob/v1.0.28/COPYING)
   * **mbedTLS / curl / FreeType / libjpeg-turbo / Jansson / RNNoise / SpeexDSP**: See the respective upstream licenses.
 
@@ -38,10 +40,12 @@ This repository is an Android port of [OBS Studio](https://github.com/obsproject
 * **OBS Studio 及移植源码**：遵循 **GNU 通用公共许可证第 2 版或更高版本**（GPL-2.0-or-later）。详见 [LICENSE](LICENSE)、[obs-studio/COPYING](obs-studio/COPYING) 与 [obs-studio/AUTHORS](obs-studio/AUTHORS)。
 * **第三方库与依赖组件**：
   * **Qt**：遵循 LGPLv3 / GPLv3；
-  * **FFmpeg**：遵循 GPLv2+（包含 x264 与 x265 支持）；
+  * **FFmpeg**：Android 版以 `--enable-gpl` 和 `--enable-version3` 构建，遵循 GPL-3.0-or-later。
   * **x264 / x265**：遵循 GPLv2；
   * **libaom**：遵循 BSD-2-Clause 与 AOM 专利许可证 1.0；
   * **SRT**：MPL-2.0。[上游许可证](https://github.com/Haivision/srt/blob/v1.5.4/LICENSE)
+  * **librist**：BSD-2-Clause。[源码包及许可证](https://sources.debian.org/src/librist/)
+  * **libxml2 / cJSON**：MIT。[libxml2 许可证](https://gitlab.gnome.org/GNOME/libxml2/-/blob/v2.15.4/Copyright)，[cJSON 许可证](https://github.com/DaveGamble/cJSON/blob/v1.7.19/LICENSE)
   * **libusb**：LGPL-2.1-or-later。[上游许可证](https://github.com/libusb/libusb/blob/v1.0.28/COPYING)
   * **mbedTLS / curl / FreeType / libjpeg-turbo / Jansson / RNNoise / SpeexDSP** 等组件的许可见各自的上游项目。
 

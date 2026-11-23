@@ -47,12 +47,14 @@ import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Surface;
 
 public final class ObsProjectionHost extends Activity {
     private static final String TAG = "OBS-screen";
     private static final int REQUEST_CODE = 0x0B53;
+    private static final String EXTRA_CONSENT_GENERATION = "consent_generation";
 
     /** 唯一的那份投影令牌。只在主线程写，别的线程读 —— volatile 够，因为没人拿它做复合判断。 */
     private static volatile MediaProjection projection;
@@ -62,9 +64,10 @@ public final class ObsProjectionHost extends Activity {
      * 因为**这道门在取令牌那一步，不在建 VirtualDisplay**（b109 实测，见 takeToken 上方那段）。
      * 令牌要等前台服务已经带上 mediaProjection 那一档才要得下来，所以必须有一个"还没有令牌、
      * 但已经要那一档"的中间态 —— 这一格就是它。
-     * 置位：onCreate（同意框刚发起）；清位：用户拒绝、系统收回、主动交还、取令牌失败。
+     * 系统确认共享后才置位，停止投影或交换令牌失败时清除。
      */
     private static volatile boolean wantProjection;
+    private static volatile boolean consentRequestPending;
 
     /** 同意框是系统那个 Activity，结果只给一次；令牌交换要在服务改档之后跑，所以管理器存静态。 */
     private static volatile MediaProjectionManager sMpm;
@@ -76,14 +79,9 @@ public final class ObsProjectionHost extends Activity {
     private static volatile String lastAction = "<none>";
     private static volatile String lastError = "<none>";
 
-    /**
-     * 同意框的"代"：每 onCreate 一次加一，实例把自己的那份记在 myGen 里。
-     * 要它是因为转屏（或任何显示配置变化）会让系统重建这个代理 Activity，而**旧实例**在销毁前
-     * 会补送一次 RESULT_CANCELED —— 实测 09-07 22:39:42.662 与 .664 连着两次取消（来自 22:37:32
-     * 和 22:38:12 那两代），.665 才是现役那代送来的 RESULT_OK，前后差 3 ms。
-     * 只在 main 线程动（onCreate / onActivityResult 都在），所以不需要原子类型。
-     */
+    /** Identifies the outstanding system prompt across Activity recreation. Guarded by the class monitor. */
     private static int consentGen = 0;
+    private static long pendingActivityLaunchMs;
 
     /** 本实例出生时的那一代。 */
     private int myGen = 0;
@@ -107,20 +105,30 @@ public final class ObsProjectionHost extends Activity {
             Log.i(TAG, lastAction);
             return 0;
         }
+        long now = SystemClock.elapsedRealtime();
+        // Android may drop a background Activity launch. Only expire requests
+        // whose proxy never opened. A visible system prompt can wait indefinitely.
+        if (consentRequestPending &&
+            (pendingActivityLaunchMs == 0 || now - pendingActivityLaunchMs < 3000))
+            return 1;
         if (ctx == null) {
             lastError = "requestConsent(null context)";
             Log.e(TAG, lastError);
             return -1;
         }
+        consentRequestPending = true;
+        pendingActivityLaunchMs = now;
         consentRequests++;
         try {
             Intent it = new Intent(ctx.getApplicationContext(), ObsProjectionHost.class);
+            it.putExtra(EXTRA_CONSENT_GENERATION, ++consentGen);
             it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             ctx.getApplicationContext().startActivity(it);
             lastAction = "已启动授权代理 Activity，等待系统确认";
             Log.i(TAG, lastAction);
             return 1;
         } catch (Throwable t) {
+            consentRequestPending = false;
             lastError = "startActivity(ObsProjectionHost) 抛异常: " + t;
             Log.e(TAG, lastError, t);
             return -1;
@@ -321,8 +329,10 @@ public final class ObsProjectionHost extends Activity {
      * 所以调用方（前端那一格）只在返回 true 的那一发记一行日志。重复调同样安全。
      */
     public static synchronized boolean stopProjection(String why) {
-        if (projection == null && !wantProjection)
+        if (projection == null && !wantProjection && !consentRequestPending)
             return false;
+        ++consentGen;
+        consentRequestPending = false;
         releaseDisplay();
         if (projection != null) {
             try {
@@ -625,11 +635,18 @@ public final class ObsProjectionHost extends Activity {
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
-        /* 意图位在这里置，不在 requestConsent 里：那条路可以被绕过 —— 冒烟就是
-         * `am start -n com.obsproject.studio/.ObsProjectionHost` 直接拉起本 Activity 的。
-         * 放这一处保证"只要同意框在路上，服务就知道要报那一档"。 */
-        wantProjection = true;
-        myGen = ++consentGen;
+        synchronized (ObsProjectionHost.class) {
+            myGen = getIntent().getIntExtra(EXTRA_CONSENT_GENERATION, 0);
+            if (consentGen == 0 && myGen != 0) {
+                consentGen = myGen;
+                consentRequestPending = true;
+            }
+            if (myGen != consentGen || !consentRequestPending || projection != null) {
+                finish();
+                return;
+            }
+            pendingActivityLaunchMs = 0;
+        }
         try {
             /* 用 applicationContext 拿管理器：这个 Activity 收完结果就 finish，
              * 而令牌交换排在服务改档之后（那一刻实例可能已经离场），静态字段不能握着 Activity 的 Context。 */
@@ -637,17 +654,18 @@ public final class ObsProjectionHost extends Activity {
                 Context.MEDIA_PROJECTION_SERVICE);
             if (sMpm == null) {
                 lastError = "获取 MediaProjectionManager 失败，当前设备可能不支持屏幕采集";
-                wantProjection = false;
+                abortConsent(myGen);
                 Log.e(TAG, lastError);
                 finish();
                 return;
             }
-            Intent ask = sMpm.createScreenCaptureIntent();
-            startActivityForResult(ask, REQUEST_CODE);
-            Log.i(TAG, "已通过 createScreenCaptureIntent 发起系统录屏授权请求");
+            if (saved == null) {
+                startActivityForResult(sMpm.createScreenCaptureIntent(), REQUEST_CODE);
+                Log.i(TAG, "已通过 createScreenCaptureIntent 发起系统录屏授权请求");
+            }
         } catch (Throwable t) {
             lastError = "发起系统录屏授权请求时发生异常: " + t;
-            wantProjection = false;
+            abortConsent(myGen);
             Log.e(TAG, lastError, t);
             finish();
         }
@@ -655,49 +673,28 @@ public final class ObsProjectionHost extends Activity {
 
     @Override
     protected void onActivityResult(int req, int result, Intent data) {
-        consentResults++;
-        lastResultCode = result;
-        /* 只有现役那一代才有资格回退共享状态：旧代（被转屏重建掉的那个实例）补送的取消，
-         * 若照单执行，就会把意图位落回去并把服务降档，而此刻现役那代的同意框还在路上 ——
-         * 用户随后点"共享屏幕"，getMediaProjection 就会撞上 b109 量到的那条
-         * SecurityException（要求 mediaProjection 档前台服务），整轮同意白跑。
-         * RESULT_OK 不受此限：它手里是真令牌，收下比丢掉好。 */
-        final boolean stale = (myGen != consentGen);
-        if (req != REQUEST_CODE) {
-            lastError = "收到未知 requestCode=" + req + " 的授权回调，已忽略";
-            Log.w(TAG, lastError);
-            if (!stale) {
-                wantProjection = false;
-                ObsForegroundService.retypeIfNeeded();
+        super.onActivityResult(req, result, data);
+        synchronized (ObsProjectionHost.class) {
+            if (req != REQUEST_CODE || myGen != consentGen || !consentRequestPending || wantProjection) {
+                finish();
+                return;
             }
-            finish();
-            return;
+            consentResults++;
+            lastResultCode = result;
+            if (result != RESULT_OK || data == null) {
+                lastAction = "用户取消或拒绝了屏幕采集授权";
+                Log.i(TAG, lastAction);
+                consentRequestFailed();
+                finish();
+                return;
+            }
+            wantProjection = true;
+            // Android requires this foreground service type before exchanging the result for a token.
+            Log.i(TAG, "已获取屏幕录制授权，正在更新前台服务类型以创建投影对象");
+            final Context app = getApplicationContext();
+            final int generation = myGen;
+            ObsForegroundService.ensureProjectionForeground(app, () -> takeToken(app, result, data, generation));
         }
-        if (result != RESULT_OK || data == null) {
-            // 用户点了"取消"或直接关掉 —— 这不是错误，报成"用户没同意"而不是抛异常
-            lastAction = "用户取消或拒绝了屏幕采集授权（resultCode=" + result + "，data=" + (data == null ? "null" : "non-null") + "）"
-                         + (stale ? "，且属于过期授权会话，保持当前状态不变" : "");
-            Log.i(TAG, lastAction);
-            /* 拒绝这一条路上服务是我们叫起的还是本来就在跑，到这一步还没起过（起服务只发生在 RESULT_OK
-             * 那条分支），所以这里只需把意图位落回去，没有要回滚的服务。 */
-            if (!stale) {
-                wantProjection = false;
-                ObsForegroundService.retypeIfNeeded();
-            }
-            finish();
-            return;
-        }
-        /* 顺序是这一条腿的全部内容，而且是量出来的（见 takeToken 上面那段）：
-         * 先把保活服务推成 mediaProjection 档，推成功了才去换令牌。服务可能已经在跑（正在推流/录制），
-         * 也可能根本没跑 —— 两种情况都由 ensureProjectionForeground 收敛，它跑完续体时类型一定已经落定。 */
-        Log.i(TAG, "已获取屏幕录制授权，正在更新前台服务类型以创建投影对象");
-        final Context app = getApplicationContext();
-        ObsForegroundService.ensureProjectionForeground(app, new Runnable() {
-            @Override
-            public void run() {
-                takeToken(app, result, data);
-            }
-        });
         finish(); // 透明代理，交完手就走（后续那一步用的是静态字段）
     }
 
@@ -715,7 +712,9 @@ public final class ObsProjectionHost extends Activity {
      * 现在仍然先 registerCallback 再交令牌 —— 它没有坏处，且 onStop 那一格是 hasProjection()
      * 唯一能感知"系统把令牌收回了"的渠道。
      */
-    private static synchronized void takeToken(Context app, int resultCode, Intent data) {
+    private static synchronized void takeToken(Context app, int resultCode, Intent data, int generation) {
+        if (generation != consentGen || !consentRequestPending)
+            return;
         try {
             MediaProjection p = sMpm.getMediaProjection(resultCode, data);
             if (p == null) {
@@ -779,6 +778,7 @@ public final class ObsProjectionHost extends Activity {
                 };
             });
             projection = p;
+            consentRequestPending = false;
             lastAction = "已获取 MediaProjection 授权（API " + Build.VERSION.SDK_INT + "）";
             Log.i(TAG, lastAction + " " + describe());
             /* 令牌到手，"为投影空手起服务"这面旗子的使命到此为止。不落回 false 的话，
@@ -798,5 +798,20 @@ public final class ObsProjectionHost extends Activity {
         wantProjection = false;
         Log.w(TAG, "屏幕投影已中止（" + why + "），已更新前台服务状态");
         ObsForegroundService.releaseProjectionForeground(app);
+    }
+
+    private static void consentRequestFailed() {
+        wantProjection = false;
+        consentRequestPending = false;
+    }
+
+    private static synchronized void abortConsent(int generation) {
+        if (generation == consentGen)
+            consentRequestFailed();
+    }
+
+    static void projectionForegroundFailed() {
+        if (wantProjection && consentRequestPending)
+            consentRequestFailed();
     }
 }

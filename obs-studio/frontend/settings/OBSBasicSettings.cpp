@@ -1068,11 +1068,25 @@ void OBSBasicSettings::LoadColorRanges()
 #define CS_2100PQ_STR QTStr("Basic.Settings.Advanced.Video.ColorSpace.2100PQ")
 #define CS_2100HLG_STR QTStr("Basic.Settings.Advanced.Video.ColorSpace.2100HLG")
 
+#ifdef __ANDROID__
+static bool AndroidSupports10BitVideo()
+{
+	obs_enter_graphics();
+	const bool supported = gs_p010_available();
+	obs_leave_graphics();
+	return supported;
+}
+#endif
+
 void OBSBasicSettings::LoadColorSpaces()
 {
 	ui->colorSpace->addItem(CS_SRGB_STR, "sRGB");
 	ui->colorSpace->addItem(CS_709_STR, "709");
 	ui->colorSpace->addItem(CS_601_STR, "601");
+#ifdef __ANDROID__
+	if (!AndroidSupports10BitVideo())
+		return;
+#endif
 	ui->colorSpace->addItem(CS_2100PQ_STR, "2100PQ");
 	ui->colorSpace->addItem(CS_2100HLG_STR, "2100HLG");
 }
@@ -1091,12 +1105,12 @@ void OBSBasicSettings::LoadColorFormats()
 	ui->colorFormat->addItem(CF_NV12_STR, "NV12");
 	ui->colorFormat->addItem(CF_I420_STR, "I420");
 	ui->colorFormat->addItem(CF_I444_STR, "I444");
-#ifndef __ANDROID__
-	/* 10-bit 格式在 Android 移植里是**声明未实现**的（IMPLEMENTATION_ANDROID.md：当前只支持
-	 * H.264/HEVC Main 8-bit SDR，无 HDR/10-bit）。原来这里无条件列出 P010/I010/P216/P416，
-	 * 用户选了它们会一路走到 obs_reset_video 才失败，而那条失败在设置页里是静默的（见
-	 * SaveSettings 里 ResetVideo 的返回值原先没人看）。这几个选项在 Android 上只是陷阱，
-	 * 不给选；桌面端顺序一字不动。 */
+#ifdef __ANDROID__
+	if (AndroidSupports10BitVideo()) {
+		ui->colorFormat->addItem(CF_P010_STR, "P010");
+		ui->colorFormat->addItem(CF_I010_STR, "I010");
+	}
+#else
 	ui->colorFormat->addItem(CF_P010_STR, "P010");
 	ui->colorFormat->addItem(CF_I010_STR, "I010");
 	ui->colorFormat->addItem(CF_P216_STR, "P216");
@@ -3717,7 +3731,6 @@ void OBSBasicSettings::SaveOutputSettings()
 
 	WriteJsonData(streamEncoderProps, "streamEncoder.json");
 	WriteJsonData(recordEncoderProps, "recordEncoder.json");
-	main->ResetOutputs();
 }
 
 void OBSBasicSettings::SaveAudioSettings()
@@ -3871,6 +3884,10 @@ static void AddChangedVal(std::string &changed, const char *str)
 
 void OBSBasicSettings::SaveSettings()
 {
+	bool resetOutputs = outputsChanged;
+#ifdef __ANDROID__
+	const bool wasHdr = OBSAndroidHdrVideoActive();
+#endif
 	if (generalChanged) {
 		SaveGeneralSettings();
 	}
@@ -3904,12 +3921,19 @@ void OBSBasicSettings::SaveSettings()
 		 * 注意 OBS_VIDEO_CURRENTLY_ACTIVE 不是失败 —— 那是"正在推流/录制、这轮不重组视频"，
 		 * 上游各调用点都不当错误，这里也不报。 */
 		const int videoRet = main->ResetVideo();
+#ifdef __ANDROID__
+		if (videoRet == OBS_VIDEO_SUCCESS && wasHdr != OBSAndroidHdrVideoActive())
+			resetOutputs = true;
+#endif
 		if (videoRet != OBS_VIDEO_SUCCESS && videoRet != OBS_VIDEO_CURRENTLY_ACTIVE) {
 			blog(LOG_WARNING, "Settings: obs_reset_video 失败 (ret=%d)，本轮的视频设置没生效", videoRet);
 			OBSMessageBox::warning(this, QTStr("Basic.Settings.VideoResetFailed.Title"),
 					       QTStr("Basic.Settings.VideoResetFailed.Text"));
 		}
 	}
+
+	if (resetOutputs)
+		main->ResetOutputs();
 
 	config_save_safe(main->Config(), "tmp", nullptr);
 	config_save_safe(App()->GetUserConfig(), "tmp", nullptr);
@@ -4279,11 +4303,25 @@ void OBSBasicSettings::on_advOutFFType_currentIndexChanged(int idx)
 
 void OBSBasicSettings::on_colorFormat_currentIndexChanged(int)
 {
+#ifdef __ANDROID__
+	const QString space = ui->colorSpace->currentData().toString();
+	const QString format = ui->colorFormat->currentData().toString();
+	if (!loading && (space == "2100PQ" || space == "2100HLG") && format != "P010" && format != "I010")
+		ui->colorSpace->setCurrentIndex(ui->colorSpace->findData("709"));
+#endif
 	UpdateColorFormatSpaceWarning();
 }
 
 void OBSBasicSettings::on_colorSpace_currentIndexChanged(int)
 {
+#ifdef __ANDROID__
+	const QString space = ui->colorSpace->currentData().toString();
+	const QString format = ui->colorFormat->currentData().toString();
+	if (!loading && (space == "2100PQ" || space == "2100HLG") && format != "P010" && format != "I010") {
+		const char *preferred = obs_get_encoder_codec("android_mediacodec_hevc_main10") ? "P010" : "I010";
+		ui->colorFormat->setCurrentIndex(ui->colorFormat->findData(preferred));
+	}
+#endif
 	UpdateColorFormatSpaceWarning();
 }
 
@@ -5106,6 +5144,9 @@ void OBSBasicSettings::FillSimpleRecordingValues()
 		ui->simpleOutRecEncoder->addItem(QStringLiteral("Android MediaCodec H.264"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC));
 	if (OBSAndroidCbrEncoderAvailable("android_mediacodec_hevc"))
 		ui->simpleOutRecEncoder->addItem(QStringLiteral("Android MediaCodec HEVC (H.265)"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC));
+	if (OBSAndroidCbrEncoderAvailable(SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10))
+		ui->simpleOutRecEncoder->addItem(QT_UTF8(obs_encoder_get_display_name(SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10)),
+						QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10));
 	if (OBSAndroidCbrEncoderAvailable("android_mediacodec_av1"))
 		ui->simpleOutRecEncoder->addItem(QStringLiteral("Android MediaCodec AV1"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1));
 	if (OBSAndroidCbrEncoderAvailable("android_mediacodec_vp9"))

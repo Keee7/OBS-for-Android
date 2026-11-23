@@ -703,8 +703,6 @@ static int interrupt_callback(void *data)
 	return stop;
 }
 
-#define RIST_PROTO "rist"
-
 static bool init_avformat(mp_media_t *m)
 {
 	const AVInputFormat *format = NULL;
@@ -719,8 +717,9 @@ static bool init_avformat(mp_media_t *m)
 	}
 
 	AVDictionary *opts = NULL;
-	bool is_rist = strncmp(m->path, RIST_PROTO, strlen(RIST_PROTO)) == 0;
-	const bool is_srt = !m->is_local_file && strncmp(m->path, "srt://", 6) == 0;
+	const bool is_rist = strncmp(m->path, "rist://", 7) == 0;
+	const bool is_srt = strncmp(m->path, "srt://", 6) == 0;
+	const bool is_rtsp = strncmp(m->path, "rtsp://", 7) == 0 || strncmp(m->path, "rtsps://", 8) == 0;
 	if (m->buffering && !m->is_local_file && !is_rist)
 		av_dict_set_int(&opts, "buffer_size", m->buffering, 0);
 
@@ -757,10 +756,12 @@ static bool init_avformat(mp_media_t *m)
 		m->fmt->flags |= AVFMT_FLAG_NOBUFFER;
 	}
 	if (!m->is_local_file) {
-		if (is_srt)
-			av_dict_set(&opts, "rw_timeout", "5000000", AV_DICT_DONT_OVERWRITE);
-		else
-			av_dict_set(&opts, "stimeout", "30000000", 0);
+		if (is_rtsp) {
+			/* FFmpeg 8 uses timeout for RTSP socket I/O. Respect explicit source options. */
+			av_dict_set(&opts, "timeout", "30000000", AV_DICT_DONT_OVERWRITE);
+		} else if (!is_rist) {
+			av_dict_set(&opts, "rw_timeout", is_srt ? "5000000" : "30000000", AV_DICT_DONT_OVERWRITE);
+		}
 		m->fmt->interrupt_callback.callback = interrupt_callback;
 		m->fmt->interrupt_callback.opaque = m;
 	}
@@ -770,16 +771,17 @@ static bool init_avformat(mp_media_t *m)
 
 	if (ret < 0) {
 		if (!m->reconnecting) {
-			if (is_srt)
-				blog(LOG_WARNING, "MP: Failed to open SRT input: %s", av_err2str(ret));
+			if (!m->is_local_file)
+				blog(LOG_WARNING, "MP: Failed to open network input: %s", av_err2str(ret));
 			else
 				blog(LOG_WARNING, "MP: Failed to open media: '%s': %s", m->path, av_err2str(ret));
 		}
 		return false;
 	}
 
-	if (avformat_find_stream_info(m->fmt, NULL) < 0) {
-		blog(LOG_WARNING, "MP: Failed to find stream info for '%s'", m->path);
+	ret = avformat_find_stream_info(m->fmt, NULL);
+	if (ret < 0) {
+		blog(LOG_WARNING, "MP: Failed to find stream info: %s", av_err2str(ret));
 		return false;
 	}
 
@@ -788,10 +790,7 @@ static bool init_avformat(mp_media_t *m)
 	m->has_audio = mp_decode_init(m, AVMEDIA_TYPE_AUDIO, m->hw);
 
 	if (!m->has_video && !m->has_audio) {
-		blog(LOG_WARNING,
-		     "MP: Could not initialize audio or video: "
-		     "'%s'",
-		     m->path);
+		blog(LOG_WARNING, "MP: Could not initialize an audio or video decoder");
 		return false;
 	}
 

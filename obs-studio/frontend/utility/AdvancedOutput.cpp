@@ -1,5 +1,8 @@
 #include "AdvancedOutput.hpp"
 
+#ifdef __ANDROID__
+#include <utility/AndroidCodecCapabilities.hpp>
+#endif
 #include <utility/audio-encoders.hpp>
 #include <utility/StartMultiTrackVideoStreamingGuard.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -68,6 +71,10 @@ AdvancedOutput::AdvancedOutput(OBSBasic *main_) : BasicOutputHandler(main_)
 #ifdef __APPLE__
 	translate_macvth264_encoder(streamEncoder);
 	translate_macvth264_encoder(recordEncoder);
+#endif
+#ifdef __ANDROID__
+	streamEncoder = OBSAndroidEncoderForVideo(streamEncoder);
+	recordEncoder = OBSAndroidEncoderForVideo(recordEncoder);
 #endif
 
 	ffmpegOutput = astrcmpi(recType, "FFmpeg") == 0;

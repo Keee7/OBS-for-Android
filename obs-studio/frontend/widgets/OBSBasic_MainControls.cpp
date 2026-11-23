@@ -57,6 +57,7 @@
 #endif
 
 #include <QDesktopServices>
+#include <QScopedValueRollback>
 
 extern bool restart;
 extern bool restart_safe;
@@ -75,53 +76,35 @@ using LogUploadDialog = OBS::LogUploadDialog;
 using LogUploadType = OBS::LogFileType;
 #endif
 
+template<typename Dialog>
+static void ReplaceSourceDialog(OBSBasic *owner, QPointer<Dialog> &dialog, bool &replacing, OBSSource source)
+{
+	if (replacing || owner->isClosing())
+		return;
+	const QScopedValueRollback guard(replacing, true);
+
+	// Closing can ask about unsaved changes and enter a nested Qt event loop.
+	// WA_DeleteOnClose retires the old dialog after its pending events.
+	if ((dialog && !dialog->close()) || owner->isClosing())
+		return;
+	dialog = new Dialog(owner, source);
+	dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+	dialog->Init();
+}
+
 void OBSBasic::CreateInteractionWindow(obs_source_t *source)
 {
-	if (interaction) {
-		if (!interaction->close())
-			return;
-		/* 与 CreatePropertiesWindow 同一处坑：close() 只排 deleteLater，
-		 * 立刻 new 会留下一个"已关闭但仍然存在"的僵尸顶层窗。 */
-		interaction->setAttribute(Qt::WA_DeleteOnClose, false);
-		delete interaction;
-	}
-
-	interaction = new OBSBasicInteraction(this, source);
-	interaction->setAttribute(Qt::WA_DeleteOnClose, true);
-	interaction->Init();
+	ReplaceSourceDialog(this, interaction, replacingSourceDialog, source);
 }
 
 void OBSBasic::CreatePropertiesWindow(obs_source_t *source)
 {
-	if (properties) {
-		/* 已有窗口：先关。close() 返回 false = 用户在"未保存"确认里点了取消，
-		 * 上游语义要求此时保留原窗口，直接返回。 */
-		if (!properties->close())
-			return;
-		// Close may leave the old dialog queued for deletion. Dispose of it before creating a new one.
-		properties->setAttribute(Qt::WA_DeleteOnClose, false);
-		delete properties; // QPointer 随之置空
-	}
-
-	properties = new OBSBasicProperties(this, source);
-	/* 属性要在 show() **之前**设好：show() 之后再设，这中间任何一次 close()
-	 * 都不按"关了就删"走，窗口会既没删掉也没被记账。 */
-	properties->setAttribute(Qt::WA_DeleteOnClose, true);
-	properties->Init();
+	ReplaceSourceDialog(this, properties, replacingSourceDialog, source);
 }
 
 void OBSBasic::CreateFiltersWindow(obs_source_t *source)
 {
-	if (filters) {
-		if (!filters->close())
-			return;
-		filters->setAttribute(Qt::WA_DeleteOnClose, false);
-		delete filters;
-	}
-
-	filters = new OBSBasicFilters(this, source);
-	filters->setAttribute(Qt::WA_DeleteOnClose, true);
-	filters->Init();
+	ReplaceSourceDialog(this, filters, replacingSourceDialog, source);
 }
 
 void OBSBasic::updateCheckFinished()
@@ -135,8 +118,8 @@ void OBSBasic::ResetUI()
 	bool studioPortraitLayout = config_get_bool(App()->GetUserConfig(), "BasicWindow", "StudioPortraitLayout");
 
 #ifdef __ANDROID__
-	if (programOptions) {
-		auto *options = static_cast<QVBoxLayout *>(programOptions->layout());
+	auto *options = programOptions ? qobject_cast<QBoxLayout *>(programOptions->layout()) : nullptr;
+	if (options && (androidStudioOptionsScroll || ui->previewLayout->indexOf(programOptions) >= 0)) {
 		const bool phone = !androidRegularDockLayout.isEmpty();
 		studioPortraitLayout |= phone;
 		options->setDirection(phone ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
@@ -155,20 +138,22 @@ void OBSBasic::ResetUI()
 				scroll->setFrameShape(QFrame::NoFrame);
 				scroll->setWidgetResizable(true);
 				scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+				androidStudioOptionsScroll = scroll;
 				// The scrollbar handles horizontal scrolling so buttons and
 				// the T-bar can receive their own touch gestures.
 				delete ui->previewLayout->replaceWidget(programOptions, scroll);
 				ui->previewLayout->setAlignment(scroll, {});
 				scroll->setWidget(programOptions);
-				androidStudioOptionsScroll = scroll;
 			}
 			scroll->setFixedHeight(programOptions->minimumSizeHint().height() +
 					       scroll->style()->pixelMetric(QStyle::PM_ScrollBarExtent));
 		} else if (auto *scroll = static_cast<QScrollArea *>(androidStudioOptionsScroll.data())) {
+			androidStudioOptionsScroll.clear();
 			scroll->takeWidget();
 			delete ui->previewLayout->replaceWidget(scroll, programOptions);
 			ui->previewLayout->setAlignment(programOptions, Qt::AlignCenter);
-			delete scroll;
+			scroll->hide();
+			scroll->deleteLater();
 		}
 	}
 #endif
@@ -183,12 +168,12 @@ void OBSBasic::ResetUI()
 
 void OBSBasic::CloseDialogs()
 {
-	QList<QDialog *> childDialogs = this->findChildren<QDialog *>();
-	if (!childDialogs.isEmpty()) {
-		for (int i = 0; i < childDialogs.size(); ++i) {
-			childDialogs.at(i)->close();
-		}
-	}
+	QList<QPointer<QDialog>> childDialogs;
+	for (QDialog *dialog : findChildren<QDialog *>())
+		childDialogs.emplaceBack(dialog);
+	for (const auto &dialog : childDialogs)
+		if (dialog)
+			dialog->close();
 
 	if (!stats.isNull()) {
 		stats->close(); //call close to save Stats geometry

@@ -22,6 +22,9 @@ dep_version() {
     x265)     echo 3.6 ;;
     aom)      echo 3.10.0 ;;
     srt)      echo 1.5.4 ;;
+    cjson)    echo 1.7.19 ;;
+    librist)  echo 0.2.11 ;;
+    libxml2)  echo 2.15.4 ;;
     ffmpeg)   echo 8.0.3 ;;
     libusb)   echo 1.0.28 ;;
     libjpeg-turbo) echo 3.1.0 ;;
@@ -43,6 +46,9 @@ dep_url() {
     jansson)  echo "https://github.com/akheron/jansson/archive/refs/tags/v${v}.tar.gz" ;;
     x264)     echo "https://code.videolan.org/videolan/x264/-/archive/${v}/x264-${v}.tar.bz2" ;;
     srt)      echo "https://github.com/Haivision/srt/archive/refs/tags/v${v}.tar.gz" ;;
+    cjson)    echo "https://github.com/DaveGamble/cJSON/archive/refs/tags/v${v}.tar.gz" ;;
+    librist)  echo "https://deb.debian.org/debian/pool/main/libr/librist/librist_${v}+dfsg.orig.tar.xz" ;;
+    libxml2)  echo "https://download.gnome.org/sources/libxml2/${v%.*}/libxml2-${v}.tar.xz" ;;
     ffmpeg)   echo "https://ffmpeg.org/releases/ffmpeg-${v}.tar.xz" ;;
     x265)     echo "https://github.com/Multicorewareinc/x265/releases/download/${v}/x265_${v}.tar.gz" ;;
     aom)      echo "https://storage.googleapis.com/aom-releases/libaom-${v}.tar.gz" ;;
@@ -60,7 +66,7 @@ dep_url() {
 # 每个依赖属于哪个批次
 dep_batch() {
   case "$1" in
-    simde|uthash|jansson|x264|x265|aom|mbedtls|srt|ffmpeg) echo core ;;
+    simde|uthash|jansson|x264|x265|aom|mbedtls|srt|cjson|librist|libxml2|ffmpeg) echo core ;;
     libusb|libjpeg-turbo)            echo usb ;;
     speexdsp|rnnoise|freetype)       echo filters ;;
     curl)                           echo output ;;
@@ -71,7 +77,7 @@ dep_batch() {
 # 批次展开为依赖列表（顺序即编译顺序，含依赖关系）
 batch_deps() {
   case "$1" in
-    core)    echo "simde uthash jansson x264 x265 aom mbedtls srt ffmpeg" ;;
+    core)    echo "simde uthash jansson x264 x265 aom mbedtls srt cjson librist libxml2 ffmpeg" ;;
     usb)     echo "libusb libjpeg-turbo" ;;
     filters) echo "speexdsp rnnoise freetype" ;;
     output)  echo "curl" ;;

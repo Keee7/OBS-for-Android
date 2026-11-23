@@ -48,6 +48,7 @@
 #include <QPointer>
 #include <QSystemTrayIcon>
 
+#include <atomic>
 #include <deque>
 #include <string_view>
 
@@ -85,12 +86,14 @@ enum class ItemPasteType { Invalid, Reference, Duplicate, Both };
 #define SIMPLE_ENCODER_SOFTWARE_AV1 "software_av1"
 #define SIMPLE_ENCODER_ANDROID_MEDIACODEC "android_mediacodec"
 #define SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC "android_mediacodec_hevc"
+#define SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10 "android_mediacodec_hevc_main10"
 #define SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1 "android_mediacodec_av1"
 #define SIMPLE_ENCODER_ANDROID_MEDIACODEC_VP9 "android_mediacodec_vp9"
 
 inline bool IsSimpleMediaCodecEncoder(std::string_view encoder)
 {
 	return encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC || encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC ||
+	       encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10 ||
 	       encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1 || encoder == SIMPLE_ENCODER_ANDROID_MEDIACODEC_VP9;
 }
 
@@ -650,6 +653,7 @@ private:
 	QPointer<OBSBasicTransform> transformWindow;
 	QPointer<OBSBasicAdvAudio> advAudioWindow;
 	QPointer<OBSBasicFilters> filters;
+	bool replacingSourceDialog = false;
 	QPointer<OBSAbout> about;
 	QPointer<OBSBasicSourceSelect> addWindow;
 	QPointer<OBSLogViewer> logView;
@@ -1605,6 +1609,7 @@ private:
 	bool overridingTransition = false;
 
 	QSlider *tBar = nullptr;
+	std::atomic<int> tBarPosition{0};
 	bool tBarActive = false;
 
 	OBSSource prevFTBSource = nullptr;

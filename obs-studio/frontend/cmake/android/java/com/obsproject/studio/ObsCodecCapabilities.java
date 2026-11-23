@@ -42,12 +42,16 @@ public final class ObsCodecCapabilities {
         }
     }
 
-    private static boolean supportsSurfaceProfile(MediaCodecInfo.CodecCapabilities caps, int profile) {
-        boolean surface = false;
-        for (int color : caps.colorFormats)
-            if (color == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) surface = true;
-        if (!surface || caps.getVideoCapabilities() == null || caps.getEncoderCapabilities() == null)
+    private static boolean supportsEncoderProfile(MediaCodecInfo.CodecCapabilities caps, int profile, boolean p010) {
+        if (caps.getVideoCapabilities() == null || caps.getEncoderCapabilities() == null)
             return false;
+        if (!p010) {
+            boolean surface = false;
+            for (int color : caps.colorFormats)
+                if (color == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) surface = true;
+            if (!surface) return false;
+        }
+        // Some codecs support P010 at configure time without listing it here.
         if (profile == 0) return true;
         for (MediaCodecInfo.CodecProfileLevel p : caps.profileLevels)
             if (p.profile == profile) return true;
@@ -55,8 +59,12 @@ public final class ObsCodecCapabilities {
     }
 
     public static synchronized boolean hasHardwareEncoder(String mime, int mode) {
-        int profile = encoderProfile(mime);
-        if (profile < 0) return false;
+        return hasHardwareEncoderProfile(mime, mode, 0, false);
+    }
+
+    public static synchronized boolean hasHardwareEncoderProfile(String mime, int mode, int requestedProfile, boolean p010) {
+        int profile = requestedProfile > 0 ? requestedProfile : encoderProfile(mime);
+        if (profile < 0 || (p010 && Build.VERSION.SDK_INT < 33)) return false;
         if (codecs == null) codecs = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
         for (MediaCodecInfo info : codecs) {
             if (!info.isEncoder() || !info.isHardwareAccelerated() || info.isSoftwareOnly() || info.isAlias()) continue;
@@ -64,7 +72,7 @@ public final class ObsCodecCapabilities {
                 if (!mime.equalsIgnoreCase(type)) continue;
                 try {
                     MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(type);
-                    if (supportsSurfaceProfile(caps, profile)
+                    if (supportsEncoderProfile(caps, profile, p010)
                             && (mode < 0 || caps.getEncoderCapabilities().isBitrateModeSupported(mode))) return true;
                 } catch (IllegalArgumentException | SecurityException e) {
                     Log.w(TAG, "Ignoring codec " + info.getName(), e);
@@ -81,11 +89,16 @@ public final class ObsCodecCapabilities {
         return findEncodersMode(mime, width, height, fps, bitrate, 2);
     }
     public static synchronized String[] findEncodersMode(String mime, int width, int height, double fps, int bitrate, int mode) {
+        return findEncodersProfile(mime, width, height, fps, bitrate, mode, 0, false);
+    }
+    public static synchronized String[] findEncodersProfile(String mime, int width, int height, double fps,
+            int bitrate, int mode, int requestedProfile, boolean p010) {
         ArrayList<String> result = new ArrayList<>();
-        int profile = encoderProfile(mime);
+        int profile = requestedProfile > 0 ? requestedProfile : encoderProfile(mime);
         if (Build.VERSION.SDK_INT < 29 || width <= 0 || height <= 0 || !Double.isFinite(fps) || fps <= 0
-                || bitrate < 0 || mode < 0 || mode > 2 || profile < 0) return new String[0];
-        String key = mime + ":" + width + ":" + height + ":" + fps + ":" + bitrate + ":" + mode;
+                || bitrate < 0 || mode < 0 || mode > 2 || profile < 0 || (p010 && Build.VERSION.SDK_INT < 33))
+            return new String[0];
+        String key = mime + ":" + width + ":" + height + ":" + fps + ":" + bitrate + ":" + mode + ":" + profile + ":" + p010;
         if (cache.containsKey(key)) return cache.get(key).clone();
         if (codecs == null) codecs = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
         for (MediaCodecInfo info : codecs) {
@@ -96,7 +109,7 @@ public final class ObsCodecCapabilities {
                     MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(type);
                     MediaCodecInfo.VideoCapabilities video = caps.getVideoCapabilities();
                     MediaCodecInfo.EncoderCapabilities enc = caps.getEncoderCapabilities();
-                    boolean supported = supportsSurfaceProfile(caps, profile) && (mode == 0 || bitrate == 0 || video.getBitrateRange().contains(bitrate))
+                    boolean supported = supportsEncoderProfile(caps, profile, p010) && (mode == 0 || bitrate == 0 || video.getBitrateRange().contains(bitrate))
                         && video.areSizeAndRateSupported(width, height, fps)
                         && enc.isBitrateModeSupported(mode);
                     if (supported && profile > 0) {

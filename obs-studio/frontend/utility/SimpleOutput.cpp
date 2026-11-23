@@ -1,5 +1,8 @@
 #include "SimpleOutput.hpp"
 
+#ifdef __ANDROID__
+#include <utility/AndroidCodecCapabilities.hpp>
+#endif
 #include <utility/audio-encoders.hpp>
 #include <utility/StartMultiTrackVideoStreamingGuard.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -64,6 +67,9 @@ void SimpleOutput::LoadRecordingPreset_Lossless()
 
 void SimpleOutput::LoadRecordingPreset_Lossy(const char *encoderId)
 {
+#ifdef __ANDROID__
+	encoderId = OBSAndroidEncoderForVideo(encoderId);
+#endif
 	videoRecording = obs_video_encoder_create(encoderId, "simple_video_recording", nullptr, nullptr);
 	if (!videoRecording) {
 		throw "Failed to create video recording encoder (simple output)";
@@ -73,6 +79,9 @@ void SimpleOutput::LoadRecordingPreset_Lossy(const char *encoderId)
 
 void SimpleOutput::LoadStreamingPreset_Lossy(const char *encoderId)
 {
+#ifdef __ANDROID__
+	encoderId = OBSAndroidEncoderForVideo(encoderId);
+#endif
 	videoStreaming = obs_video_encoder_create(encoderId, "simple_video_stream", nullptr, nullptr);
 	if (!videoStreaming) {
 		throw "Failed to create video streaming encoder (simple output)";
@@ -111,6 +120,8 @@ const char *get_simple_output_encoder(const char *encoder)
 		return "android_mediacodec_h264";
 	} else if (strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC) == 0) {
 		return SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC;
+	} else if (strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10) == 0) {
+		return SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10;
 	} else if (strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1) == 0) {
 		return SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1;
 	} else if (strcmp(encoder, SIMPLE_ENCODER_ANDROID_MEDIACODEC_VP9) == 0) {

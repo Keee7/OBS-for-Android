@@ -595,14 +595,8 @@ void AutoConfigStreamPage::UpdateKeyLink()
 		ui->streamKeyLabel->setText(QTStr("Basic.AutoConfig.StreamPage.StreamKey"));
 		ui->streamKeyLabel->setToolTip("");
 	} else {
-		/* add tooltips for stream key */
-		QString file = !App()->IsThemeDark() ? ":/res/images/help.svg" : ":/res/images/help_light.svg";
-		QString lStr = "<html>%1 <img src='%2' style=' \
-				vertical-align: bottom;  \
-				' /></html>";
-
-		ui->streamKeyLabel->setText(lStr.arg(QTStr("Basic.AutoConfig.StreamPage.StreamKey"), file));
-		ui->streamKeyLabel->setToolTip(QTStr("Basic.AutoConfig.StreamPage.StreamKey.ToolTip"));
+		SetLabelHelp(ui->streamKeyLabel, QTStr("Basic.AutoConfig.StreamPage.StreamKey"),
+			     QTStr("Basic.AutoConfig.StreamPage.StreamKey.ToolTip"), App()->IsThemeDark());
 	}
 
 	if (QString(streamKeyLink).isNull() || QString(streamKeyLink).isEmpty()) {

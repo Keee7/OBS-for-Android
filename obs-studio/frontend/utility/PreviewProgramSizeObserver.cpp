@@ -185,7 +185,7 @@ void PreviewProgramSizeObserver::syncContainerSizes(int containerSizeDelta)
 		}
 
 		// Force a second recalculation
-		QTimer::singleShot(1, this, [&, setMax]() {
+		QTimer::singleShot(1, this, [this, setMax]() {
 			if (stopped || updating || !leftContainer || !rightContainer) {
 				return;
 			}

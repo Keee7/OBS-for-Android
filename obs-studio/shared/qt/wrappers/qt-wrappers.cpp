@@ -103,6 +103,39 @@ void OBSMessageBox::critical(QWidget *parent, const QString &title, const QStrin
 	mb.exec();
 }
 
+#ifdef __ANDROID__
+void OBSMessageBox::showHelp(QWidget *parent, const QString &title, const QString &text)
+{
+	auto *box = new QMessageBox(QMessageBox::Information, title, text, QMessageBox::NoButton, parent);
+	box->setOption(QMessageBox::Option::DontUseNativeDialog);
+	box->setAttribute(Qt::WA_DeleteOnClose);
+	box->addButton(tr("OK"), QMessageBox::AcceptRole);
+	box->open();
+}
+#endif
+
+void SetLabelHelp(QLabel *label, const QString &title, const QString &description, bool darkTheme)
+{
+	const char *icon = darkTheme ? ":/res/images/help_light.svg" : ":/res/images/help.svg";
+	QString image = QStringLiteral("<img src='%1' style='vertical-align: bottom;' />").arg(QString::fromLatin1(icon));
+#ifdef __ANDROID__
+	const QString link = QStringLiteral("obs-help");
+	image = QStringLiteral("<a href='%1'>%2</a>").arg(link, image);
+	label->setOpenExternalLinks(false);
+	label->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard);
+	label->setAccessibleName(title);
+	if (!label->property("obsHelpConnected").toBool()) {
+		QObject::connect(label, &QLabel::linkActivated, label, [label, link](const QString &href) {
+			if (href == link && !label->toolTip().isEmpty())
+				OBSMessageBox::showHelp(label->window(), label->accessibleName(), label->toolTip());
+		});
+		label->setProperty("obsHelpConnected", true);
+	}
+#endif
+	label->setText(QStringLiteral("<html>%1 %2</html>").arg(title.toHtmlEscaped(), image));
+	label->setToolTip(description);
+}
+
 uint32_t TranslateQtKeyboardEventModifiers(Qt::KeyboardModifiers mods)
 {
 	int obsModifiers = INTERACT_NONE;

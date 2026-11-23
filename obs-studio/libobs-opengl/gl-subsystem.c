@@ -127,6 +127,48 @@ static void gl_enable_debug()
 static void gl_enable_debug() {}
 #endif
 
+#ifdef __ANDROID__
+static bool probe_render_format(GLenum internal_format, GLenum read_format, bool *direct_read)
+{
+	GLuint texture = 0, framebuffer = 0;
+	glGenTextures(1, &texture);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glTexStorage2D(GL_TEXTURE_2D, 1, internal_format, 1, 1);
+	glGenFramebuffers(1, &framebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+	const bool complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+	if (complete && direct_read) {
+		GLint format = 0, type = 0;
+		glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &format);
+		glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &type);
+		*direct_read = format == (GLint)read_format && type == GL_UNSIGNED_SHORT;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glDeleteFramebuffers(1, &framebuffer);
+	glDeleteTextures(1, &texture);
+	return gl_success("probe Android 10-bit render formats") && complete;
+}
+
+static void init_android_10bit_formats(gs_device_t *device)
+{
+	GLint count = 0;
+	glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+	for (GLint i = 0; i < count; i++) {
+		const char *name = (const char *)glGetStringi(GL_EXTENSIONS, (GLuint)i);
+		if (name && strcmp(name, "GL_EXT_texture_norm16") == 0) {
+			device->p010_available = probe_render_format(GL_R16, GL_RED, &device->read_r16_direct) &&
+						 probe_render_format(GL_RG16, GL_RG, &device->read_rg16_direct) &&
+						 probe_render_format(GL_RGBA16F, 0, NULL);
+			break;
+		}
+	}
+	blog(LOG_INFO, "Android 10-bit graphics: %s (direct R16=%d RG16=%d)",
+	     device->p010_available ? "available" : "unavailable", device->read_r16_direct, device->read_rg16_direct);
+}
+#endif
+
 static bool gl_init_extensions(struct gs_device *device)
 {
 	if (!GLAD_GL_VERSION_3_3) {
@@ -156,6 +198,7 @@ static bool gl_init_extensions(struct gs_device *device)
 		device->copy_type = COPY_TYPE_FBO_BLIT;
 
 #if defined(__ANDROID__)
+	init_android_10bit_formats(device);
 	if (!GLAD_GL_EXT_sRGB_write_control)
 		blog(LOG_WARNING,
 		     "GL_EXT_sRGB_write_control 不可用：无法关闭 sRGB 附件的 linear->sRGB 编码，"
@@ -1560,20 +1603,15 @@ bool device_nv12_available(gs_device_t *device)
 
 bool device_p010_available(gs_device_t *device)
 {
-	UNUSED_PARAMETER(device);
 #if defined(__ANDROID__)
-	/* 桌面 GL 把 P010 存成分开的 R16 / RG16 纹理，所以除了 Windows 都返回 true。
-	 * ES 3.1 没有 16-bit **unorm** 内部格式（见 gl-subsystem.h 兼容块里被置 0 的
-	 * GL_R16/GL_RG16），继续返回 true 只会在后面分配纹理时炸出 GL_INVALID_VALUE，
-	 * 不如在这里如实说不支持。
-	 * 要支持的话：给 deps/glad-gles 的扩展列表加 EXT_texture_norm16，并把
-	 * GL_R16/GL_RG16/GL_RGBA16 改映射到 GL_R16_EXT/GL_RG16_EXT/GL_RGBA16_EXT
-	 * （get_gl_format_type 那边保持 GL_UNSIGNED_SHORT 不变）。 */
-	return false;
-#elif defined(_WIN32)
+	return device->p010_available;
+#else
+	UNUSED_PARAMETER(device);
+#ifdef _WIN32
 	return false;
 #else
 	return true; // always a split R16,R16G16 texture.
+#endif
 #endif
 }
 

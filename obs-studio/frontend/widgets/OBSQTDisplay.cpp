@@ -117,7 +117,7 @@ OBSQTDisplay::OBSQTDisplay(QWidget *parent, Qt::WindowFlags flags) : QWidget(par
 
 OBSQTDisplay::~OBSQTDisplay()
 {
-	releaseDisplay();
+	DestroyDisplay();
 }
 
 void OBSQTDisplay::DestroyDisplay()
@@ -160,11 +160,8 @@ void OBSQTDisplay::CreateDisplay()
 		return;
 	}
 
-	if (destroying) {
-		return;
-	}
-
-	if (!windowHandle()->isExposed()) {
+	QWindow *window = windowHandle();
+	if (destroying || !window || !window->isExposed()) {
 		return;
 	}
 
@@ -175,7 +172,7 @@ void OBSQTDisplay::CreateDisplay()
 			CreateDisplay();
 		});
 	}
-	if (!androidDisplay->attach(windowHandle()))
+	if (!androidDisplay->attach(window))
 		return;
 
 	auto *nativeWindow = static_cast<ANativeWindow *>(androidDisplay->acquireWindow());
@@ -209,7 +206,7 @@ void OBSQTDisplay::CreateDisplay()
 	info.format = GS_BGRA;
 	info.zsformat = GS_ZS_NONE;
 
-	if (!QTToGSWindow(windowHandle(), info.window)) {
+	if (!QTToGSWindow(window, info.window)) {
 		return;
 	}
 

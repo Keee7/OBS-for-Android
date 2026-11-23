@@ -114,10 +114,14 @@ void *OBSAndroidDisplay::acquireWindow() const
 void OBSAndroidDisplay::surfaceChanged(const QJniObject &nextSurface, int generation)
 {
 	surface = nextSurface;
-	changed();
+	// DisplayCreated can close the owning widget. Keep the callback and the
+	// Java host alive independently of the native display during notification.
+	const auto onChanged = changed;
+	const auto javaHost = host;
+	onChanged();
 	// The old EGL swapchain has now been destroyed. Java can release the
 	// SurfaceTexture and its producer without abandoning a live buffer queue.
-	host.callMethod<void>("releaseRetired", jint(generation));
+	javaHost.callMethod<void>("releaseRetired", jint(generation));
 }
 
 void obsAndroidDisplayLog(const char *fmt, ...)

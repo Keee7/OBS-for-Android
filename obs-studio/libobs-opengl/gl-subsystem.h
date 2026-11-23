@@ -49,13 +49,10 @@ struct gl_windowinfo;
  * 扩展不在位的设备由 device_enable_framebuffer_srgb 退回"只记账"。 */
 #define GL_FRAMEBUFFER_SRGB GL_FRAMEBUFFER_SRGB_EXT
 
-/* 不支持：ES 只有 16-bit half float（GL_R16F/GL_RG16F/GL_RGBA16F，这些 GLES 有）
- * 和 16-bit 整数格式（GL_R16I、GL_R16UI 一类），没有 16-bit **unorm** 内部格式。
- * 给 0 而不是偷偷换成 16F：精度语义不同，静默换掉会让滤镜结果差一个数量级还查不出来；
- * 0 会让 glTexImage2D 直接 GL_INVALID_VALUE，纹理创建失败并打出日志。 */
-#define GL_RGBA16 0
-#define GL_RG16 0
-#define GL_R16 0
+/* GL_EXT_texture_norm16 supplies the UNORM formats used by the YUV planes. */
+#define GL_RGBA16 0x805B
+#define GL_RG16 0x822C
+#define GL_R16 0x822A
 
 /* 不支持：S3TC/DXT 是桌面扩展，ES 侧的压缩纹理是 ASTC / ETC2 / ETC1。
  * OBS 的 GS_DXT1/3/5 只出现在桌面预压缩资源里，Android 上不走这条路径。 */
@@ -740,6 +737,9 @@ struct gs_stage_surface {
 	GLint gl_internal_format;
 	GLenum gl_type;
 	GLuint pack_buffer;
+#ifdef __ANDROID__
+	uint16_t *unpacked;
+#endif
 };
 
 struct gs_zstencil_buffer {
@@ -802,6 +802,10 @@ struct gs_device {
 	struct gs_rect cur_viewport;
 
 #if defined(__ANDROID__)
+	bool p010_available;
+	bool read_r16_direct;
+	bool read_rg16_direct;
+
 	/* 兜底字段：GL_EXT_sRGB_write_control 在位时（MuMu/Adreno 实测在位）根本不用它，
 	 * device_enable_framebuffer_srgb 直接 glEnable/glDisable(GL_FRAMEBUFFER_SRGB)，与桌面同义。
 	 * 只有缺这个扩展的设备才退化成"只记账"：那时 sRGB 编码由附件的 internal format 决定、

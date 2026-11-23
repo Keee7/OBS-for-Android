@@ -916,7 +916,7 @@ void obs_encoder_start(obs_encoder_t *encoder, encoded_callback_t new_packet, vo
 void obs_encoder_stop(obs_encoder_t *encoder, encoded_callback_t new_packet, void *param)
 {
 	bool last = false;
-	bool flush_texture = false;
+	bool (*flush)(void *, struct encoder_packet *, bool *) = NULL;
 	size_t idx;
 
 	if (!obs_encoder_valid(encoder, "obs_encoder_stop"))
@@ -930,20 +930,20 @@ void obs_encoder_stop(obs_encoder_t *encoder, encoded_callback_t new_packet, voi
 	idx = get_callback_idx(encoder, new_packet, param);
 	if (idx != DARRAY_INVALID) {
 		last = (encoder->callbacks.num == 1);
-		flush_texture = last && encoder->info.type == OBS_ENCODER_VIDEO && gpu_encode_available(encoder) &&
-				encoder->info.encode_texture_flush;
-		if (!flush_texture)
+		if (last && encoder->info.type == OBS_ENCODER_VIDEO)
+			flush = gpu_encode_available(encoder) ? encoder->info.encode_texture_flush
+							      : encoder->info.encode_raw_flush;
+		if (!flush)
 			da_erase(encoder->callbacks, idx);
 	}
 
 	pthread_mutex_unlock(&encoder->callbacks_mutex);
 
 	if (last) {
-		/* Waiting for GPU input to stop must not hold callbacks_mutex:
-		 * the in-flight GPU frame may still deliver a packet. */
+		/* In-flight encoding may still deliver a packet while input disconnects. */
 		remove_encoder_input(encoder);
 
-		if (flush_texture) {
+		if (flush) {
 			/* The implementation signals EOS on its first call and returns
 			 * received=false at EOS. Bound the number of returned packets;
 			 * implementations must also bound any internal waits. */
@@ -956,8 +956,8 @@ void obs_encoder_stop(obs_encoder_t *encoder, encoded_callback_t new_packet, voi
 				pkt.timebase_num = encoder->timebase_num * encoder->frame_rate_divisor;
 				pkt.timebase_den = encoder->timebase_den;
 				pkt.encoder = encoder;
-				if (!encoder->info.encode_texture_flush(encoder->context.data, &pkt, &received)) {
-					blog(LOG_ERROR, "Error draining texture encoder '%s'", encoder->context.name);
+				if (!flush(encoder->context.data, &pkt, &received)) {
+					blog(LOG_ERROR, "Error draining encoder '%s'", encoder->context.name);
 					done = true;
 					break;
 				}
@@ -969,7 +969,7 @@ void obs_encoder_stop(obs_encoder_t *encoder, encoded_callback_t new_packet, voi
 				send_off_encoder_packet(encoder, true, true, &pkt);
 			}
 			if (!done)
-				blog(LOG_ERROR, "Texture encoder '%s' exceeded the drain limit", encoder->context.name);
+				blog(LOG_ERROR, "Encoder '%s' exceeded the drain limit", encoder->context.name);
 		}
 
 		pthread_mutex_lock(&encoder->callbacks_mutex);

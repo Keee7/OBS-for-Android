@@ -45,7 +45,7 @@ _run_cmake() {
   local s=$1; shift
   # AOM ships required build/cmake/*.cmake as source. Never use or clear
   # the upstream build/ directory as our generated CMake binary directory.
-  local b="$s/.obs-android-build"
+  local b="${ANDROID_DEP_BUILD_DIR:-$s/.obs-android-build}"
   _common_env
   # 交叉 pkg-config：只准在 $PREFIX 里找，避免误用宿主 /usr/lib 的库
   export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
@@ -169,15 +169,29 @@ build_x265() {
   if ! patch -d "$source" -p1 -R --force --dry-run --silent < "$patch_file" >/dev/null 2>&1; then
     patch -d "$source" -p1 --force < "$patch_file" || return 1
   fi
-  _run_cmake "$(src_dir x265)/source" -DENABLE_SHARED=OFF -DENABLE_CLI=OFF \
-    -DENABLE_ASSEMBLY=ON -DENABLE_TESTS=OFF -DHIGH_BIT_DEPTH=OFF || return 1
+  local main10="$source/.obs-main10"
+  local common=(-DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=ON -DENABLE_TESTS=OFF)
+  ANDROID_DEP_BUILD_DIR="$main10" _run_cmake "$source/source" "${common[@]}" \
+    -DHIGH_BIT_DEPTH=ON -DEXPORT_C_API=OFF -DCMAKE_INSTALL_PREFIX="$main10/install" || return 1
+  _run_cmake "$source/source" "${common[@]}" \
+    -DHIGH_BIT_DEPTH=OFF -DEXTRA_LIB=x265_main10 -DLINKED_10BIT=ON || return 1
+  cp "$PREFIX/lib/libx265.a" "$main10/libx265_main8.a" || return 1
+  (cd "$main10" && "$TOOLCHAIN/bin/llvm-ar" -M <<'EOF'
+CREATE libx265-multilib.a
+ADDLIB libx265_main8.a
+ADDLIB libx265.a
+SAVE
+END
+EOF
+  ) || return 1
+  cp "$main10/libx265-multilib.a" "$PREFIX/lib/libx265.a" || return 1
   # x265 3.6 writes invalid -l-l:libunwind.a entries with NDK r30.
   sed -i 's/^Libs.private:.*/Libs.private: -lc++_static -lc++abi -lunwind -lm -ldl/' "$PREFIX/lib/pkgconfig/x265.pc"
 }
 
 build_aom() {
   _run_cmake "$(src_dir aom)" -DENABLE_DOCS=OFF -DENABLE_TESTS=OFF \
-    -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_DECODER=1
+    -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_DECODER=1 -DCONFIG_AV1_HIGHBITDEPTH=1
 }
 
 build_srt() {
@@ -188,6 +202,22 @@ build_srt() {
     "$PREFIX/lib/pkgconfig/srt.pc"
 }
 
+build_cjson() {
+  _run_cmake "$(src_dir cjson)" -DENABLE_CJSON_TEST=OFF -DENABLE_CJSON_UTILS=OFF
+}
+
+build_librist() {
+  bash "$HERE/../scripts/android-native-deps/build-librist.sh" "$(src_dir librist)" \
+    "$PREFIX" "$TOOLCHAIN/bin" "$TRIPLE$API" "$JOBS"
+}
+
+build_libxml2() {
+  _run_cmake "$(src_dir libxml2)" \
+    -DLIBXML2_WITH_PROGRAMS=OFF -DLIBXML2_WITH_TESTS=OFF -DLIBXML2_WITH_PYTHON=OFF \
+    -DLIBXML2_WITH_ICONV=OFF -DLIBXML2_WITH_ICU=OFF -DLIBXML2_WITH_MODULES=OFF \
+    -DLIBXML2_WITH_ZLIB=OFF -DLIBXML2_WITH_LZMA=OFF
+}
+
 # ---------------------------------------------------------------- ffmpeg
 build_ffmpeg() {
   local s; s=$(src_dir ffmpeg)
@@ -195,7 +225,9 @@ build_ffmpeg() {
   # codec_name 补丁已移除：媒体源硬件解码改为直接使用 FFmpeg 的 *_mediacodec 解码器
   #（具体组件由系统选择），这里只保留 byte-buffer 输出的 crop/format 修正。
   local patch_file
-  for patch_file in "$HERE/../scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch"; do
+  for patch_file in "$HERE/../scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch" \
+    "$HERE/../scripts/android-native-deps/ffmpeg-8.0.3-android-tls.patch" \
+    "$HERE/../scripts/android-native-deps/ffmpeg-8.0.3-srt-rendezvous.patch"; do
     if patch -d "$s" -p1 -R --force --dry-run --silent < "$patch_file" > /dev/null 2>&1; then
       echo "Already applied: $(basename "$patch_file")"
     elif patch -d "$s" -p1 --force --dry-run --silent < "$patch_file" > /dev/null 2>&1; then
@@ -222,8 +254,8 @@ build_ffmpeg() {
       --sysroot="$SYSROOT" \
       --enable-static --disable-shared \
       --disable-doc --disable-programs --disable-debug --disable-stripping \
-      --disable-autodetect --enable-gpl --enable-libx265 --enable-libaom --enable-decoder=libaom_av1 \
-      --enable-libsrt --pkg-config-flags=--static \
+      --disable-autodetect --enable-gpl --enable-version3 --enable-libx265 --enable-libaom --enable-decoder=libaom_av1 \
+      --enable-libsrt --enable-librist --enable-libxml2 --enable-mbedtls --pkg-config-flags=--static \
       --enable-mediacodec --enable-jni \
       --enable-avcodec --enable-avformat --enable-avutil \
       --enable-swscale --enable-swresample --enable-avfilter --enable-avdevice \

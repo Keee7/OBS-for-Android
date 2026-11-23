@@ -32,16 +32,21 @@ MODULE_EXPORT const char *obs_module_description(void)
 struct codec_spec {
 	const char *id, *codec, *mime, *name;
 	int profile;
+	bool p010;
 };
 
 static const struct codec_spec codecs[] = {
-	{"android_mediacodec_h264", "h264", "video/avc", "Android MediaCodec H.264", 0},
+	{"android_mediacodec_h264", "h264", "video/avc", "Android MediaCodec H.264", 0, false},
 #ifdef ENABLE_HEVC
-	{"android_mediacodec_hevc", "hevc", "video/hevc", "Android MediaCodec HEVC (H.265)", 1},
+	{"android_mediacodec_hevc", "hevc", "video/hevc", "Android MediaCodec HEVC (H.265)", 1, false},
+	{"android_mediacodec_hevc_main10", "hevc", "video/hevc", "Android MediaCodec HEVC Main10", 2, true},
 #endif
-	{"android_mediacodec_av1", "av1", "video/av01", "Android MediaCodec AV1", 1},
-	{"android_mediacodec_vp9", "vp9", "video/x-vnd.on2.vp9", "Android MediaCodec VP9", 1},
+	{"android_mediacodec_av1", "av1", "video/av01", "Android MediaCodec AV1", 1, false},
+	{"android_mediacodec_vp9", "vp9", "video/x-vnd.on2.vp9", "Android MediaCodec VP9", 1, false},
 };
+#define MC_COLOR_P010 54
+#define MC_COLOR_SURFACE 0x7f000789
+#define MC_HEVC_PROFILE_HDR10 4096
 #define MAX_QUEUED 120
 /* High-stability policy (load shedding) lives in shed-policy.h so the host
  * regression test compiles the real decision logic instead of a copy. */
@@ -91,6 +96,9 @@ struct encoder {
 	uint8_t *pending_config;
 	size_t pending_size;
 	const struct codec_spec *format;
+	enum video_colorspace colorspace;
+	int profile, color_standard, color_transfer;
+	size_t yuv_stride, yuv_slice_height, yuv_row_bytes, yuv_height, yuv_size;
 	int mode;
 	char *component;
 	uint64_t session_id, first_submit_ns, last_report_ns;
@@ -98,6 +106,7 @@ struct encoder {
 	struct mc_flow flow;
 	uint64_t max_pending;
 	uint64_t input_gap_ns;
+	uint64_t input_busy_since_ns;
 	size_t queue_bytes, peak_queue_bytes;
 	/* 提交一帧到 MediaCodec 输入面（含 eglSwapBuffers）的耗时。稳定 60fps 时
 	 * 应在几百微秒内；一旦接近 16666us 就说明交换又被 vsync 量化了，
@@ -205,10 +214,11 @@ static void save_config(struct encoder *e, const uint8_t *data, size_t size)
 			bool complete = is_hevc(e) ? hevc_headers_ready(e->pending_config, e->pending_size) :
 				(avc_has_nal(e->pending_config, e->pending_size, 7) && avc_has_nal(e->pending_config, e->pending_size, 8));
 			if (complete) {
-				bool supported = is_hevc(e) ? hevc_sps_8bit_420(e->pending_config, e->pending_size) :
+				bool supported = is_hevc(e) ? hevc_sps_420(e->pending_config, e->pending_size, e->format->p010) :
 					avc_sps_8bit_420(e->pending_config, e->pending_size);
 				if (!supported)
-					error = "Codec SPS is not supported single-layer 8-bit 4:2:0";
+					error = e->format->p010 ? "Codec SPS is not single-layer 10-bit 4:2:0" :
+							"Codec SPS is not single-layer 8-bit 4:2:0";
 				else {
 					e->extra = e->pending_config;
 					e->extra_size = e->pending_size;
@@ -248,6 +258,16 @@ static void format_config(struct encoder *e)
 		return;
 	mc_log(LOG_INFO, "[android-mediacodec] session=%llu event=format codec=%s format=%s",
 	     (unsigned long long)e->session_id, e->format->codec, AMediaFormat_toString(f));
+	if (e->format->p010) {
+		int32_t value;
+		if ((AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_COLOR_STANDARD, &value) && value != e->color_standard) ||
+		    (AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_COLOR_TRANSFER, &value) && value != e->color_transfer) ||
+		    (AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_COLOR_RANGE, &value) && value != 2)) {
+			AMediaFormat_delete(f);
+			fail(e, "MediaCodec changed the requested Main10 color information");
+			return;
+		}
+	}
 	void *a = NULL, *b = NULL;
 	size_t an = 0, bn = 0;
 	AMediaFormat_getBuffer(f, "csd-0", &a, &an);
@@ -477,6 +497,15 @@ static obs_properties_t *properties(void *unused)
 	obs_properties_add_int(p, "keyint_sec", obs_module_text("KeyframeInterval"), 1, 10, 1);
 	return p;
 }
+static bool signal_end_of_input(struct encoder *e)
+{
+	if (!e->format->p010)
+		return AMediaCodec_signalEndOfInputStream(e->codec) == AMEDIA_OK;
+	const ssize_t index = AMediaCodec_dequeueInputBuffer(e->codec, 200000);
+	return index >= 0 && AMediaCodec_queueInputBuffer(e->codec, (size_t)index, 0, 0, 0,
+							 AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) == AMEDIA_OK;
+}
+
 static void destroy(void *data)
 {
 	struct encoder *e = data;
@@ -488,7 +517,7 @@ static void destroy(void *data)
 		e->eos_signaled = true;
 		e->stopping = true;
 		pthread_mutex_unlock(&e->mutex);
-		if (signal && AMediaCodec_signalEndOfInputStream(e->codec) != AMEDIA_OK)
+		if (signal && !signal_end_of_input(e))
 			mc_log(LOG_WARNING, "[android-mediacodec] EOS signal failed");
 		pthread_join(e->thread, NULL);
 	}
@@ -539,6 +568,46 @@ static void release_candidate(struct encoder *e)
 		e->started = false;
 	}
 }
+
+static bool read_p010_layout(struct encoder *e, int width, int height)
+{
+	AMediaFormat *input = AMediaCodec_getInputFormat(e->codec);
+	if (!input)
+		return false;
+	int32_t color = 0, stride = 0, slice = 0;
+	AMediaFormat_getInt32(input, AMEDIAFORMAT_KEY_COLOR_FORMAT, &color);
+	AMediaFormat_getInt32(input, "stride", &stride);
+	AMediaFormat_getInt32(input, "slice-height", &slice);
+	AMediaFormat_delete(input);
+	if (!stride)
+		stride = width * 2;
+	if (!slice)
+		slice = height;
+	if (color != MC_COLOR_P010 || stride < width * 2 || slice < height || (stride & 1) || (slice & 1) ||
+	    (uint64_t)stride * (uint64_t)slice * 3 / 2 > INT32_MAX)
+		return false;
+	e->yuv_stride = (size_t)stride;
+	e->yuv_slice_height = (size_t)slice;
+	e->yuv_row_bytes = (size_t)width * 2;
+	e->yuv_height = (size_t)height;
+	e->yuv_size = e->yuv_stride * e->yuv_slice_height * 3 / 2;
+	return true;
+}
+
+static void set_hdr10_metadata(AMediaFormat *format)
+{
+	float peak = obs_get_video_hdr_nominal_peak_level();
+	const uint16_t nits = peak > 0.f && peak <= 10000.f ? (uint16_t)peak : 1000;
+	/* CTA-861.3 static metadata type 1, with Rec.2020 primaries and D65 white. */
+	const uint16_t values[] = {35400, 14600, 8500, 39850, 6550, 2300, 15635, 16450, nits, 0, nits, nits};
+	uint8_t data[1 + sizeof(values)] = {0};
+	for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+		data[1 + i * 2] = (uint8_t)values[i];
+		data[2 + i * 2] = (uint8_t)(values[i] >> 8);
+	}
+	AMediaFormat_setBuffer(format, AMEDIAFORMAT_KEY_HDR_STATIC_INFO, data, sizeof(data));
+}
+
 static bool start_candidate(struct encoder *e, const char *component, int w, int h, int query_num, int keyint, int control_value)
 {
 	e->codec = AMediaCodec_createCodecByName(component);
@@ -548,11 +617,11 @@ static bool start_candidate(struct encoder *e, const char *component, int w, int
 	if (!f)
 		goto error;
 	AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, e->format->mime);
-	if (e->format->profile)
-		AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_PROFILE, e->format->profile);
+	if (e->profile)
+		AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_PROFILE, e->profile);
 	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_WIDTH, w);
 	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, h);
-	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7f000789);
+	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, e->format->p010 ? MC_COLOR_P010 : MC_COLOR_SURFACE);
 	if (e->mode != 0)
 		AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_BIT_RATE, (int32_t)e->bitrate);
 	AMediaFormat_setFloat(f, AMEDIAFORMAT_KEY_FRAME_RATE, (float)query_num / e->fps_den);
@@ -561,32 +630,34 @@ static bool start_candidate(struct encoder *e, const char *component, int w, int
 	if (control_value >= 0)
 		AMediaFormat_setInt32(f, e->mode == 0 ? "quality" : "complexity", control_value);
 	AMediaFormat_setInt32(f, "max-bframes", 0);
-	/* Surface RGB conversion and resulting bitstream metadata require device validation. */
-	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_STANDARD, 1); /* BT.709 */
-	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_TRANSFER, 3); /* SDR video */
+	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_STANDARD, e->color_standard);
+	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_TRANSFER, e->color_transfer);
 	AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_RANGE, 2); /* Limited */
-	/* SDR BT.709, limited-range encoded YUV. Surface input is full-range RGB. */
-	AMediaFormat_setInt32(f, "color-standard", 1);
-	AMediaFormat_setInt32(f, "color-transfer", 3);
-	AMediaFormat_setInt32(f, "color-range", 2);
+	if (e->colorspace == VIDEO_CS_2100_PQ)
+		set_hdr10_metadata(f);
 	media_status_t status = AMediaCodec_configure(e->codec, f, NULL, NULL, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
 	AMediaFormat_delete(f);
 	if (status != AMEDIA_OK)
 		goto error;
-	if (AMediaCodec_createInputSurface(e->codec, &e->window) != AMEDIA_OK || !e->window)
-		goto error;
-	obs_enter_graphics();
-	e->surface = gs_android_encoder_surface_create(e->window);
-	obs_leave_graphics();
-	if (!e->surface)
-		goto error;
+	if (e->format->p010) {
+		if (!read_p010_layout(e, w, h))
+			goto error;
+	} else {
+		if (AMediaCodec_createInputSurface(e->codec, &e->window) != AMEDIA_OK || !e->window)
+			goto error;
+		obs_enter_graphics();
+		e->surface = gs_android_encoder_surface_create(e->window);
+		obs_leave_graphics();
+		if (!e->surface)
+			goto error;
+	}
 	if (AMediaCodec_start(e->codec) != AMEDIA_OK)
 		goto error;
 	e->started = true;
 	e->component = bstrdup(component);
-	mc_log(LOG_INFO, "[android-mediacodec] session=%llu event=started codec=%s component=%s hardware=true software=false input=Surface width=%d height=%d fps_num=%d fps_den=%d bitrate=%lld",
-	     (unsigned long long)e->session_id, e->format->codec, component, w, h, query_num,
-	     e->fps_den, (long long)e->bitrate);
+	mc_log(LOG_INFO, "[android-mediacodec] session=%llu event=started codec=%s component=%s hardware=true software=false input=%s width=%d height=%d fps_num=%d fps_den=%d bitrate=%lld profile=%d color_transfer=%d",
+	       (unsigned long long)e->session_id, e->format->codec, component, e->format->p010 ? "P010" : "Surface",
+	       w, h, query_num, e->fps_den, (long long)e->bitrate, e->profile, e->color_transfer);
 	return true;
 error:
 	mc_log(LOG_WARNING, "[android-mediacodec] Codec %s failed initialization", component);
@@ -620,23 +691,35 @@ static void *create(obs_data_t *s, obs_encoder_t *obs)
 	video_t *parent = obs_encoder_parent_video(obs), *effective = obs_encoder_video(obs);
 	const struct video_output_info *base = parent ? video_output_get_info(parent) : NULL;
 	const struct video_output_info *actual = effective ? video_output_get_info(effective) : NULL;
-	if (actual && actual->colorspace != VIDEO_CS_709 && actual->colorspace != VIDEO_CS_DEFAULT) {
-		fail(e, "MediaCodec currently requires SDR BT.709 output; HDR and other color spaces are unsupported");
-		goto error;
-	}
 	if (!base || !actual || !base->fps_num || base->fps_num > INT32_MAX || !actual->fps_num ||
 	    actual->fps_num > INT32_MAX || !actual->fps_den || actual->fps_den > INT32_MAX) {
 		fail(e, "Cannot determine video frame rate");
 		goto error;
 	}
 	struct obs_video_info global_video;
-	if (!obs_get_video_info(&global_video) ||
-	    (global_video.colorspace != VIDEO_CS_709 && global_video.colorspace != VIDEO_CS_DEFAULT) ||
-	    (actual->colorspace != VIDEO_CS_709 && actual->colorspace != VIDEO_CS_DEFAULT) ||
-	    actual->range != VIDEO_RANGE_PARTIAL) {
-		fail(e, "MediaCodec video requires SDR BT.709 with limited video range");
+	if (!obs_get_video_info(&global_video) || actual->range != VIDEO_RANGE_PARTIAL) {
+		fail(e, "MediaCodec requires limited video range");
 		goto error;
 	}
+	e->colorspace = actual->colorspace;
+	const bool bt709 = e->colorspace == VIDEO_CS_709 || e->colorspace == VIDEO_CS_DEFAULT;
+	const bool pq = e->colorspace == VIDEO_CS_2100_PQ;
+	const bool hlg = e->colorspace == VIDEO_CS_2100_HLG;
+	if (e->format->p010) {
+		if ((!bt709 && !pq && !hlg) || (actual->format != VIDEO_FORMAT_P010 && actual->format != VIDEO_FORMAT_I010)) {
+			fail(e, "MediaCodec Main10 requires P010 or I010 with Rec. 709 or Rec. 2100");
+			goto error;
+		}
+	} else if (global_video.colorspace == VIDEO_CS_2100_PQ || global_video.colorspace == VIDEO_CS_2100_HLG) {
+		fail(e, "HDR requires a compatible 10-bit encoder. Use hardware HEVC Main10 when available, or software x265/AV1.");
+		goto error;
+	} else if (!bt709 || (global_video.colorspace != VIDEO_CS_709 && global_video.colorspace != VIDEO_CS_DEFAULT)) {
+		fail(e, "This MediaCodec encoder requires SDR BT.709.");
+		goto error;
+	}
+	e->profile = pq ? MC_HEVC_PROFILE_HDR10 : e->format->profile;
+	e->color_standard = pq || hlg ? 6 : 1; /* BT.2020 or BT.709 */
+	e->color_transfer = pq ? 6 : hlg ? 7 : 3; /* ST 2084, HLG, or SDR */
 	e->fps_num = (int)base->fps_num;
 	e->fps_den = (int)actual->fps_den;
 	int query_num = (int)actual->fps_num;
@@ -661,6 +744,10 @@ static void *create(obs_data_t *s, obs_encoder_t *obs)
 	if (e->input_gap_ns < 1000000000ULL)
 		e->input_gap_ns = 1000000000ULL;
 	int w = (int)obs_encoder_get_width(obs), h = (int)obs_encoder_get_height(obs);
+	if (e->format->p010 && ((w | h) & 1)) {
+		fail(e, "MediaCodec Main10 requires even frame dimensions");
+		goto error;
+	}
 	int64_t kbps = obs_data_get_int(s, "bitrate"), keyint_value = obs_data_get_int(s, "keyint_sec");
 	int64_t mode = obs_data_get_int(s, "rate_mode"), quality = obs_data_get_int(s, "hardware_quality");
 	if (mode < 0 || mode > 2 || quality < 0 || quality > 3) {
@@ -685,6 +772,8 @@ static void *create(obs_data_t *s, obs_encoder_t *obs)
 		calldata_set_string(&cd, "mime", e->format->mime);
 		calldata_set_int(&cd, "bitrate", e->mode == 0 ? 0 : e->bitrate);
 		calldata_set_int(&cd, "mode", e->mode);
+		calldata_set_int(&cd, "profile", e->profile);
+		calldata_set_bool(&cd, "p010", e->format->p010);
 		char *component = NULL;
 		if (proc_handler_call(obs_get_proc_handler(), "android_mediacodec_query_component", &cd)) {
 			const char *result = calldata_string(&cd, "name");
@@ -719,7 +808,8 @@ static void *create(obs_data_t *s, obs_encoder_t *obs)
 			break;
 	}
 	if (!e->started) {
-		fail(e, "No compatible hardware encoder supports the selected rate control and adjustable quality range, or encoder initialization failed");
+		fail(e, e->format->p010 ? "No compatible MediaCodec Main10 encoder accepted P010 and the requested settings"
+				      : "No compatible hardware encoder supports the selected rate control and quality, or initialization failed");
 		goto error;
 	}
 	if (pthread_create(&e->thread, NULL, drain, e) != 0) {
@@ -794,12 +884,48 @@ static bool take_packet(struct encoder *e, struct encoder_packet *packet, bool *
 	}
 	return true;
 }
-static bool encode(void *data, struct encoder_texture *t, int64_t pts, uint64_t lock_key, uint64_t *next_key,
-		   struct encoder_packet *packet, bool *received)
+enum submit_result { SUBMIT_OK, SUBMIT_BUSY, SUBMIT_FAILED };
+
+static void copy_plane(uint8_t *dst, size_t dst_stride, const uint8_t *src, size_t src_stride,
+		       size_t row_bytes, size_t rows)
 {
-	UNUSED_PARAMETER(lock_key);
-	UNUSED_PARAMETER(next_key);
-	struct encoder *e = data;
+	if (dst_stride == row_bytes && src_stride == row_bytes) {
+		memcpy(dst, src, row_bytes * rows);
+		return;
+	}
+	for (size_t row = 0; row < rows; row++) {
+		memcpy(dst, src, row_bytes);
+		dst += dst_stride;
+		src += src_stride;
+	}
+}
+
+static enum submit_result submit_p010(struct encoder *e, const struct encoder_frame *frame, int64_t ns)
+{
+	if (!frame->data[0] || !frame->data[1] || frame->linesize[0] < e->yuv_row_bytes ||
+	    frame->linesize[1] < e->yuv_row_bytes)
+		return SUBMIT_FAILED;
+	const ssize_t index = AMediaCodec_dequeueInputBuffer(e->codec, 1500);
+	if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
+		return SUBMIT_BUSY;
+	if (index < 0)
+		return SUBMIT_FAILED;
+	size_t capacity = 0;
+	uint8_t *dst = AMediaCodec_getInputBuffer(e->codec, (size_t)index, &capacity);
+	if (!dst || capacity < e->yuv_size)
+		return SUBMIT_FAILED;
+	if (e->yuv_stride != e->yuv_row_bytes || e->yuv_slice_height != e->yuv_height)
+		memset(dst, 0, e->yuv_size);
+	copy_plane(dst, e->yuv_stride, frame->data[0], frame->linesize[0], e->yuv_row_bytes, e->yuv_height);
+	copy_plane(dst + e->yuv_stride * e->yuv_slice_height, e->yuv_stride, frame->data[1], frame->linesize[1],
+		   e->yuv_row_bytes, e->yuv_height / 2);
+	return AMediaCodec_queueInputBuffer(e->codec, (size_t)index, 0, e->yuv_size, (uint64_t)ns / 1000, 0) == AMEDIA_OK
+		       ? SUBMIT_OK : SUBMIT_FAILED;
+}
+
+static bool encode_frame(struct encoder *e, gs_texture_t *texture, const struct encoder_frame *frame, int64_t pts,
+			 struct encoder_packet *packet, bool *received)
+{
 	*received = false;
 	pthread_mutex_lock(&e->mutex);
 	bool failed = e->failed || e->stopping;
@@ -809,8 +935,8 @@ static bool encode(void *data, struct encoder_texture *t, int64_t pts, uint64_t 
 		return false;
 	}
 	int64_t ns;
-	if (!t || !t->tex[0] || !avc_pts_to_ns(pts, e->fps_num, &ns)) {
-		fail(e, "Invalid encoder texture or timestamp");
+	if ((!texture && !frame) || !avc_pts_to_ns(pts, e->fps_num, &ns)) {
+		fail(e, "Invalid encoder input frame or timestamp");
 		publish_failure(e);
 		return false;
 	}
@@ -871,7 +997,11 @@ static bool encode(void *data, struct encoder_texture *t, int64_t pts, uint64_t 
 	}
 
 	const uint64_t submit_start_ns = os_gettime_ns();
-	bool ok = gs_android_encoder_surface_submit(e->surface, t->tex[0], ns);
+	enum submit_result submitted;
+	if (frame)
+		submitted = submit_p010(e, frame, ns);
+	else
+		submitted = gs_android_encoder_surface_submit(e->surface, texture, ns) ? SUBMIT_OK : SUBMIT_FAILED;
 	const uint64_t submit_us = (os_gettime_ns() - submit_start_ns) / 1000ULL;
 	pthread_mutex_lock(&e->mutex);
 	e->swap_us_sum += submit_us;
@@ -884,12 +1014,28 @@ static bool encode(void *data, struct encoder_texture *t, int64_t pts, uint64_t 
 	mc_shed_note_submit(submit_us, e->submit_budget_us, &e->degraded,
 			&e->degraded_until_ns, os_gettime_ns());
 	pthread_mutex_unlock(&e->mutex);
-	if (!ok) {
-		fail(e, "Submitting texture to MediaCodec Surface failed");
+	if (submitted == SUBMIT_FAILED) {
+		fail(e, frame ? "Submitting P010 frame to MediaCodec failed" : "Submitting texture to MediaCodec Surface failed");
 		publish_failure(e);
 		return false;
 	}
 	uint64_t now = os_gettime_ns();
+	if (submitted == SUBMIT_BUSY) {
+		if (!e->input_busy_since_ns)
+			e->input_busy_since_ns = now;
+		if (now - e->input_busy_since_ns > NO_OUTPUT_NS) {
+			fail(e, "MediaCodec provides no P010 input buffer for 5 seconds");
+			publish_failure(e);
+			return false;
+		}
+		pthread_mutex_lock(&e->mutex);
+		e->dropped_load++;
+		pthread_mutex_unlock(&e->mutex);
+		bool result = take_packet(e, packet, received, false);
+		progress(e, false);
+		return result;
+	}
+	e->input_busy_since_ns = 0;
 	pthread_mutex_lock(&e->mutex);
 	if (!e->first_submit_ns) {
 		e->first_submit_ns = now;
@@ -909,6 +1055,20 @@ static bool encode(void *data, struct encoder_texture *t, int64_t pts, uint64_t 
 	progress(e, false);
 	return result;
 }
+
+static bool encode(void *data, struct encoder_texture *t, int64_t pts, uint64_t lock_key, uint64_t *next_key,
+		   struct encoder_packet *packet, bool *received)
+{
+	UNUSED_PARAMETER(lock_key);
+	UNUSED_PARAMETER(next_key);
+	return encode_frame(data, t ? t->tex[0] : NULL, NULL, pts, packet, received);
+}
+
+static bool encode_p010(void *data, struct encoder_frame *frame, struct encoder_packet *packet, bool *received)
+{
+	return encode_frame(data, NULL, frame, frame ? frame->pts : 0, packet, received);
+}
+
 static bool flush(void *data, struct encoder_packet *packet, bool *received)
 {
 	struct encoder *e = data;
@@ -917,7 +1077,7 @@ static bool flush(void *data, struct encoder_packet *packet, bool *received)
 	e->eos_signaled = true;
 	e->stopping = true;
 	pthread_mutex_unlock(&e->mutex);
-	if (signal && AMediaCodec_signalEndOfInputStream(e->codec) != AMEDIA_OK) {
+	if (signal && !signal_end_of_input(e)) {
 		fail(e, "MediaCodec EOS signal failed");
 		publish_failure(e);
 		return false;
@@ -970,6 +1130,12 @@ static void video_info(void *data, struct video_scale_info *info)
 	info->colorspace = VIDEO_CS_709;
 	info->range = VIDEO_RANGE_PARTIAL;
 }
+static void p010_video_info(void *data, struct video_scale_info *info)
+{
+	UNUSED_PARAMETER(data);
+	info->format = VIDEO_FORMAT_P010;
+	info->range = VIDEO_RANGE_PARTIAL;
+}
 static struct obs_encoder_info encoder_info = {
 	.type = OBS_ENCODER_VIDEO,
 	.get_name = name,
@@ -991,6 +1157,8 @@ bool obs_module_load(void)
 		calldata_t cd;
 		calldata_init(&cd);
 		calldata_set_string(&cd, "mime", format->mime);
+		calldata_set_int(&cd, "profile", format->profile);
+		calldata_set_bool(&cd, "p010", format->p010);
 		bool available = proc_handler_call(obs_get_proc_handler(), "android_mediacodec_encoder_available", &cd) &&
 				 calldata_bool(&cd, "supported");
 		calldata_free(&cd);
@@ -1001,6 +1169,14 @@ bool obs_module_load(void)
 		info.id = format->id;
 		info.codec = format->codec;
 		info.type_data = (void *)format;
+		if (format->p010) {
+			info.caps = OBS_ENCODER_CAP_DYN_BITRATE;
+			info.encode_texture2 = NULL;
+			info.encode_texture_flush = NULL;
+			info.encode = encode_p010;
+			info.encode_raw_flush = flush;
+			info.get_video_info = p010_video_info;
+		}
 		obs_register_encoder(&info);
 	}
 	return true;

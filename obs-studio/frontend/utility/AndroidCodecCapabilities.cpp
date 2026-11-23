@@ -7,7 +7,7 @@
 #include <QByteArray>
 
 static QByteArray findCodec(const char *mime, uint32_t width, uint32_t height, uint32_t num, uint32_t den,
-			   uint32_t index = 0, uint32_t bitrate = 0, int mode = 2)
+			   uint32_t index = 0, uint32_t bitrate = 0, int mode = 2, int profile = 0, bool p010 = false)
 {
 	if (!width || !height || !num || !den)
 		return {};
@@ -16,8 +16,9 @@ static QByteArray findCodec(const char *mime, uint32_t width, uint32_t height, u
 		return {};
 	auto type = QJniObject::fromString(QString::fromUtf8(mime));
 	const QJniObject list = QJniObject::callStaticObjectMethod(
-		"com/obsproject/studio/ObsCodecCapabilities", "findEncodersMode", "(Ljava/lang/String;IIDII)[Ljava/lang/String;",
-		type.object<jstring>(), jint(width), jint(height), jdouble(num) / double(den), jint(bitrate), jint(mode));
+		"com/obsproject/studio/ObsCodecCapabilities", "findEncodersProfile", "(Ljava/lang/String;IIDIIIZ)[Ljava/lang/String;",
+		type.object<jstring>(), jint(width), jint(height), jdouble(num) / double(den), jint(bitrate), jint(mode),
+		jint(profile), jboolean(p010));
 	if (env->ExceptionCheck()) {
 		env->ExceptionDescribe();
 		env->ExceptionClear();
@@ -45,11 +46,11 @@ bool OBSAndroidAvcAvailable(uint32_t width, uint32_t height, uint32_t num, uint3
 	return !findCodec("video/avc", width, height, num, den).isEmpty();
 }
 
-static bool hasHardwareEncoder(const char *mime, jint mode)
+static bool hasHardwareEncoder(const char *mime, jint mode, jint profile = 0, bool p010 = false)
 {
 	const auto type = QJniObject::fromString(QString::fromUtf8(mime));
 	return QJniObject::callStaticMethod<jboolean>("com/obsproject/studio/ObsCodecCapabilities",
-		"hasHardwareEncoder", "(Ljava/lang/String;I)Z", type.object<jstring>(), mode);
+		"hasHardwareEncoderProfile", "(Ljava/lang/String;IIZ)Z", type.object<jstring>(), mode, profile, jboolean(p010));
 }
 
 bool OBSAndroidCbrEncoderAvailable(const char *id)
@@ -59,6 +60,8 @@ bool OBSAndroidCbrEncoderAvailable(const char *id)
 		return false;
 	if (strcmp(codec, "h264") == 0)
 		return hasHardwareEncoder("video/avc", 2);
+	if (strcmp(id, "android_mediacodec_hevc_main10") == 0)
+		return hasHardwareEncoder("video/hevc", 2, 2, true);
 	if (strcmp(codec, "hevc") == 0)
 		return hasHardwareEncoder("video/hevc", 2);
 	if (strcmp(codec, "av1") == 0)
@@ -68,9 +71,26 @@ bool OBSAndroidCbrEncoderAvailable(const char *id)
 	return false;
 }
 
+bool OBSAndroidHdrVideoActive()
+{
+	obs_video_info video;
+	return obs_get_video_info(&video) &&
+	       (video.colorspace == VIDEO_CS_2100_PQ || video.colorspace == VIDEO_CS_2100_HLG);
+}
+
+const char *OBSAndroidEncoderForVideo(const char *id)
+{
+	constexpr auto hevcMain10 = "android_mediacodec_hevc_main10";
+	if (id && strcmp(id, "android_mediacodec_hevc") == 0 && OBSAndroidHdrVideoActive() &&
+	    obs_get_encoder_codec(hevcMain10))
+		return hevcMain10;
+	return id;
+}
+
 static void queryEncoderAvailability(void *, calldata_t *cd)
 {
-	calldata_set_bool(cd, "supported", hasHardwareEncoder(calldata_string(cd, "mime"), -1));
+	calldata_set_bool(cd, "supported", hasHardwareEncoder(calldata_string(cd, "mime"), -1,
+							     jint(calldata_int(cd, "profile")), calldata_bool(cd, "p010")));
 }
 
 static void queryCodec(void *, calldata_t *cd)
@@ -82,12 +102,16 @@ static void queryCodec(void *, calldata_t *cd)
 	const auto index = calldata_int(cd, "index");
 	const auto bitrate = calldata_int(cd, "bitrate");
 	const auto mode = calldata_int(cd, "mode");
+	const auto profile = calldata_int(cd, "profile");
+	const bool p010 = calldata_bool(cd, "p010");
 	const char *mime = calldata_string(cd, "mime");
 	QByteArray name;
 	if (width > 0 && height > 0 && num > 0 && den > 0 &&
 	    width <= INT32_MAX && height <= INT32_MAX && num <= INT32_MAX && den <= INT32_MAX &&
-	    index >= 0 && index <= INT32_MAX && bitrate >= 0 && bitrate <= INT32_MAX && mode >= 0 && mode <= 2 && mime)
-		name = findCodec(mime, uint32_t(width), uint32_t(height), uint32_t(num), uint32_t(den), uint32_t(index), uint32_t(bitrate), int(mode));
+	    index >= 0 && index <= INT32_MAX && bitrate >= 0 && bitrate <= INT32_MAX &&
+	    profile >= 0 && profile <= INT32_MAX && mode >= 0 && mode <= 2 && mime)
+		name = findCodec(mime, uint32_t(width), uint32_t(height), uint32_t(num), uint32_t(den), uint32_t(index),
+				 uint32_t(bitrate), int(mode), int(profile), p010);
 	calldata_set_string(cd, "name", name.constData());
 	blog(LOG_INFO, "MediaCodec %s %lldx%lld %lld/%lld bitrate=%lld index=%lld: %s",
 	     mime ? mime : "unknown", width, height, num, den, bitrate, index,
@@ -128,13 +152,13 @@ void OBSAndroidRegisterCodecQuery()
 	if (env.isValid() && env->GetJavaVM(&vm) == JNI_OK)
 		obs_android_set_java_vm(vm);
 
-	proc_handler_add(obs_get_proc_handler(), "void android_mediacodec_encoder_available(string mime, out bool supported)",
+	proc_handler_add(obs_get_proc_handler(), "void android_mediacodec_encoder_available(string mime, int profile, bool p010, out bool supported)",
 		queryEncoderAvailability, nullptr);
 
 	proc_handler_add(obs_get_proc_handler(),
 		"void android_mediacodec_query_controls(string name, string mime, int mode, out bool supported, out int complexity_min, out int complexity_max, out int quality_min, out int quality_max)",
 		queryControls, nullptr);
 	proc_handler_add(obs_get_proc_handler(),
-		"void android_mediacodec_query_component(string mime, int width, int height, int fps_num, int fps_den, int bitrate, int mode, int index, out string name)",
+		"void android_mediacodec_query_component(string mime, int width, int height, int fps_num, int fps_den, int bitrate, int mode, int index, int profile, bool p010, out string name)",
 		queryCodec, nullptr);
 }

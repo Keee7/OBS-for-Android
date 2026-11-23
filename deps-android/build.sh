@@ -105,14 +105,17 @@ done
 
 # Resolve shared dependencies before either network consumer, including targeted builds.
 case " $TARGETS " in
-  *' ffmpeg '*) TARGETS="mbedtls srt $TARGETS" ;;
+  *' ffmpeg '*) TARGETS="mbedtls srt cjson librist libxml2 $TARGETS" ;;
+  *' librist '*) TARGETS="mbedtls cjson $TARGETS" ;;
   *' srt '*|*' curl '*) TARGETS="mbedtls $TARGETS" ;;
 esac
 TARGETS=$(printf '%s\n' $TARGETS | awk '!seen[$0]++')
 
 # A changed patch needs pristine sources and must invalidate the shared prefix's stamp.
-ffmpeg_patch="$HERE/../scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch"
-ffmpeg_patch_digest=$(sha256sum < "$ffmpeg_patch") || exit 1
+ffmpeg_patch_dir="$HERE/../scripts/android-native-deps"
+ffmpeg_patch_digest=$(cat "$ffmpeg_patch_dir/ffmpeg-8.0.3-mediacodec-android.patch" \
+  "$ffmpeg_patch_dir/ffmpeg-8.0.3-android-tls.patch" \
+  "$ffmpeg_patch_dir/ffmpeg-8.0.3-srt-rendezvous.patch" | sha256sum) || exit 1
 ffmpeg_source_id="ffmpeg-$(dep_version ffmpeg)-${ffmpeg_patch_digest%% *}"
 
 codec_defs_digest=$(sha256sum < "$HERE/defs.sh") || exit 1
@@ -190,7 +193,7 @@ for dep in $TARGETS; do
   stamp="$STATE/$dep.done"
   stamp_id=""
   case "$dep" in
-    aom) stamp_id="aom-$(dep_version aom)-${codec_defs_digest%% *}" ;;
+    aom|x265) stamp_id="$dep-$(dep_version "$dep")-${codec_defs_digest%% *}" ;;
     ffmpeg) stamp_id="$ffmpeg_source_id-${codec_defs_digest%% *}" ;;
   esac
   if [ "$CLEAN" = 0 ] && [ -f "$stamp" ] &&

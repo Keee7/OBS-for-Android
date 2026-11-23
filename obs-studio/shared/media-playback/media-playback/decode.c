@@ -66,7 +66,7 @@ static void init_hw_decoder(struct mp_decode *d, AVCodecContext *c)
 	}
 }
 
-static int mp_open_codec(struct mp_decode *d, bool hw, bool force_ndk)
+static int mp_open_codec(struct mp_decode *d, bool hw, bool force_ndk, bool require_p010)
 {
 	AVCodecContext *c;
 	int ret;
@@ -93,7 +93,11 @@ static int mp_open_codec(struct mp_decode *d, bool hw, bool force_ndk)
 	AVDictionary *options = NULL;
 	if (force_ndk)
 		av_dict_set(&options, "ndk_codec", "1", 0);
+	if (require_p010)
+		av_dict_set(&options, "require_p010", "1", 0);
 	ret = avcodec_open2(c, d->codec, &options);
+	if (ret >= 0 && require_p010 && (av_dict_count(options) || c->pix_fmt != AV_PIX_FMT_P010LE))
+		ret = AVERROR(ENOTSUP);
 	av_dict_free(&options);
 	if (ret < 0)
 		goto fail;
@@ -185,7 +189,17 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 	 * separate decoder, not an AVHWDevice-backed version of the SW codec.
 	 * 勾选"硬件解码"时优先使用 FFmpeg 的 *_mediacodec 解码器（FFmpeg 按 MIME/profile 选择硬件组件），
 	 * 打开失败回退到 FFmpeg 原生软解；不勾选时直接用软解。 */
-	if (hw && type == AVMEDIA_TYPE_VIDEO) {
+	const AVCodecParameters *params = stream->codecpar;
+	const AVPixFmtDescriptor *pixdesc = av_pix_fmt_desc_get(params->format);
+	const bool main10 = id == AV_CODEC_ID_HEVC && params->profile == AV_PROFILE_HEVC_MAIN_10;
+	const bool high_bit_depth = (pixdesc && pixdesc->nb_components && pixdesc->comp[0].depth > 8) ||
+				    params->bits_per_raw_sample > 8 || params->color_trc == AVCOL_TRC_SMPTE2084 ||
+				    params->color_trc == AVCOL_TRC_ARIB_STD_B67 ||
+				    main10 ||
+				    (id == AV_CODEC_ID_VP9 && params->profile >= AV_PROFILE_VP9_2);
+	const bool try_p010 = main10 || (pixdesc && pixdesc->nb_components && pixdesc->comp[0].depth == 10) ||
+			      params->bits_per_raw_sample == 10;
+	if (hw && type == AVMEDIA_TYPE_VIDEO && (!high_bit_depth || try_p010)) {
 		const char *name = NULL;
 		switch (id) {
 		case AV_CODEC_ID_H264: name = "h264_mediacodec"; break;
@@ -201,10 +215,11 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 			const AVCodec *hardware = avcodec_find_decoder_by_name(name);
 			if (hardware) {
 				d->codec = hardware;
-				ret = mp_open_codec(d, false, true);
+				ret = mp_open_codec(d, false, true, try_p010);
 				if (ret >= 0) {
 					d->android_hw_first_frame_pending = true;
-					blog(LOG_INFO, "MP: hardware MediaCodec decoder opened: %s", name);
+					blog(LOG_INFO, "MP: hardware MediaCodec decoder opened: %s%s", name,
+					     try_p010 ? " (P010)" : "");
 					goto codec_opened;
 				}
 				blog(LOG_WARNING, "MP: hardware decoder %s failed to open (%s); falling back to software", name,
@@ -215,8 +230,10 @@ bool mp_decode_init(mp_media_t *m, enum AVMediaType type, bool hw)
 			}
 		}
 	}
+	if (hw && type == AVMEDIA_TYPE_VIDEO && high_bit_depth)
+		blog(LOG_INFO, "MP: using software decode to retain HDR source precision");
 #endif
-	ret = mp_open_codec(d, hw, false);
+	ret = mp_open_codec(d, hw, false, false);
 	if (ret < 0) {
 		blog(LOG_WARNING, "MP: Failed to open %s decoder: %s", av_get_media_type_string(type), av_err2str(ret));
 		return false;
@@ -359,6 +376,8 @@ static int decode_packet(struct mp_decode *d, int *got_frame)
 		     d->in_frame->linesize[1], d->in_frame->linesize[2], d->in_frame->crop_top,
 		     d->in_frame->crop_bottom, d->in_frame->crop_left, d->in_frame->crop_right,
 		     pixel_format ? pixel_format : "unknown");
+		/* MediaCodec byte-buffer output can omit AV_FRAME_FLAG_KEY even after decoding a sync frame. */
+		d->got_first_keyframe = true;
 		d->android_hw_first_frame_pending = false;
 	}
 #endif

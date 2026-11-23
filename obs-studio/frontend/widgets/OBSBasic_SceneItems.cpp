@@ -96,7 +96,6 @@ static inline bool HasAudioDevices(const char *source_id)
 void OBSBasic::CreateFirstRunSources()
 {
 	bool hasDesktopAudio = HasAudioDevices(App()->OutputAudioSource());
-	bool hasInputAudio = HasAudioDevices(App()->InputAudioSource());
 
 #ifdef __APPLE__
 	/* On macOS 13 and above, the SCK based audio capture provides a
@@ -109,9 +108,11 @@ void OBSBasic::CreateFirstRunSources()
 	if (hasDesktopAudio) {
 		ResetAudioDevice(App()->OutputAudioSource(), "default", Str("Basic.DesktopDevice1"), 1);
 	}
-	if (hasInputAudio) {
+#ifndef __ANDROID__
+	if (HasAudioDevices(App()->InputAudioSource())) {
 		ResetAudioDevice(App()->InputAudioSource(), "default", Str("Basic.AuxDevice1"), 3);
 	}
+#endif
 }
 
 OBSSceneItem OBSBasic::GetSceneItem(QListWidgetItem *item)

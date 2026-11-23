@@ -119,6 +119,8 @@ struct obs_android_audio_host {
 
 	/** 枚举音频输出设备（AudioManager.GET_DEVICES_OUTPUTS），用于音频监听选择目标设备。 */
 	int (*get_output_devices)(void *param, struct obs_android_audio_device *out, int max);
+	/** 匹配 USB 设备路径对应的音频输入 ID，无法确认时返回 -1。 */
+	int (*find_usb_input)(void *param, const char *usb_device);
 };
 
 /** App 启动时调用；传 NULL 可注销。 */
@@ -129,6 +131,7 @@ EXPORT bool obs_android_audio_ready(void);
 
 EXPORT int obs_android_audio_enum_devices(struct obs_android_audio_device *out, int max);
 EXPORT int obs_android_audio_enum_output_devices(struct obs_android_audio_device *out, int max);
+EXPORT int obs_android_audio_find_usb_input(const char *usb_device);
 /** 总线未注册时也返回 false："问不到"不等于"有权限"，调用方先判 obs_android_audio_ready()。 */
 EXPORT bool obs_android_audio_has_permission(void);
 

@@ -22,6 +22,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.hardware.usb.UsbConstants;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbManager;
 import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
@@ -29,6 +32,13 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+import java.util.Map;
 
 public final class ObsAudioHost {
     private static final String TAG = "OBS-audio";
@@ -143,6 +153,104 @@ public final class ObsAudioHost {
     /** 只取采集侧（GET_DEVICES_INPUTS=1，值取自 javap）。调用方须保证 manager 已就位。 */
     private static AudioDeviceInfo[] inputs() {
         return manager.getDevices(AudioManager.GET_DEVICES_INPUTS);
+    }
+
+    /** Returns the Android input ID only when it can be associated with this USB device. */
+    public static synchronized int findUsbInput(String usbDeviceName) {
+        if (manager == null || usbDeviceName == null)
+            return -1;
+        UsbManager usb = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+        if (usb == null)
+            return -1;
+        Map<String, UsbDevice> devices = usb.getDeviceList();
+        UsbDevice target = devices.get(usbDeviceName);
+        if (target == null)
+            return -1;
+
+        String targetName = usbAudioProduct(target);
+        int exact = -1;
+        int byName = -1;
+        int nameMatches = 0;
+        for (AudioDeviceInfo input : inputs()) {
+            int type = input.getType();
+            if (!input.isSource() || input.getId() <= 0 ||
+                (type != AudioDeviceInfo.TYPE_USB_DEVICE && type != AudioDeviceInfo.TYPE_USB_HEADSET))
+                continue;
+            String address = usbAddressOf(input.getAddress());
+            if (!address.isEmpty()) {
+                if (usbDeviceName.equals(address) && (exact < 0 || input.getId() < exact))
+                    exact = input.getId();
+            } else if (!targetName.isEmpty() && targetName.equalsIgnoreCase(safeProductName(input).trim())) {
+                byName = input.getId();
+                nameMatches++;
+            }
+        }
+        if (exact > 0)
+            return exact;
+        if (nameMatches != 1)
+            return -1;
+
+        // Some Android builds hide the ALSA address mapping from apps. Only
+        // use a product name when both the Android input and USB device are unique.
+        for (UsbDevice other : devices.values()) {
+            if (usbDeviceName.equals(other.getDeviceName()))
+                continue;
+            if (targetName.equalsIgnoreCase(usbAudioProduct(other)) ||
+                (target.getVendorId() == other.getVendorId() && target.getProductId() == other.getProductId()))
+                return -1;
+        }
+        return byName;
+    }
+
+    private static String usbAudioProduct(UsbDevice device) {
+        boolean audio = device.getDeviceClass() == UsbConstants.USB_CLASS_AUDIO;
+        for (int i = 0; i < device.getInterfaceCount() && !audio; i++)
+            audio = device.getInterface(i).getInterfaceClass() == UsbConstants.USB_CLASS_AUDIO;
+        if (!audio)
+            return "";
+        String name = device.getProductName();
+        return name == null ? "" : name.trim();
+    }
+
+    private static String usbAddressOf(String address) {
+        final String usbPrefix = "/dev/bus/usb/";
+        if (address.startsWith(usbPrefix))
+            return address;
+        for (String field : address.split(";")) {
+            if (!field.startsWith("card="))
+                continue;
+            try {
+                int card = Integer.parseInt(field.substring(5));
+                if (card < 0)
+                    return "";
+                String bus = readAddressFile(new File("/proc/asound/card" + card + "/usbbus"));
+                if (!bus.isEmpty())
+                    return usbPrefix + bus;
+
+                File usb = new File("/sys/class/sound/card" + card + "/device").getCanonicalFile();
+                for (; usb != null; usb = usb.getParentFile()) {
+                    String busNumber = readAddressFile(new File(usb, "busnum"));
+                    String deviceNumber = readAddressFile(new File(usb, "devnum"));
+                    if (!busNumber.isEmpty() && !deviceNumber.isEmpty())
+                        return String.format(Locale.ROOT, "%s%03d/%03d", usbPrefix,
+                                             Integer.parseInt(busNumber), Integer.parseInt(deviceNumber));
+                }
+            } catch (IOException | NumberFormatException | SecurityException ignored) {
+                // A matching product name may still identify the USB audio input.
+            }
+            break;
+        }
+        return "";
+    }
+
+    private static String readAddressFile(File file) {
+        try (FileInputStream stream = new FileInputStream(file)) {
+            byte[] data = new byte[32];
+            int length = stream.read(data);
+            return length > 0 ? new String(data, 0, length, StandardCharsets.US_ASCII).trim() : "";
+        } catch (IOException | SecurityException ignored) {
+            return "";
+        }
     }
 
     /** 只取播放侧（用于音频监听设备枚举）。调用方须保证 manager 已就位。 */

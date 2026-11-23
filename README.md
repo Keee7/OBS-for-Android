@@ -71,6 +71,7 @@ Based on [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android) a
 | **WebView Browser Source** | GPU texture integration of the Android System WebView with custom URLs, dimensions, frame rates, custom CSS, and touch interaction. Features a zero-copy ImageReader + EGLImage transparent background pipeline. |
 | **Audio Routing** | AAudio engine supporting dynamic selection of built-in microphones, wired headsets, and USB audio / capture-card UAC sources. |
 | **Hardware Video Decoding** | Android document URI playback using FFmpeg with hardware-accelerated MediaCodec decoders (H.264, HEVC, VP8, VP9, AV1), with software fallback during initialization, including libaom for AV1. |
+| **Network Media Sources** | Pull HTTP/HTTPS media, HLS, DASH, RTSP/RTSPS, RTMP/RTMPS, UDP, RTP, TCP, SRT and RIST through the OBS Media Source. |
 | **Shared Storage Recording** | MediaStore and Storage Access Framework (SAF) integration for recording directly to shared folders such as `Download/obs` with Hybrid MP4/MOV, avoiding scoped storage quota false alarms. |
 | **High-Speed UVC Ingestion** | Multi-threaded pipeline for USB 3.0 / SuperSpeed 1080p60 capture cards, bounded buffer handoff, raw YUV (YUYV/NV12) reassembly, and automated watchdog recovery. |
 | **Responsive Landscape UI** | Dynamic breakpoint engine (`952×552` logical pixels) tailored for landscape interaction. Automatically adapts between a compact landscape mode for smartphones (32px touch rows, auto-collapsed idle toolbars) and a spacious touch layout for tablets (48px rows), based on window size, including split-screen and floating windows. |
@@ -104,6 +105,16 @@ Based on [cunminF/OBS_for_Android](https://github.com/cunminF/OBS_for_Android) a
 4. **Adding Sources**:
    * Add a "Screen Capture" source and grant permission in the system prompt.
    * For capture cards, add a "UVC Camera" source and configure the desired YUV resolution and frame rate.
+   * In UVC source properties, set **Color Range** to **Default**, **Limited** or **Full** to match the raw signal from the capture card. The change takes effect while capturing. MJPEG is decoded in full range.
+   * UVC sources automatically match audio from the same capture card when Android can identify it. You can also choose a named audio input in the source properties. Enabled inputs appear under the source name in the Audio Mixer. Mic/Aux starts disabled on fresh installations.
+   * To pull a network stream, add a "Media Source", clear **Local File**, and enter the stream URL in **Input**. Leave **Input Format** empty for automatic detection. To carry RTSP media over TCP, enter `rtsp_transport=tcp` in **FFmpeg Options**.
+   * For SRT, use the sender address in Caller mode, or `srt://0.0.0.0:9000?mode=listener` to listen on the Android device. With Rendezvous, set `mode=rendezvous` on both endpoints, enter the peer address on each side, and use the same UDP port.
+
+For 10-bit HDR, select **Rec. 2100 (PQ)** or **Rec. 2100 (HLG)** in **Settings → Advanced → Video**. On Android 13 or later with a compatible MediaCodec encoder, use **P010**, **Limited** range and **Android MediaCodec HEVC Main10**. For software x265 or AOM AV1, use **I010** to avoid converting the YUV layout before encoding. Hybrid MP4 records the color information and nominal peak luminance.
+
+Media sources retain HDR from compatible files or streams. Android screen capture is composited as SDR at the configured SDR white level in an HDR scene. To reopen Android's consent prompt after canceling or stopping screen sharing, use **Request screen sharing permission** in the screen capture source properties.
+
+On compatible devices, enabling HDR switches the standard MediaCodec HEVC option to Main10, including in existing profiles.
 
 ---
 
@@ -126,7 +137,7 @@ Use `ffprobe` on a saved recording to confirm the output codec.
 
 ## Known Limitations
 
-* **HDR / 10-bit**: Limited to 8-bit SDR BT.709 pipelines at present.
+* **HDR / 10-bit**: The pipeline requires GPU support for 16-bit normalized textures and floating-point render targets. HDR media sources use MediaCodec when it negotiates P010 and fall back to software decoding if initialization fails. P010 USB input requires a compatible capture device. Preview display and Android screen capture are SDR.
 * **Browser Audio & Gestures**: Multi-touch gestures and dedicated browser audio routing are not yet supported in the current browser source.
 * **Service Integrations**: Direct Twitch/YouTube account OAuth integrations are disabled; please configure RTMP server URLs and stream keys manually.
 

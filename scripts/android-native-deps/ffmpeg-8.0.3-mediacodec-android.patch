@@ -1,6 +1,5 @@
-diff -ruN a/libavcodec/mediacodec_sw_buffer.c b/libavcodec/mediacodec_sw_buffer.c
---- a/libavcodec/mediacodec_sw_buffer.c	2026-11-10 18:07:14.732262000 +0800
-+++ b/libavcodec/mediacodec_sw_buffer.c	2026-11-10 18:08:34.923916600 +0800
+--- a/libavcodec/mediacodec_sw_buffer.c
++++ b/libavcodec/mediacodec_sw_buffer.c
 @@ -94,7 +94,7 @@
              src += s->crop_top * s->stride;
              src += s->crop_left;
@@ -34,11 +33,13 @@ diff -ruN a/libavcodec/mediacodec_sw_buffer.c b/libavcodec/mediacodec_sw_buffer.
              src += s->slice_height * s->stride;
 -            src += s->crop_top * s->stride;
 -            src += s->crop_left;
+-        }
+-
+-        if (frame->linesize[i] == s->stride) {
 +            src += (s->crop_top / 2) * s->stride;
 +            src += (s->crop_left / 2) * 2;
-         }
- 
--        if (frame->linesize[i] == s->stride) {
++        }
++
 +        if (frame->linesize[i] == s->stride && s->crop_left == 0) {
              memcpy(frame->data[i], src, height * s->stride);
          } else {
@@ -52,23 +53,94 @@ diff -ruN a/libavcodec/mediacodec_sw_buffer.c b/libavcodec/mediacodec_sw_buffer.
 -            height = avctx->height / 2;
 -
 -            src += (s->slice_height - s->crop_top / 2) * s->stride;
-+            height = (avctx->height + 1) / 2;
- 
+-
 -            src += s->crop_top * s->stride;
 -            src += s->crop_left;
+-        }
+-
+-        if (frame->linesize[i] == s->stride) {
++            height = (avctx->height + 1) / 2;
++
 +            src += (s->slice_height + s->crop_top / 2) * s->stride;
 +            src += (s->crop_left / 2) * 2;
-         }
- 
--        if (frame->linesize[i] == s->stride) {
++        }
++
 +        if (frame->linesize[i] == s->stride && s->crop_left == 0) {
              memcpy(frame->data[i], src, height * s->stride);
          } else {
              int j, width;
-diff -ruN a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
---- a/libavcodec/mediacodecdec_common.c	2026-11-10 18:07:37.477286700 +0800
-+++ b/libavcodec/mediacodecdec_common.c	2026-11-10 18:08:34.921713300 +0800
-@@ -569,6 +569,14 @@
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -23,6 +23,7 @@
+ #include <string.h>
+ #include <sys/types.h>
+ 
++#include "libavutil/imgutils.h"
+ #include "libavutil/avassert.h"
+ #include "libavutil/common.h"
+ #include "libavutil/hwcontext_mediacodec.h"
+@@ -192,6 +193,7 @@
+     COLOR_FormatYUV420Planar                              = 0x13,
+     COLOR_FormatYUV420SemiPlanar                          = 0x15,
+     COLOR_FormatYCbYCr                                    = 0x19,
++    COLOR_FormatYUVP010                                   = 0x36,
+     COLOR_FormatAndroidOpaque                             = 0x7F000789,
+     COLOR_QCOM_FormatYUV420SemiPlanar                     = 0x7fa30c00,
+     COLOR_QCOM_FormatYUV420SemiPlanar32m                  = 0x7fa30c04,
+@@ -209,6 +211,7 @@
+ 
+     { COLOR_FormatYUV420Planar,                              AV_PIX_FMT_YUV420P },
+     { COLOR_FormatYUV420SemiPlanar,                          AV_PIX_FMT_NV12    },
++    { COLOR_FormatYUVP010,                                  AV_PIX_FMT_P010LE  },
+     { COLOR_QCOM_FormatYUV420SemiPlanar,                     AV_PIX_FMT_NV12    },
+     { COLOR_QCOM_FormatYUV420SemiPlanar32m,                  AV_PIX_FMT_NV12    },
+     { COLOR_QCOM_FormatYUV420PackedSemiPlanar64x32Tile2m8ka, AV_PIX_FMT_NV12    },
+@@ -441,6 +444,32 @@
+     return ret;
+ }
+ 
++/* P010 uses a byte stride and two planes of little-endian, MSB-aligned samples. */
++static int mediacodec_copy_p010(const MediaCodecDecContext *s, const uint8_t *data, size_t size,
++                              const FFAMediaCodecBufferInfo *info, AVFrame *frame)
++{
++    if (info->offset < 0 || info->size < 0 || (size_t)info->offset > size ||
++        (size_t)info->size > size - (size_t)info->offset ||
++        s->stride <= 0 || s->slice_height < s->height ||
++        s->crop_left < 0 || s->crop_top < 0 || ((s->crop_left | s->crop_top) & 1))
++        return AVERROR_INVALIDDATA;
++
++    data += info->offset;
++    const size_t left = (size_t)s->crop_left * 2;
++    for (int plane = 0; plane < 2; plane++) {
++        const int rows = plane ? AV_CEIL_RSHIFT(frame->height, 1) : frame->height;
++        const size_t bytes = plane ? (size_t)AV_CEIL_RSHIFT(frame->width, 1) * 4 : (size_t)frame->width * 2;
++        const uint64_t top = plane ? (uint64_t)s->slice_height + s->crop_top / 2 : (uint64_t)s->crop_top;
++        const uint64_t offset = top * (unsigned)s->stride + left;
++        if (rows <= 0 || bytes > INT_MAX || left + bytes > (size_t)s->stride ||
++            offset + (uint64_t)(rows - 1) * (unsigned)s->stride + bytes > (size_t)info->size)
++            return AVERROR_INVALIDDATA;
++        av_image_copy_plane(frame->data[plane], frame->linesize[plane], data + offset,
++                            s->stride, (int)bytes, rows);
++    }
++    return 0;
++}
++
+ static int mediacodec_wrap_sw_video_buffer(AVCodecContext *avctx,
+                                            MediaCodecDecContext *s,
+                                            uint8_t *data,
+@@ -486,6 +515,11 @@
+             frame->linesize[0], frame->linesize[1], frame->linesize[2]);
+ 
+     switch (s->color_format) {
++    case COLOR_FormatYUVP010:
++        ret = mediacodec_copy_p010(s, data, size, info, frame);
++        if (ret < 0)
++            goto done;
++        break;
+     case COLOR_FormatYUV420Planar:
+         ff_mediacodec_sw_buffer_copy_yuv420_planar(avctx, s, data, size, info, frame);
+         break;
+@@ -569,12 +603,19 @@
      }
      av_log(avctx, AV_LOG_DEBUG, "Parsing MediaFormat %s\n", format);
  
@@ -83,8 +155,44 @@ diff -ruN a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.
      /* Mandatory fields */
      AMEDIAFORMAT_GET_INT32(s->width,  "width", 1);
      AMEDIAFORMAT_GET_INT32(s->height, "height", 1);
-@@ -645,11 +653,11 @@
-     if (color_transfer)
+ 
+     AMEDIAFORMAT_GET_INT32(s->stride, "stride", 0);
+-    s->stride = s->stride > 0 ? s->stride : s->width;
+ 
+     AMEDIAFORMAT_GET_INT32(s->slice_height, "slice-height", 0);
+ 
+@@ -588,6 +629,13 @@
+     }
+ 
+     AMEDIAFORMAT_GET_INT32(s->color_format, "color-format", 1);
++    if (s->stride <= 0)
++        s->stride = s->color_format == COLOR_FormatYUVP010 ? s->width * 2 : s->width;
++    if (s->require_p010 && s->color_format != COLOR_FormatYUVP010) {
++        av_log(avctx, AV_LOG_ERROR, "MediaCodec did not negotiate P010 output\n");
++        ret = AVERROR_EXTERNAL;
++        goto fail;
++    }
+     avctx->pix_fmt = mcdec_map_color_format(avctx, s, s->color_format);
+     if (avctx->pix_fmt == AV_PIX_FMT_NONE) {
+         av_log(avctx, AV_LOG_ERROR, "Output color format is not supported\n");
+@@ -632,24 +680,24 @@
+     }
+ 
+     AMEDIAFORMAT_GET_INT32(color_range, "color-range", 0);
+-    if (color_range)
++    if (color_range && (!s->require_p010 || avctx->color_range == AVCOL_RANGE_UNSPECIFIED))
+         avctx->color_range = ff_AMediaFormatColorRange_to_AVColorRange(color_range);
+ 
+     AMEDIAFORMAT_GET_INT32(color_standard, "color-standard", 0);
+-    if (color_standard) {
++    if (color_standard && (!s->require_p010 || avctx->color_primaries == AVCOL_PRI_UNSPECIFIED)) {
+         avctx->colorspace = ff_AMediaFormatColorStandard_to_AVColorSpace(color_standard);
+         avctx->color_primaries = ff_AMediaFormatColorStandard_to_AVColorPrimaries(color_standard);
+     }
+ 
+     AMEDIAFORMAT_GET_INT32(color_transfer, "color-transfer", 0);
+-    if (color_transfer)
++    if (color_transfer && (!s->require_p010 || avctx->color_trc == AVCOL_TRC_UNSPECIFIED))
          avctx->color_trc = ff_AMediaFormatColorTransfer_to_AVColorTransfer(color_transfer);
  
 -    av_log(avctx, AV_LOG_INFO,
@@ -100,6 +208,59 @@ diff -ruN a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.
  
      av_freep(&format);
      return ff_set_dimensions(avctx, width, height);
+@@ -777,26 +825,12 @@
+ 
+     s->codec_name = ff_AMediaCodecList_getCodecNameByType(mime, profile, 0, avctx);
+     if (!s->codec_name) {
+-        // getCodecNameByType() can fail due to missing JVM, while NDK
+-        // mediacodec can be used without JVM.
+-        if (!s->use_ndk_codec) {
+-            return AVERROR_EXTERNAL;
+-        }
+-        av_log(avctx, AV_LOG_INFO, "Failed to getCodecNameByType\n");
+-    } else {
+-        av_log(avctx, AV_LOG_DEBUG, "Found decoder %s\n", s->codec_name);
+-    }
+-
+-    if (s->codec_name)
+-        s->codec = ff_AMediaCodec_createCodecByName(s->codec_name, s->use_ndk_codec);
+-    else {
+-        s->codec = ff_AMediaCodec_createDecoderByType(mime, s->use_ndk_codec);
+-        if (s->codec) {
+-            s->codec_name = ff_AMediaCodec_getName(s->codec);
+-            if (!s->codec_name)
+-                s->codec_name = av_strdup(mime);
+-        }
+-    }
++        av_log(avctx, AV_LOG_INFO, "No hardware-accelerated MediaCodec video decoder found for %s\n", mime);
++        return AVERROR_EXTERNAL;
++    }
++
++    av_log(avctx, AV_LOG_INFO, "Selected hardware-accelerated MediaCodec video decoder %s\n", s->codec_name);
++    s->codec = ff_AMediaCodec_createCodecByName(s->codec_name, s->use_ndk_codec);
+     if (!s->codec) {
+         av_log(avctx, AV_LOG_ERROR, "Failed to create media decoder for type %s and name %s\n", mime, s->codec_name);
+         return AVERROR_EXTERNAL;
+@@ -845,6 +879,8 @@
+     if (ret < 0)
+         goto fail;
+ 
++    if (s->require_p010)
++        ff_AMediaFormat_setInt32(format, "color-format", COLOR_FormatYUVP010);
+     status = ff_AMediaCodec_configure(s->codec, format, s->surface, NULL, 0);
+     if (status < 0) {
+         char *desc = ff_AMediaFormat_toString(format);
+@@ -870,6 +906,10 @@
+ 
+     if (avctx->codec_type == AVMEDIA_TYPE_VIDEO) {
+         s->format = ff_AMediaCodec_getOutputFormat(s->codec);
++        if (s->require_p010 && !s->format) {
++            ret = AVERROR_EXTERNAL;
++            goto fail;
++        }
+         if (s->format) {
+             if ((ret = mediacodec_dec_parse_format(avctx, s)) < 0) {
+                 av_log(avctx, AV_LOG_ERROR,
 --- a/libavcodec/mediacodec_wrapper.c
 +++ b/libavcodec/mediacodec_wrapper.c
 @@ -50,6 +50,7 @@
@@ -135,38 +296,40 @@ diff -ruN a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.
          if (jfields.is_software_only_id) {
              int is_software_only = (*env)->CallBooleanMethod(env, info, jfields.is_software_only_id);
              if (ff_jni_exception_check(env, 1, log_ctx) < 0) {
---- a/libavcodec/mediacodecdec_common.c
-+++ b/libavcodec/mediacodecdec_common.c
-@@ -777,26 +777,12 @@
+--- a/libavcodec/mediacodecdec_common.h
++++ b/libavcodec/mediacodecdec_common.h
+@@ -71,6 +71,7 @@
+     atomic_int serial;
  
-     s->codec_name = ff_AMediaCodecList_getCodecNameByType(mime, profile, 0, avctx);
-     if (!s->codec_name) {
--        // getCodecNameByType() can fail due to missing JVM, while NDK
--        // mediacodec can be used without JVM.
--        if (!s->use_ndk_codec) {
--            return AVERROR_EXTERNAL;
--        }
--        av_log(avctx, AV_LOG_INFO, "Failed to getCodecNameByType\n");
--    } else {
--        av_log(avctx, AV_LOG_DEBUG, "Found decoder %s\n", s->codec_name);
--    }
--
--    if (s->codec_name)
--        s->codec = ff_AMediaCodec_createCodecByName(s->codec_name, s->use_ndk_codec);
--    else {
--        s->codec = ff_AMediaCodec_createDecoderByType(mime, s->use_ndk_codec);
--        if (s->codec) {
--            s->codec_name = ff_AMediaCodec_getName(s->codec);
--            if (!s->codec_name)
--                s->codec_name = av_strdup(mime);
--        }
--    }
-+        av_log(avctx, AV_LOG_INFO, "No hardware-accelerated MediaCodec video decoder found for %s\n", mime);
-+        return AVERROR_EXTERNAL;
-+    }
-+
-+    av_log(avctx, AV_LOG_INFO, "Selected hardware-accelerated MediaCodec video decoder %s\n", s->codec_name);
-+    s->codec = ff_AMediaCodec_createCodecByName(s->codec_name, s->use_ndk_codec);
-     if (!s->codec) {
-         av_log(avctx, AV_LOG_ERROR, "Failed to create media decoder for type %s and name %s\n", mime, s->codec_name);
-         return AVERROR_EXTERNAL;
+     bool use_ndk_codec;
++    bool require_p010;
+ } MediaCodecDecContext;
+ 
+ int ff_mediacodec_dec_init(AVCodecContext *avctx,
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -57,6 +57,7 @@
+     int amlogic_mpeg2_api23_workaround;
+ 
+     int use_ndk_codec;
++    int require_p010;
+     // Ref. MediaFormat KEY_OPERATING_RATE
+     int operating_rate;
+ } MediaCodecH264DecContext;
+@@ -450,6 +451,7 @@
+ 
+     s->ctx->delay_flush = s->delay_flush;
+     s->ctx->use_ndk_codec = s->use_ndk_codec;
++    s->ctx->require_p010 = s->require_p010;
+ 
+     if ((ret = ff_mediacodec_dec_init(avctx, s->ctx, codec_mime, format)) < 0) {
+         s->ctx = NULL;
+@@ -598,6 +600,8 @@
+                      OFFSET(delay_flush), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { "ndk_codec", "Use MediaCodec from NDK",
+                    OFFSET(use_ndk_codec), AV_OPT_TYPE_BOOL, {.i64 = -1}, -1, 1, VD },
++    { "require_p010", "Require 10-bit P010 byte-buffer output",
++                   OFFSET(require_p010), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { "operating_rate", "The desired operating rate that the codec will need to operate at, zero for unspecified",
+             OFFSET(operating_rate), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, VD },
+     { NULL }

@@ -50,7 +50,12 @@ public:
 	static void information(QWidget *parent, const QString &title, const QString &text);
 	static void warning(QWidget *parent, const QString &title, const QString &text, bool enableRichText = false);
 	static void critical(QWidget *parent, const QString &title, const QString &text);
+#ifdef __ANDROID__
+	static void showHelp(QWidget *parent, const QString &title, const QString &text);
+#endif
 };
+
+void SetLabelHelp(QLabel *label, const QString &title, const QString &description, bool darkTheme);
 
 void OBSErrorBox(QWidget *parent, const char *msg, ...);
 

@@ -17,6 +17,7 @@
 #include <QComboBox>
 #include <QListWidget>
 #include <QPushButton>
+#include <QToolButton>
 #include <QRadioButton>
 #include <QButtonGroup>
 #include <QStandardItem>
@@ -332,6 +333,30 @@ QWidget *OBSPropertiesView::NewWidget(obs_property_t *prop, Sender *widget, void
 	return widget;
 }
 
+static QWidget *CreatePropertyHelp(QWidget *parent, const char *title, const char *description)
+{
+	const QIcon icon(obs_frontend_is_theme_dark() ? ":/res/images/help_light.svg" : ":/res/images/help.svg");
+	const QString text = QT_UTF8(description);
+#ifdef __ANDROID__
+	auto *help = new QToolButton(parent);
+	const QString label = QT_UTF8(title);
+	help->setIconSize(QSize(16, 16));
+	help->setMinimumSize(QSize(32, 32));
+	help->setAutoRaise(true);
+	help->setFocusPolicy(Qt::StrongFocus);
+	help->setAccessibleName(label);
+	help->setAccessibleDescription(text);
+	QObject::connect(help, &QToolButton::clicked, help,
+			 [help, label, text] { OBSMessageBox::showHelp(help->window(), label, text); });
+#else
+	UNUSED_PARAMETER(title);
+	auto *help = new IconLabel(parent);
+#endif
+	help->setIcon(icon);
+	help->setToolTip(text);
+	return help;
+}
+
 QWidget *OBSPropertiesView::AddCheckbox(obs_property_t *prop)
 {
 	const char *name = obs_property_name(prop);
@@ -348,12 +373,6 @@ QWidget *OBSPropertiesView::AddCheckbox(obs_property_t *prop)
 		return widget;
 	}
 
-	QString file = !obs_frontend_is_theme_dark() ? ":/res/images/help.svg" : ":/res/images/help_light.svg";
-
-	IconLabel *help = new IconLabel(checkbox);
-	help->setIcon(QIcon(file));
-	help->setToolTip(long_desc);
-
 #ifdef __APPLE__
 	checkbox->setAttribute(Qt::WA_LayoutUsesWidgetRect);
 #endif
@@ -365,7 +384,7 @@ QWidget *OBSPropertiesView::AddCheckbox(obs_property_t *prop)
 	layout->setSpacing(0);
 
 	layout->addWidget(checkbox);
-	layout->addWidget(help);
+	layout->addWidget(CreatePropertyHelp(widget, desc, long_desc));
 	widget->setLayout(layout);
 
 	return widget;
@@ -427,12 +446,14 @@ QWidget *OBSPropertiesView::AddText(obs_property_t *prop, QFormLayout *layout, Q
 		}
 
 		if (long_desc != NULL && !info_label->text().isEmpty()) {
+#ifndef __ANDROID__
 			QString file = !obs_frontend_is_theme_dark() ? ":/res/images/help.svg"
 								     : ":/res/images/help_light.svg";
 			QString lStr = "<html>%1 <img src='%2' style=' \
 				vertical-align: bottom; ' /></html>";
 
 			info_label->setText(lStr.arg(info_label->text(), file));
+#endif
 			info_label->setToolTip(QT_UTF8(long_desc));
 		} else if (long_desc != NULL) {
 			info_label->setText(QT_UTF8(long_desc));
@@ -1680,8 +1701,6 @@ void OBSPropertiesView::AddProperty(obs_property_t *property, QFormLayout *layou
 
 	QWidget *leftWidget = label;
 	if (obs_property_long_description(property) && label) {
-		QString file = !obs_frontend_is_theme_dark() ? ":/res/images/help.svg" : ":/res/images/help_light.svg";
-
 		QWidget *newWidget = new QWidget();
 		newWidget->setToolTip(obs_property_long_description(property));
 
@@ -1690,12 +1709,9 @@ void OBSPropertiesView::AddProperty(obs_property_t *property, QFormLayout *layou
 		boxLayout->setAlignment(Qt::AlignLeft);
 		boxLayout->setSpacing(0);
 
-		IconLabel *help = new IconLabel(newWidget);
-		help->setIcon(QIcon(file));
-		help->setToolTip(obs_property_long_description(property));
-
 		boxLayout->addWidget(label);
-		boxLayout->addWidget(help);
+		boxLayout->addWidget(CreatePropertyHelp(newWidget, obs_property_description(property),
+						      obs_property_long_description(property)));
 		leftWidget = newWidget;
 	}
 

@@ -41,7 +41,7 @@ On Ubuntu 24.04 or WSL2, first install the [Android SDK command-line tools](http
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y 7zip ninja-build build-essential curl unzip zip ca-certificates \
+sudo apt-get install -y 7zip ninja-build meson build-essential curl unzip zip ca-certificates \
   patch pkg-config dpkg-dev autoconf automake libtool nasm yasm python3-venv openjdk-17-jdk \
   libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev
 
@@ -89,7 +89,9 @@ bash scripts/build-frontend-apk-wsl.sh
 
 CMake, Ninja and the host tools must be on PATH. Install the `nlohmann_json` CMake package (3.11+) in the dependency prefix if it is missing. The automated build installs it for you. To refresh the AV1 software decoder in an older prefix, run `NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a aom ffmpeg --clean` before packaging.
 
-For SRT playback in Media Sources, refresh an older dependency prefix with `bash deps-android/fetch.sh` and `NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a ffmpeg`. The FFmpeg build pulls in SRT and Mbed TLS.
+For HTTPS, SRT, RIST and DASH playback in Media Sources, install Meson on the host and refresh an older dependency prefix with `bash deps-android/fetch.sh` and `NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a ffmpeg`. This builds FFmpeg with Mbed TLS, SRT, librist and libxml2.
+
+For 10-bit x265 and AV1, rebuild an older prefix with `NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a x265 aom ffmpeg`. The x265 archive includes both Main and Main10, and libaom enables high-bit-depth encoding and decoding.
 
 ### Native Windows Build
 
@@ -109,7 +111,7 @@ build-tools/
   android-deps-ffmpeg8/arm64-v8a/       # Precompiled ARM64 native headers and libraries
 ```
 
-The dependency prefix must include the full Android ARM64 dependency set and the `nlohmann_json` CMake package (3.11+). Use `-NativeDeps` to point at another prefix. If an older APK lacks the libaom AV1 decoder, rebuild both `aom` and `ffmpeg` with [the Windows dependency script](scripts/build-deps-windows.sh). For SRT playback, the script also needs the `srt-1.5.4` and `mbedtls-3.6.4` source directories under `SOURCES_ROOT`.
+The dependency prefix must include the full Android ARM64 dependency set and the `nlohmann_json` CMake package (3.11+). Use `-NativeDeps` to point at another prefix. If an older APK lacks the libaom AV1 decoder, rebuild both `aom` and `ffmpeg` with [the Windows dependency script](scripts/build-deps-windows.sh). The FFmpeg network dependencies are built with Meson and CMake from `mbedtls-3.6.4`, `srt-1.5.4`, `cJSON-1.7.19`, `librist-v0.2.11` and `libxml2-2.15.4` under `SOURCES_ROOT`. `deps-android/versions.sh` lists the source archives.
 
 #### 2. Compiling and Packaging
 Execute the build script in PowerShell:
@@ -183,7 +185,9 @@ cat build-fe-arm64-v8a-ci/.final-apk-path
 
 按 [已有工具链命令](#existing-toolchain) 设置 SDK、NDK、Qt、JDK 和 Gradle 路径。先构建 `deps-android/prebuilt/arm64-v8a/` 依赖前缀，再运行 WSL 打包脚本。若前缀缺少 `nlohmann_json` CMake 包，需先安装 3.11 或更新版本。自动化脚本会安装该依赖。旧前缀需要同时重编 AOM 和 FFmpeg 才能加入 AV1 软解。
 
-如需为旧依赖前缀加入媒体源 SRT 拉流支持，先运行 `bash deps-android/fetch.sh`，再运行 `NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a ffmpeg`。构建 FFmpeg 时会一并构建 SRT 和 Mbed TLS。
+如需为旧依赖前缀补齐媒体源的 HTTPS、SRT、RIST 和 DASH 拉流支持，先在构建主机安装 Meson，再运行 `bash deps-android/fetch.sh` 和 `NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a ffmpeg`。构建 FFmpeg 时会一并构建 Mbed TLS、SRT、librist 和 libxml2。
+
+旧依赖前缀可运行 `NDK="$NDK_ROOT" bash deps-android/build.sh arm64-v8a x265 aom ffmpeg` 加入 10-bit 软件编码。x265 静态库包含 Main 和 Main10，libaom 启用高位深编码和解码。
 
 ### Windows 环境原生构建
 
@@ -203,7 +207,7 @@ build-tools/
   android-deps-ffmpeg8/arm64-v8a/       # 预编译好的 ARM64 原生头文件与库
 ```
 
-依赖前缀须包含完整的 Android ARM64 依赖与 `nlohmann_json` CMake 包（3.11 或更新版本）。可用 `-NativeDeps` 指定其他前缀。旧包缺少 libaom AV1 软解时，使用 [Windows 依赖脚本](scripts/build-deps-windows.sh) 同时重编 `aom` 与 `ffmpeg`。构建 SRT 支持时，脚本还需要 `SOURCES_ROOT` 下的 `srt-1.5.4` 和 `mbedtls-3.6.4` 源码目录。
+依赖前缀须包含完整的 Android ARM64 依赖与 `nlohmann_json` CMake 包（3.11 或更新版本）。可用 `-NativeDeps` 指定其他前缀。旧包缺少 libaom AV1 软解时，使用 [Windows 依赖脚本](scripts/build-deps-windows.sh) 同时重编 `aom` 与 `ffmpeg`。FFmpeg 的网络依赖经由 Meson 和 CMake 构建，需要 `SOURCES_ROOT` 下的 `mbedtls-3.6.4`、`srt-1.5.4`、`cJSON-1.7.19`、`librist-v0.2.11` 和 `libxml2-2.15.4` 源码目录。源码包见 `deps-android/versions.sh`。
 
 #### 2. 编译与打包
 在 PowerShell 中执行构建命令：

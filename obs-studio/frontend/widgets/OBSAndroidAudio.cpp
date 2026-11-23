@@ -104,11 +104,20 @@ static bool hasCapturePermission(void *param)
 	return QJniObject::callStaticMethod<jboolean>(hostClass, "hasRecordPermission", "()Z") != 0;
 }
 
+static int findUsbInput(void *param, const char *usbDevice)
+{
+	(void)param;
+	const QJniObject path = QJniObject::fromString(QString::fromUtf8(usbDevice));
+	return QJniObject::callStaticMethod<jint>(hostClass, "findUsbInput", "(Ljava/lang/String;)I",
+						path.object<jstring>());
+}
+
 static struct obs_android_audio_host g_audioHost = {
 	nullptr,
 	getAudioDevices,
 	hasCapturePermission,
 	getAudioOutputDevices,
+	findUsbInput,
 };
 
 bool OBSAndroidAudioInit()

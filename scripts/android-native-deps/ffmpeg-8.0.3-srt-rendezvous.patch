@@ -1,0 +1,48 @@
+--- a/libavformat/libsrt.c
++++ b/libavformat/libsrt.c
+@@ -381,6 +381,34 @@
+ }
+ 
+ 
++static int libsrt_bind_rendezvous(URLContext *h, int fd, const struct addrinfo *peer)
++{
++    struct sockaddr_storage local = { 0 };
++
++    /* Keep the peer's port and bind it on a local wildcard address. */
++    if (peer->ai_family == AF_INET) {
++        struct sockaddr_in *addr = (struct sockaddr_in *)&local;
++        addr->sin_family = AF_INET;
++        addr->sin_port = ((const struct sockaddr_in *)peer->ai_addr)->sin_port;
++    } else if (peer->ai_family == AF_INET6) {
++        struct sockaddr_in6 *addr = (struct sockaddr_in6 *)&local;
++        addr->sin6_family = AF_INET6;
++        addr->sin6_port = ((const struct sockaddr_in6 *)peer->ai_addr)->sin6_port;
++#if SRT_VERSION_VALUE >= 0x010502
++        int yes = 1;
++        int ret = libsrt_setsockopt(h, fd, SRTO_IPV6ONLY, "SRTO_IPV6ONLY", &yes, sizeof(yes));
++        if (ret < 0)
++            return ret;
++#endif
++    } else {
++        return AVERROR(EAFNOSUPPORT);
++    }
++
++    if (srt_bind(fd, (const struct sockaddr *)&local, peer->ai_addrlen) < 0)
++        return libsrt_neterrno(h);
++    return 0;
++}
++
+ static int libsrt_setup(URLContext *h, const char *uri, int flags)
+ {
+     struct addrinfo hints = { 0 }, *ai, *cur_ai;
+@@ -472,8 +500,8 @@
+         if (ret < 0)
+             goto fail1;
+         if (s->mode == SRT_MODE_RENDEZVOUS) {
+-            if (srt_bind(fd, cur_ai->ai_addr, cur_ai->ai_addrlen)) {
+-                ret = libsrt_neterrno(h);
++            ret = libsrt_bind_rendezvous(h, fd, cur_ai);
++            if (ret < 0) {
+                 srt_epoll_release(write_eid);
+                 goto fail1;
+             }

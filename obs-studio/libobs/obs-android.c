@@ -369,6 +369,12 @@ int obs_android_audio_enum_output_devices(struct obs_android_audio_device *out, 
 	return h ? enum_audio_devices_with(h->get_output_devices, h->param, out, max) : -1;
 }
 
+int obs_android_audio_find_usb_input(const char *usb_device)
+{
+	const struct obs_android_audio_host *h = audio_host;
+	return h && h->find_usb_input && usb_device && *usb_device ? h->find_usb_input(h->param, usb_device) : -1;
+}
+
 bool obs_android_audio_has_permission(void)
 {
 	const struct obs_android_audio_host *h = audio_host;

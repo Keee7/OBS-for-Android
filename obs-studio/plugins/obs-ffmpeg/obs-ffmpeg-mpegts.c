@@ -266,22 +266,22 @@ static inline bool init_streams(struct ffmpeg_output *stream, struct ffmpeg_data
 	return true;
 }
 
-int ff_network_init(void)
+static bool mpegts_network_init(void)
 {
 #if HAVE_WINSOCK2_H
 	WSADATA wsaData;
 
 	if (WSAStartup(MAKEWORD(1, 1), &wsaData))
-		return 0;
+		return false;
 #endif
-	return 1;
+	return true;
 }
 
 static inline int connect_mpegts_url(struct ffmpeg_output *stream, bool is_rist)
 {
 	int err = 0;
 	const char *url = stream->ff_data.config.url;
-	if (!ff_network_init()) {
+	if (!mpegts_network_init()) {
 		ffmpeg_mpegts_log_error(LOG_ERROR, &stream->ff_data, "Couldn't initialize network");
 		return OBS_OUTPUT_ERROR;
 	}

@@ -415,6 +415,7 @@ public final class ObsForegroundService extends Service {
      * 本来就有的（正在推流/录制）则只重算类型，把 mediaProjection 那一位落回去，别的不动。
      */
     public static synchronized void releaseProjectionForeground(Context ctx) {
+        ObsProjectionHost.projectionForegroundFailed();
         final boolean wasOurs = startedForProjection;
         startedForProjection = false;
         pendingAfterPromote = null;

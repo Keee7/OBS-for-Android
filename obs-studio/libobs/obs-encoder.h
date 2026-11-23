@@ -356,6 +356,8 @@ struct obs_encoder_info {
 	 * connection stops, before its output callback is removed. Return queued
 	 * packets one at a time, then received_packet=false after bounded EOS drain. */
 	bool (*encode_texture_flush)(void *data, struct encoder_packet *packet, bool *received_packet);
+	/* Same drain contract for asynchronous raw video encoders. */
+	bool (*encode_raw_flush)(void *data, struct encoder_packet *packet, bool *received_packet);
 };
 
 EXPORT void obs_register_encoder_s(const struct obs_encoder_info *info, size_t size);

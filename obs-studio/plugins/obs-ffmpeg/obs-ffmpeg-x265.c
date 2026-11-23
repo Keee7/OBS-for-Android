@@ -14,7 +14,8 @@ static const char *x265_name(void *unused)
 static void x265_video_info(void *unused, struct video_scale_info *info)
 {
 	UNUSED_PARAMETER(unused);
-	info->format = VIDEO_FORMAT_I420;
+	info->format = info->format == VIDEO_FORMAT_P010 || info->format == VIDEO_FORMAT_I010 ? VIDEO_FORMAT_I010
+										     : VIDEO_FORMAT_I420;
 }
 
 static void x265_destroy(void *data)
@@ -30,14 +31,16 @@ static void *x265_create(obs_data_t *settings, obs_encoder_t *encoder)
 	if (!ffmpeg_video_encoder_init(&enc->ffve, enc, encoder, "libx265", NULL, "x265", NULL, NULL))
 		goto fail;
 	const struct video_output_info *voi = video_output_get_info(obs_encoder_video(encoder));
-	if (voi->colorspace == VIDEO_CS_2100_PQ || voi->colorspace == VIDEO_CS_2100_HLG) {
-		obs_encoder_set_last_error(encoder, "This x265 build supports 8-bit SDR only.");
-		goto fail;
-	}
 	struct video_scale_info info = {0};
-	info.format = VIDEO_FORMAT_I420;
+	info.format = voi->format;
 	info.colorspace = voi->colorspace;
 	info.range = voi->range;
+	x265_video_info(enc, &info);
+	if ((voi->colorspace == VIDEO_CS_2100_PQ || voi->colorspace == VIDEO_CS_2100_HLG) &&
+	    info.format != VIDEO_FORMAT_I010) {
+		obs_encoder_set_last_error(encoder, "HDR HEVC requires P010 or I010 output.");
+		goto fail;
+	}
 	const char *rc = obs_data_get_string(settings, "rate_control");
 	int64_t bitrate_value = obs_data_get_int(settings, "bitrate");
 	int64_t threads_value = obs_data_get_int(settings, "threads");

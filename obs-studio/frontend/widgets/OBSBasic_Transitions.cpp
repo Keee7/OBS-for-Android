@@ -763,6 +763,7 @@ void OBSBasic::TBarReleased()
 {
 	if (!IsPreviewProgramMode() || !tBar)
 		return;
+	const QPointer<QSlider> slider = tBar;
 
 	int val = tBar->value();
 
@@ -770,9 +771,12 @@ void OBSBasic::TBarReleased()
 
 	if ((tBar->maximum() - val) <= T_BAR_CLAMP) {
 		obs_transition_set_manual_time(transition, 1.0f);
+		if (!slider || slider != tBar)
+			return;
 		tBar->blockSignals(true);
 		tBar->setValue(0);
 		tBar->blockSignals(false);
+		tBarPosition.store(0, std::memory_order_relaxed);
 		tBarActive = false;
 		EnableTransitionWidgets(true);
 
@@ -782,16 +786,20 @@ void OBSBasic::TBarReleased()
 	} else if (val <= T_BAR_CLAMP) {
 		obs_transition_set_manual_time(transition, 0.0f);
 		TransitionFullyStopped();
+		if (!slider || slider != tBar)
+			return;
 		tBar->blockSignals(true);
 		tBar->setValue(0);
 		tBar->blockSignals(false);
+		tBarPosition.store(0, std::memory_order_relaxed);
 		tBarActive = false;
 		EnableTransitionWidgets(true);
 		programScene = lastProgramScene;
 		blog(LOG_INFO, "Manual transition cancelled");
 	}
 
-	tBar->clearFocus();
+	if (slider && slider == tBar)
+		slider->clearFocus();
 }
 
 static bool ValidTBarTransition(OBSSource transition)
@@ -813,6 +821,8 @@ void OBSBasic::TBarChanged(int value)
 {
 	if (!IsPreviewProgramMode() || !tBar)
 		return;
+	const QPointer<QSlider> slider = tBar;
+	tBarPosition.store(tBar->value(), std::memory_order_relaxed);
 
 	OBSSourceAutoRelease transition = obs_get_output_source(0);
 
@@ -835,6 +845,8 @@ void OBSBasic::TBarChanged(int value)
 
 		obs_transition_set_manual_torque(transition, 8.0f, 0.05f);
 		TransitionToScene(sceneSource, false, false, false, 0, true);
+		if (!slider || slider != tBar)
+			return;
 		tBarActive = true;
 	}
 
@@ -846,7 +858,7 @@ void OBSBasic::TBarChanged(int value)
 
 int OBSBasic::GetTbarPosition()
 {
-	return tBar ? tBar->value() : 0;
+	return tBarPosition.load(std::memory_order_relaxed);
 }
 
 static inline void ResetQuickTransitionText(QuickTransition *qt)
@@ -1212,7 +1224,7 @@ QMenu *OBSBasic::CreateTransitionMenu(QWidget *parent, QuickTransition *qt)
 void OBSBasic::AddQuickTransitionId(int id)
 {
 	QuickTransition *qt = GetQuickTransition(id);
-	if (!qt) {
+	if (!qt || !programOptions || !programOptions->layout()) {
 		return;
 	}
 
@@ -1372,7 +1384,7 @@ void OBSBasic::QuickTransitionRemoveClicked()
 
 void OBSBasic::ClearQuickTransitionWidgets()
 {
-	if (!IsPreviewProgramMode()) {
+	if (!IsPreviewProgramMode() || !programOptions || !programOptions->layout()) {
 		return;
 	}
 
@@ -1419,7 +1431,7 @@ void OBSBasic::EnableTransitionWidgets(bool enable)
 		ui->transitionProps->setEnabled(configurable);
 	}
 
-	if (!IsPreviewProgramMode()) {
+	if (!IsPreviewProgramMode() || !programOptions || !programOptions->layout()) {
 		return;
 	}
 

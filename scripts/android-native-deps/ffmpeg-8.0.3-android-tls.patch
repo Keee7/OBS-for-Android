@@ -1,0 +1,75 @@
+--- a/libavformat/aviobuf.c
++++ b/libavformat/aviobuf.c
+@@ -991,7 +991,8 @@
+ int ffio_copy_url_options(AVIOContext* pb, AVDictionary** avio_opts)
+ {
+     const char *opts[] = {
+-        "headers", "user_agent", "cookies", "http_proxy", "referer", "rw_timeout", "icy", NULL };
++        "headers", "user_agent", "cookies", "http_proxy", "referer", "rw_timeout", "icy",
++        "ca_file", "tls_verify", NULL };
+     const char **opt = opts;
+     uint8_t *buf = NULL;
+     int ret = 0;
+--- a/libavformat/http.c
++++ b/libavformat/http.c
+@@ -2083,12 +2083,20 @@
+     return ffurl_get_short_seek(s->hd);
+ }
+ 
++/* Let adaptive demuxers copy TLS trust settings to subsequent requests. */
++static void *http_child_next(void *obj, void *prev)
++{
++    HTTPContext *s = obj;
++    return prev ? NULL : s->hd;
++}
++
+ #define HTTP_CLASS(flavor)                          \
+ static const AVClass flavor ## _context_class = {   \
+     .class_name = # flavor,                         \
+     .item_name  = av_default_item_name,             \
+     .option     = options,                          \
+     .version    = LIBAVUTIL_VERSION_INT,            \
++    .child_next = http_child_next,                  \
+ }
+ 
+ #if CONFIG_HTTP_PROTOCOL
+--- a/libavformat/tls.h
++++ b/libavformat/tls.h
+@@ -79,7 +79,7 @@
+ 
+ #define TLS_OPTFL (AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_ENCODING_PARAM)
+ 
+-#if FF_API_NO_DEFAULT_TLS_VERIFY
++#if FF_API_NO_DEFAULT_TLS_VERIFY && !defined(__ANDROID__)
+ #define TLS_VERIFY_DEFAULT 0
+ #else
+ #define TLS_VERIFY_DEFAULT 1
+--- a/libavformat/tls_mbedtls.c
++++ b/libavformat/tls_mbedtls.c
+@@ -227,6 +227,17 @@
+             av_log(h, AV_LOG_ERROR, "mbedtls_x509_crt_parse_file for CA cert returned %d\n", ret);
+             goto fail;
+         }
++#ifdef __ANDROID__
++    } else if (shr->verify && !shr->listen) {
++        /* The Conscrypt module owns the built-in CA store on Android 14+. */
++        mbedtls_x509_crt_parse_path(&tls_ctx->ca_cert, "/apex/com.android.conscrypt/cacerts");
++        if (!tls_ctx->ca_cert.raw.p)
++            mbedtls_x509_crt_parse_path(&tls_ctx->ca_cert, "/system/etc/security/cacerts");
++        if (!tls_ctx->ca_cert.raw.p) {
++            av_log(h, AV_LOG_ERROR, "Could not load Android system CA certificates\n");
++            goto fail;
++        }
++#endif
+     }
+ 
+     // load own certificate
+@@ -294,7 +305,7 @@
+         goto fail;
+     }
+ 
+-    if (!shr->listen && !shr->numerichost) {
++    if (!shr->listen && (!shr->numerichost || shr->verify)) {
+         if ((ret = mbedtls_ssl_set_hostname(&tls_ctx->ssl_context, shr->host)) != 0) {
+             av_log(h, AV_LOG_ERROR, "mbedtls_ssl_set_hostname returned %d\n", ret);
+             goto fail;

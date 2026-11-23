@@ -1732,6 +1732,14 @@ int OBSBasic::ResetVideo()
 	ovi.gpu_conversion = true;
 	ovi.scale_type = GetScaleType(activeConfiguration);
 
+#ifdef __ANDROID__
+	const bool hdr = ovi.colorspace == VIDEO_CS_2100_PQ || ovi.colorspace == VIDEO_CS_2100_HLG;
+	if (hdr && ovi.output_format != VIDEO_FORMAT_P010 && ovi.output_format != VIDEO_FORMAT_I010) {
+		ovi.output_format = VIDEO_FORMAT_I010;
+		config_set_string(activeConfiguration, "Video", "ColorFormat", "I010");
+	}
+#endif
+
 	if (ovi.base_width < 32 || ovi.base_height < 32) {
 		ovi.base_width = 1920;
 		ovi.base_height = 1080;
@@ -1747,6 +1755,23 @@ int OBSBasic::ResetVideo()
 	}
 
 	ret = AttemptToResetVideo(&ovi);
+#ifdef __ANDROID__
+	if (ret == OBS_VIDEO_NOT_SUPPORTED && (ovi.output_format == VIDEO_FORMAT_I010 ||
+					       ovi.output_format == VIDEO_FORMAT_P010 ||
+					       ovi.output_format == VIDEO_FORMAT_P216 ||
+					       ovi.output_format == VIDEO_FORMAT_P416)) {
+		blog(LOG_WARNING, "Video profile requires 10-bit Android graphics; switching to SDR BT.709 NV12");
+		ovi.output_format = VIDEO_FORMAT_NV12;
+		ovi.colorspace = VIDEO_CS_709;
+		ovi.range = VIDEO_RANGE_PARTIAL;
+		ret = AttemptToResetVideo(&ovi);
+		if (ret == OBS_VIDEO_SUCCESS) {
+			config_set_string(activeConfiguration, "Video", "ColorFormat", "NV12");
+			config_set_string(activeConfiguration, "Video", "ColorSpace", "709");
+			config_set_string(activeConfiguration, "Video", "ColorRange", "Partial");
+		}
+	}
+#endif
 	if (ret == OBS_VIDEO_CURRENTLY_ACTIVE) {
 		blog(LOG_WARNING, "Tried to reset when already active");
 		return ret;

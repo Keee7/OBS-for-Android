@@ -71,6 +71,7 @@ OBS Studio 的 Android 平台移植版本，支持场景编辑、多来源输入
 | **WebView 浏览器源** | 基于系统 WebView 渲染并接入 GPU 纹理，支持自定义 URL、分辨率、帧率上限、CSS 注入与基本触摸交互；透明背景模式通过 ImageReader + EGLImage 实现零拷贝合成。 |
 | **音频输入与路由** | 基于 AAudio 音频引擎，支持内置麦克风、有线耳机及 USB 声卡 / 采集卡 UAC 音频输入的动态枚举与选择。 |
 | **媒体播放与硬件解码** | 支持 Android 文档 URI 输入；FFmpeg 优先选用平台硬件 MediaCodec 解码器（H.264、HEVC、VP8、VP9、AV1），初始化失败时回退到软解，AV1 使用 libaom。 |
+| **媒体源拉流** | 支持通过 OBS 媒体源拉取 HTTP/HTTPS 媒体、HLS、DASH、RTSP/RTSPS、RTMP/RTMPS、UDP、RTP、TCP、SRT 和 RIST。 |
 | **Android 共享存储录像** | 深度适配 MediaStore 与 Storage Access Framework (SAF)，可直接将混合 MP4/MOV 录制至 `Download/obs` 等公共共享目录，解决分区存储容量误判问题。 |
 | **UVC 采集卡高速通道** | 针对 USB 3.0 / SuperSpeed 1080p60 采集卡重构数据泵：独立收包线程、有界缓冲交接、Raw YUV (YUYV/NV12) 直接重组与断流自动看门狗恢复。 |
 | **响应式布局与横屏交互** | 内置基于动态断点（`952×552` 逻辑像素）的自适应布局引擎。专为横屏场景设计，在手机横屏紧凑模式（32px 行高、折叠空闲工具栏）与平板宽松触控模式（48px 行高）之间无缝切换，并对悬浮小窗与多任务分屏进行边界几何对齐。 |
@@ -104,6 +105,16 @@ OBS Studio 的 Android 平台移植版本，支持场景编辑、多来源输入
 4. **添加采集源**：
    * 点击来源面板添加“屏幕采集”，并在系统弹窗中授予录屏权限。
    * 若需采集 USB 采集卡画面，添加“UVC 摄像头”并选择对应的分辨率与 YUV 格式。
+   * 在 UVC 源属性的「色彩范围」中选择「默认」「有限」或「完整」，与采集卡实际输出的未压缩信号匹配。修改实时生效。MJPEG 按完整范围解码。
+   * Android 能识别对应的音频设备时，UVC 源会自动匹配同一张采集卡的音频，也可在源属性中按设备名称手动选择。启用输入后，混音器以源名称显示这一路音频。全新安装时默认关闭麦克风/辅助音频。
+   * 若需拉取网络流，添加“媒体源”，取消勾选“本地文件”，在“输入”中填写拉流地址。“输入格式”留空即可自动识别。若要通过 TCP 传输 RTSP 媒体，在“FFmpeg 选项”中填写 `rtsp_transport=tcp`。
+   * SRT 的 Caller 模式填写发送端地址。Listener 模式可用 `srt://0.0.0.0:9000?mode=listener` 监听手机的端口。Rendezvous 模式要求两端都设为 `mode=rendezvous`，各自填写对端 IP，并使用同一个 UDP 端口。
+
+在「设置 → 高级 → 视频」中选择「Rec. 2100 (PQ)」或「Rec. 2100 (HLG)」即可配置 10-bit HDR。搭载 Android 13 或更新版本且 MediaCodec 兼容的设备可选 **P010、有限范围、Android MediaCodec HEVC Main10**。使用 x265 或 AOM AV1 软编时选 **I010**，可省去编码前的 YUV 布局转换。Hybrid MP4 会记录色彩信息和标称峰值亮度。
+
+媒体源可保留兼容文件或网络流的 HDR 信息。Android 屏幕采集按设置中的 SDR 白电平混入 HDR 场景。取消或停止共享后，可在屏幕采集源的属性中点「请求屏幕共享授权」，重新打开系统授权窗口。
+
+兼容设备在启用 HDR 后会将普通 MediaCodec HEVC 选项自动切到 Main10，原有配置也适用。
 
 ---
 
@@ -126,7 +137,7 @@ adb logcat -v threadtime -d -s 'OBS-MediaCodec:*'
 
 ## 已知局限与计划
 
-* **HDR / 10-bit**：当前主要支持 8-bit SDR BT.709 硬件管线，暂未开启 HDR/Main10。
+* **HDR / 10-bit**：合成需要 GPU 支持 16-bit 归一化纹理和浮点渲染目标。HDR 媒体源优先协商 MediaCodec P010 输出，初始化失败时使用保留位深的软件解码。UVC 的 P010 输入需要采集卡支持。预览显示和 Android 屏幕采集使用 SDR。
 * **浏览器源高级能力**：暂未集成独立网页音频通道及多指触控手势。
 * **推流服务集成**：Twitch / YouTube 账户快捷登录暂未启用，请使用“自定义”服务输入 RTMP 服务器地址与推流码。
 

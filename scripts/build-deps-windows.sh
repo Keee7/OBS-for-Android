@@ -58,15 +58,21 @@ prepare() {
 }
 prepare "$SOURCES_ROOT/x264" "$WORK_ROOT/src/x264"
 patch_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-native-deps"
-patch_file="$patch_dir/ffmpeg-8.0.3-mediacodec-android.patch"
-patch_digest=$(sha256sum < "$patch_file")
+patch_files=(
+  "$patch_dir/ffmpeg-8.0.3-mediacodec-android.patch"
+  "$patch_dir/ffmpeg-8.0.3-android-tls.patch"
+  "$patch_dir/ffmpeg-8.0.3-srt-rendezvous.patch"
+)
+patch_digest=$(cat "${patch_files[@]}" | sha256sum)
 ffmpeg_work="$WORK_ROOT/src/ffmpeg-8.0.3-${patch_digest%% *}"
 prepare "$SOURCES_ROOT/ffmpeg-8.0.3" "$ffmpeg_work"
-if patch -d "$ffmpeg_work" -p1 -R --force --dry-run --silent < "$patch_file" >/dev/null 2>&1; then
-  echo "Already applied: $patch_file"
-else
-  patch -d "$ffmpeg_work" -p1 --force < "$patch_file"
-fi
+for patch_file in "${patch_files[@]}"; do
+  if patch -d "$ffmpeg_work" -p1 -R --force --dry-run --silent < "$patch_file" >/dev/null 2>&1; then
+    echo "Already applied: $patch_file"
+  else
+    patch -d "$ffmpeg_work" -p1 --force < "$patch_file"
+  fi
+done
 prefix="$WORK_ROOT/prefix"
 targets=" ${*:-x264 x265 aom ffmpeg} "
 # CMake's Android toolchain uses the original NDK, not the copied sysroot.
@@ -91,14 +97,29 @@ if [[ "$targets" == *' x265 '* ]]; then
   if ! patch -d "$WORK_ROOT/src/x265" -p1 -R --force --dry-run --silent < "$x265_patch" >/dev/null 2>&1; then
     patch -d "$WORK_ROOT/src/x265" -p1 --force < "$x265_patch"
   fi
-  cmake_android "$WORK_ROOT/src/x265/source" "$WORK_ROOT/x265-build" \
-    -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=ON -DENABLE_TESTS=OFF -DHIGH_BIT_DEPTH=OFF
+  main10="$WORK_ROOT/x265-main10-build"
+  x265_common=(-DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=ON -DENABLE_TESTS=OFF)
+  cmake_android "$WORK_ROOT/src/x265/source" "$main10" "${x265_common[@]}" \
+    -DHIGH_BIT_DEPTH=ON -DEXPORT_C_API=OFF -DCMAKE_INSTALL_PREFIX="$(cygpath -m "$main10/install")"
+  cmake_android "$WORK_ROOT/src/x265/source" "$WORK_ROOT/x265-build" "${x265_common[@]}" \
+    -DHIGH_BIT_DEPTH=OFF -DEXTRA_LIB=x265_main10 -DLINKED_10BIT=ON
+  cp "$prefix/lib/libx265.a" "$main10/libx265_main8.a"
+  (cd "$main10" && "$LLVM_BIN/llvm-ar.exe" -M <<'EOF'
+CREATE libx265-multilib.a
+ADDLIB libx265_main8.a
+ADDLIB libx265.a
+SAVE
+END
+EOF
+  )
+  cp "$main10/libx265-multilib.a" "$prefix/lib/libx265.a"
   # Correct x265 3.6's malformed -l-l:libunwind.a entries under NDK r30.
   sed -i 's/^Libs.private:.*/Libs.private: -lc++_static -lc++abi -lunwind -lm -ldl/' "$prefix/lib/pkgconfig/x265.pc"
 fi
 if [[ "$targets" == *' aom '* ]]; then
   cmake_android "$SOURCES_ROOT/libaom-3.10.0" "$WORK_ROOT/aom-build" \
-    -DENABLE_DOCS=OFF -DENABLE_TESTS=OFF -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_DECODER=1
+    -DENABLE_DOCS=OFF -DENABLE_TESTS=OFF -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_DECODER=1 \
+    -DCONFIG_AV1_HIGHBITDEPTH=1
 fi
 if [[ "$targets" == *' x264 '* ]]; then
   (cd "$WORK_ROOT/src/x264"
@@ -110,7 +131,11 @@ if [[ "$targets" == *' x264 '* ]]; then
    make install-lib-static)
 fi
 if [[ "$targets" == *' ffmpeg '* ]]; then
-  for required in mbedtls-3.6.4 srt-1.5.4; do
+  source "$(dirname "$patch_dir")/../deps-android/versions.sh"
+  cjson="cJSON-$(dep_version cjson)"
+  librist="librist-v$(dep_version librist)"
+  libxml2="libxml2-$(dep_version libxml2)"
+  for required in mbedtls-3.6.4 srt-1.5.4 "$cjson" "$libxml2"; do
     test -f "$SOURCES_ROOT/$required/CMakeLists.txt" || { echo "Missing source: $required" >&2; exit 1; }
   done
   cmake_android "$SOURCES_ROOT/mbedtls-3.6.4" "$WORK_ROOT/mbedtls-build" \
@@ -120,11 +145,19 @@ if [[ "$targets" == *' ffmpeg '* ]]; then
     -DMBEDTLS_PREFIX="$(cygpath -m "$prefix")"
   sed -i 's/^Libs.private:.*/Libs.private: -lmbedtls -lmbedx509 -lmbedcrypto -lc++_static -lc++abi -lunwind -lm -ldl/' \
     "$prefix/lib/pkgconfig/srt.pc"
+  test -f "$SOURCES_ROOT/$librist/meson.build" || { echo "Missing source: $librist" >&2; exit 1; }
+  cmake_android "$SOURCES_ROOT/$cjson" "$WORK_ROOT/cjson-build" -DENABLE_CJSON_TEST=OFF -DENABLE_CJSON_UTILS=OFF
+  cmake_android "$SOURCES_ROOT/$libxml2" "$WORK_ROOT/libxml2-build" \
+    -DLIBXML2_WITH_PROGRAMS=OFF -DLIBXML2_WITH_TESTS=OFF -DLIBXML2_WITH_PYTHON=OFF \
+    -DLIBXML2_WITH_ICONV=OFF -DLIBXML2_WITH_ICU=OFF -DLIBXML2_WITH_MODULES=OFF \
+    -DLIBXML2_WITH_ZLIB=OFF -DLIBXML2_WITH_LZMA=OFF
+  bash "$patch_dir/build-librist.sh" "$SOURCES_ROOT/$librist" "$prefix" "$LLVM_BIN" "aarch64-linux-android$API" "$JOBS"
   (cd "$ffmpeg_work"
    ./configure --prefix="$prefix" --enable-cross-compile --target-os=android --arch=aarch64 \
      --cc="$CC" --ar="$AR" --ranlib="$RANLIB" --strip="$STRIP" --enable-static --disable-shared \
      --disable-doc --disable-programs --disable-debug --disable-stripping --disable-autodetect \
-     --enable-gpl --enable-libx265 --enable-libaom --enable-decoder=libaom_av1 --enable-libsrt --pkg-config-flags=--static \
+     --enable-gpl --enable-version3 --enable-libx265 --enable-libaom --enable-decoder=libaom_av1 \
+     --enable-libsrt --enable-librist --enable-libxml2 --enable-mbedtls --pkg-config-flags=--static \
      --enable-mediacodec --enable-jni --enable-avcodec --enable-avformat --enable-avutil \
      --enable-swscale --enable-swresample --enable-avfilter --enable-avdevice --enable-zlib \
      --enable-asm --enable-inline-asm --enable-neon --disable-vulkan --disable-v4l2-m2m \

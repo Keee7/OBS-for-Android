@@ -39,7 +39,10 @@ void OBSBasic::CreateProgramDisplay()
 	program->setContextMenuPolicy(Qt::CustomContextMenu);
 	connect(program.data(), &QWidget::customContextMenuRequested, this, &OBSBasic::ProgramViewContextMenuRequested);
 
-	auto displayResize = [this]() {
+	auto displayResize = [this, display = program]() {
+		if (!display || display != program || !IsPreviewProgramMode())
+			return;
+
 		struct obs_video_info ovi;
 
 		if (obs_get_video_info(&ovi)) {
@@ -149,7 +152,8 @@ void OBSBasic::CreateProgramOptions()
 
 		auto showToolTip = [&]() {
 			QAction *act = menu.activeAction();
-			QToolTip::showText(QCursor::pos(), act->toolTip(), &menu, menu.actionGeometry(act));
+			if (act)
+				QToolTip::showText(QCursor::pos(), act->toolTip(), &menu, menu.actionGeometry(act));
 		};
 
 		action = menu.addAction(QTStr("QuickTransitions.DuplicateScene"));
@@ -204,7 +208,6 @@ void OBSBasic::SetPreviewProgramMode(bool enabled)
 void OBSBasic::ApplyPreviewProgramMode(bool enabled)
 {
 	os_atomic_set_bool(&previewProgramMode, enabled);
-	emit PreviewProgramModeChanged(enabled);
 
 	if (IsPreviewProgramMode()) {
 		if (!previewEnabled) {
@@ -258,8 +261,6 @@ void OBSBasic::ApplyPreviewProgramMode(bool enabled)
 
 		sizeObserver = new PreviewProgramSizeObserver(ui->preview, program, this);
 
-		OnEvent(OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED);
-
 		blog(LOG_INFO, "Switched to Preview/Program mode");
 		blog(LOG_INFO, "-----------------------------"
 			       "-------------------");
@@ -271,7 +272,7 @@ void OBSBasic::ApplyPreviewProgramMode(bool enabled)
 		}
 		if (program) {
 			program->disconnect(this);
-			obs_display_set_enabled(program->GetDisplay(), false);
+			program->DestroyDisplay();
 		}
 		if (tBar)
 			tBar->disconnect(this);
@@ -298,6 +299,7 @@ void OBSBasic::ApplyPreviewProgramMode(bool enabled)
 		program.clear();
 		transitionButton.clear();
 		tBar = nullptr;
+		tBarPosition.store(0, std::memory_order_relaxed);
 
 		// A nested click can arrive while Qt is still showing these widgets.
 		for (QWidget *widget : {optionsWidget, oldProgramWidget}) {
@@ -331,8 +333,6 @@ void OBSBasic::ApplyPreviewProgramMode(bool enabled)
 		ui->transitions->setEnabled(true);
 		tBarActive = false;
 
-		OnEvent(OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED);
-
 		blog(LOG_INFO, "Switched to regular Preview mode");
 		blog(LOG_INFO, "-----------------------------"
 			       "-------------------");
@@ -340,6 +340,8 @@ void OBSBasic::ApplyPreviewProgramMode(bool enabled)
 
 	ResetUI();
 	UpdateTitleBar();
+	emit PreviewProgramModeChanged(enabled);
+	OnEvent(enabled ? OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED : OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED);
 }
 
 void OBSBasic::RenderProgram(void *data, uint32_t, uint32_t)

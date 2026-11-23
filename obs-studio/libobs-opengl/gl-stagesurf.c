@@ -39,6 +39,10 @@ static bool create_pixel_pack_buffer(struct gs_stage_surface *surf)
 		return false;
 
 	size = stage_row_stride(surf);
+#ifdef __ANDROID__
+	if (surf->unpacked)
+		size = (GLsizeiptr)surf->width * 4 * sizeof(uint16_t);
+#endif
 	size *= surf->height;
 
 	glBufferData(GL_PIXEL_PACK_BUFFER, size, 0, GL_DYNAMIC_READ);
@@ -66,6 +70,13 @@ gs_stagesurf_t *device_stagesurface_create(gs_device_t *device, uint32_t width, 
 	surf->gl_internal_format = convert_gs_internal_format(color_format);
 	surf->gl_type = get_gl_format_type(color_format);
 	surf->bytes_per_pixel = gs_get_format_bpp(color_format) / 8;
+#ifdef __ANDROID__
+	if ((color_format == GS_R16 && !device->read_r16_direct) ||
+	    (color_format == GS_RG16 && !device->read_rg16_direct)) {
+		surf->gl_format = GL_RGBA;
+		surf->unpacked = bmalloc((size_t)stage_row_stride(surf) * height);
+	}
+#endif
 
 	if (!create_pixel_pack_buffer(surf)) {
 		blog(LOG_ERROR, "device_stagesurface_create (GL) failed");
@@ -81,6 +92,9 @@ void gs_stagesurface_destroy(gs_stagesurf_t *stagesurf)
 	if (stagesurf) {
 		if (stagesurf->pack_buffer)
 			gl_delete_buffers(1, &stagesurf->pack_buffer);
+#ifdef __ANDROID__
+		bfree(stagesurf->unpacked);
+#endif
 
 		bfree(stagesurf);
 	}
@@ -219,12 +233,30 @@ bool gs_stagesurface_map(gs_stagesurf_t *stagesurf, uint8_t **data, uint32_t *li
 		goto fail;
 
 	*data = gl_map_buffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-	if (!gl_success("glMapBuffer"))
+	const bool mapped = gl_success("glMapBuffer") && *data;
+	gl_bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
+	if (!mapped)
 		goto fail;
 
-	gl_bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
-
 	*linesize = stage_row_stride(stagesurf);
+#ifdef __ANDROID__
+	if (stagesurf->unpacked) {
+		/* GLES guarantees RGBA/UNSIGNED_SHORT for a 16-bit UNORM read buffer. */
+		const uint16_t *src = (const uint16_t *)*data;
+		const size_t channels = stagesurf->bytes_per_pixel / sizeof(uint16_t);
+		for (uint32_t y = 0; y < stagesurf->height; y++) {
+			uint16_t *dst = stagesurf->unpacked + (size_t)y * (*linesize / sizeof(uint16_t));
+			if (channels == 1) {
+				for (uint32_t x = 0; x < stagesurf->width; x++, src += 4)
+					*dst++ = src[0];
+			} else {
+				for (uint32_t x = 0; x < stagesurf->width; x++, src += 4, dst += 2)
+					memcpy(dst, src, 2 * sizeof(uint16_t));
+			}
+		}
+		*data = (uint8_t *)stagesurf->unpacked;
+	}
+#endif
 	return true;
 
 fail:

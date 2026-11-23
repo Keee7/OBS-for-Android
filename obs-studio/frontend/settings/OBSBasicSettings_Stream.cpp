@@ -442,20 +442,13 @@ void OBSBasicSettings::UpdateKeyLink()
 		ui->streamKeyLabel->setText(QTStr("Basic.AutoConfig.StreamPage.StreamKey"));
 		ui->streamKeyLabel->setToolTip("");
 	} else {
-		/* add tooltips for stream key, user, password fields */
-		QString file = !App()->IsThemeDark() ? ":/res/images/help.svg" : ":/res/images/help_light.svg";
-		QString lStr = "<html>%1 <img src='%2' style=' \
-				vertical-align: bottom;  \
-				' /></html>";
-
-		ui->streamKeyLabel->setText(lStr.arg(QTStr("Basic.AutoConfig.StreamPage.StreamKey"), file));
-		ui->streamKeyLabel->setToolTip(QTStr("Basic.AutoConfig.StreamPage.StreamKey.ToolTip"));
-
-		ui->authUsernameLabel->setText(lStr.arg(QTStr("Basic.Settings.Stream.Custom.Username"), file));
-		ui->authUsernameLabel->setToolTip(QTStr("Basic.Settings.Stream.Custom.Username.ToolTip"));
-
-		ui->authPwLabel->setText(lStr.arg(QTStr("Basic.Settings.Stream.Custom.Password"), file));
-		ui->authPwLabel->setToolTip(QTStr("Basic.Settings.Stream.Custom.Password.ToolTip"));
+		const bool dark = App()->IsThemeDark();
+		SetLabelHelp(ui->streamKeyLabel, QTStr("Basic.AutoConfig.StreamPage.StreamKey"),
+			     QTStr("Basic.AutoConfig.StreamPage.StreamKey.ToolTip"), dark);
+		SetLabelHelp(ui->authUsernameLabel, QTStr("Basic.Settings.Stream.Custom.Username"),
+			     QTStr("Basic.Settings.Stream.Custom.Username.ToolTip"), dark);
+		SetLabelHelp(ui->authPwLabel, QTStr("Basic.Settings.Stream.Custom.Password"),
+			     QTStr("Basic.Settings.Stream.Custom.Password.ToolTip"), dark);
 	}
 
 	if (QString(streamKeyLink).isNull() || QString(streamKeyLink).isEmpty()) {
@@ -1796,6 +1789,10 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 	if (service_supports_encoder(vcodecs, "android_mediacodec_hevc") &&
 	    OBSAndroidCbrEncoderAvailable("android_mediacodec_hevc"))
 		ui->simpleOutStrEncoder->addItem(QStringLiteral("Android MediaCodec HEVC (H.265)"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC));
+	if (service_supports_encoder(vcodecs, SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10) &&
+	    OBSAndroidCbrEncoderAvailable(SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10))
+		ui->simpleOutStrEncoder->addItem(QT_UTF8(obs_encoder_get_display_name(SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10)),
+						QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_HEVC_MAIN10));
 	if (service_supports_encoder(vcodecs, "android_mediacodec_av1") &&
 	    OBSAndroidCbrEncoderAvailable("android_mediacodec_av1"))
 		ui->simpleOutStrEncoder->addItem(QStringLiteral("Android MediaCodec AV1"), QString(SIMPLE_ENCODER_ANDROID_MEDIACODEC_AV1));

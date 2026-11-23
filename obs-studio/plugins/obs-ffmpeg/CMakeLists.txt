@@ -2,17 +2,6 @@ cmake_minimum_required(VERSION 3.28...3.30)
 
 option(ENABLE_FFMPEG_LOGGING "Enables obs-ffmpeg logging" OFF)
 
-# 阶段 4 P-6：Android 档强制关掉"原生 SRT/RIST mpegts 输出"。理由是实测具体的 ——
-# cmake/dependencies.cmake 在该选项为 ON 时要求 Librist + Libsrt 两个 target，缺任一个就
-# FATAL_ERROR（"Disable this error by setting ENABLE_NEW_MPEGTS_OUTPUT to OFF"，它自己写的退路），
-# 而 deps-android/prebuilt/<abi>/lib 里两个都没有（只有 mbedtls/curl/jansson/x264/ffmpeg/…）。
-# 代价：obs-ffmpeg-mpegts.c 不进编译。`ffmpeg_mpegts_muxer` 这个符号**不会因此消失** ——
-# 它由无条件编译的 obs-ffmpeg-mux.c:884 `#ifndef NEW_MPEGTS_OUTPUT` 那一支提供，
-# 也就是 mpegts 回到"经 ffmpeg_muxer 那条路"（而那条路的伴生进程在 Android 起不来，见下面 ffmpeg-mux 那段）。
-if(OS_ANDROID)
-  set(ENABLE_NEW_MPEGTS_OUTPUT OFF)
-endif()
-
 option(ENABLE_NEW_MPEGTS_OUTPUT "Use native SRT/RIST mpegts output" ON)
 
 if(OS_LINUX OR OS_WINDOWS)
@@ -24,13 +13,7 @@ include(cmake/dependencies.cmake)
 add_library(obs-ffmpeg MODULE)
 add_library(OBS::ffmpeg ALIAS obs-ffmpeg)
 
-# 决策 8：Android 上不建 `obs-ffmpeg-mux` 这个**伴生可执行文件**。它本来是 `ffmpeg_muxer`
-# 输出通过 os_process_start + 命名管道喂数据的子进程，Android（尤其目标设备上的 SELinux/无
-# fork+exec 语义）起不来。这里只裁掉 target —— 没有任何 target 链 `OBS::ffmpeg-mux`（它是
-# 独立可执行文件，不是 INTERFACE 目标，不会像 rtmp-services 那次跳过 file-updater 那样连带
-# 丢传递依赖），所以插件侧零链接影响；代价是 `ffmpeg_muxer` 这个输出**注册但一启动就报错**
-# （obs-ffmpeg-mux.c 本体仍无条件编译，见上面 NEW_MPEGTS_OUTPUT 那段）。⇒ 录制必须走
-# obs-outputs 的原生容器（默认 `hybrid_mp4` → `mp4_output`，P-5 一节已实测那条映射成立）。
+# Android uses native SRT/RIST muxing and Hybrid MP4/MOV recording in process.
 if(NOT OS_ANDROID)
   add_subdirectory(ffmpeg-mux)
 endif()

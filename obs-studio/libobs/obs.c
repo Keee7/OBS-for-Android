@@ -1526,6 +1526,16 @@ static inline bool size_valid(uint32_t width, uint32_t height)
 	return (width >= OBS_SIZE_MIN && height >= OBS_SIZE_MIN && width <= OBS_SIZE_MAX && height <= OBS_SIZE_MAX);
 }
 
+#ifdef __ANDROID__
+static bool android_has_10bit_graphics(void)
+{
+	obs_enter_graphics();
+	const bool available = gs_p010_available();
+	obs_leave_graphics();
+	return available;
+}
+#endif
+
 int obs_reset_video(struct obs_video_info *ovi)
 {
 	if (!obs)
@@ -1537,6 +1547,16 @@ int obs_reset_video(struct obs_video_info *ovi)
 
 	if (!size_valid(ovi->output_width, ovi->output_height) || !size_valid(ovi->base_width, ovi->base_height))
 		return OBS_VIDEO_INVALID_PARAM;
+
+#ifdef __ANDROID__
+	const bool high_precision = ovi->output_format == VIDEO_FORMAT_I010 || ovi->output_format == VIDEO_FORMAT_P010 ||
+				    ovi->output_format == VIDEO_FORMAT_P216 || ovi->output_format == VIDEO_FORMAT_P416;
+	const bool hdr = ovi->colorspace == VIDEO_CS_2100_PQ || ovi->colorspace == VIDEO_CS_2100_HLG;
+	if (hdr && !high_precision)
+		return OBS_VIDEO_INVALID_PARAM;
+	if (high_precision && obs->video.graphics && !android_has_10bit_graphics())
+		return OBS_VIDEO_NOT_SUPPORTED;
+#endif
 
 	stop_video();
 	obs_free_canvas_mixes();
@@ -1552,6 +1572,10 @@ int obs_reset_video(struct obs_video_info *ovi)
 			obs_free_graphics();
 			return errorcode;
 		}
+#ifdef __ANDROID__
+		if (high_precision && !android_has_10bit_graphics())
+			return OBS_VIDEO_NOT_SUPPORTED;
+#endif
 	}
 
 	const char *scale_type_name = "";

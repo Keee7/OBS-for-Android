@@ -97,7 +97,7 @@ static unsigned hevc_ue(struct hevc_bits *b)
 	return ((1u << zeros) - 1) + hevc_read(b, zeros);
 }
 /* Parse only through the chroma and bit-depth fields, not the full SPS. */
-static bool hevc_sps_8bit_420(const uint8_t *p, size_t n)
+static bool hevc_sps_420(const uint8_t *p, size_t n, bool main10)
 {
 	size_t cursor = 0, start, end;
 	while (hevc_next_nal(p, n, &cursor, &start, &end)) {
@@ -116,10 +116,10 @@ static bool hevc_sps_8bit_420(const uint8_t *p, size_t n)
 		hevc_skip(&b, 1); /* general_tier_flag */
 		unsigned profile_idc = hevc_read(&b, 5);
 		unsigned compatibility = hevc_read(&b, 32);
-		/* HEVC Annex A profile numbers apply to profile_space zero.
-		 * Flag[1] is the second bit in bitstream order (bit 30). */
+		const unsigned expected_profile = main10 ? 2 : 1;
+		const unsigned expected_depth = main10 ? 2 : 0;
 		if (b.failed || profile_space != 0 ||
-		    (profile_idc != 1 && !(compatibility & (1u << 30))))
+		    (profile_idc != expected_profile && !(compatibility & (1u << (31 - expected_profile)))))
 			return false;
 		hevc_skip(&b, 56); /* remaining constraints and general_level_idc */
 		unsigned profile[7] = {0}, level[7] = {0};
@@ -139,7 +139,8 @@ static bool hevc_sps_8bit_420(const uint8_t *p, size_t n)
 		if (hevc_bit(&b))
 			for (unsigned i = 0; i < 4; ++i) hevc_ue(&b);
 		unsigned luma = hevc_ue(&b), chroma_depth = hevc_ue(&b);
-		return !b.failed && id <= 15 && chroma == 1 && width && height && luma == 0 && chroma_depth == 0;
+		return !b.failed && id <= 15 && chroma == 1 && width && height && luma == expected_depth &&
+		       chroma_depth == expected_depth;
 	}
 	return false;
 }
