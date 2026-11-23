@@ -11,20 +11,41 @@ import android.util.Log;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
+import java.net.ConnectException;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 public final class ObsUpdateHost {
     private static final String TAG = "ObsUpdateHost";
-    private static final int CONNECT_TIMEOUT_MS = 3500;
-    private static final int READ_TIMEOUT_MS = 4500;
+    private static final int CONNECT_TIMEOUT_MS = 2500;
+    private static final int READ_TIMEOUT_MS = 3500;
     private static final int MAX_BODY_BYTES = 256 * 1024;
     private static final String USER_AGENT = "OBS-for-Android-Updater";
+    private static final Object connectionLock = new Object();
+    private static volatile HttpURLConnection activeConnection;
+    private static volatile boolean cancelled = false;
 
     private ObsUpdateHost() {
+    }
+
+    public static void cancelChecks() {
+        cancelled = true;
+        HttpURLConnection conn;
+        synchronized (connectionLock) {
+            conn = activeConnection;
+        }
+        if (conn != null) {
+            try {
+                conn.disconnect();
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     public static String installedVersionName(Context context) {
@@ -61,8 +82,12 @@ public final class ObsUpdateHost {
         if (repository == null || repository.trim().isEmpty()) {
             return buildError("Missing repository name");
         }
+        if (cancelled || Thread.currentThread().isInterrupted()) {
+            return buildError("Cancelled");
+        }
         String repo = repository.trim();
         String apiError = null;
+        boolean skipRedirectFallback = false;
 
         try {
             JSONObject apiResult = fetchFromGitHubApi(repo);
@@ -71,7 +96,15 @@ public final class ObsUpdateHost {
             }
         } catch (Exception e) {
             apiError = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
-            Log.w(TAG, "GitHub API release check failed, trying web redirect fallback: " + apiError);
+            skipRedirectFallback = cancelled || Thread.currentThread().isInterrupted() ||
+                                   e instanceof SocketTimeoutException || e instanceof InterruptedIOException ||
+                                   e instanceof UnknownHostException || e instanceof ConnectException;
+            Log.w(TAG, "GitHub API release check failed"
+                       + (skipRedirectFallback ? ": " : ", trying web redirect fallback: ") + apiError);
+        }
+
+        if (skipRedirectFallback || cancelled || Thread.currentThread().isInterrupted()) {
+            return buildError(apiError != null ? apiError : "Cancelled");
         }
 
         try {
@@ -112,11 +145,21 @@ public final class ObsUpdateHost {
     }
 
     private static JSONObject fetchFromGitHubApi(String repo) throws IOException, JSONException {
+        if (cancelled || Thread.currentThread().isInterrupted()) {
+            throw new IOException("Cancelled");
+        }
         String apiUrl = "https://api.github.com/repos/" + repo + "/releases/latest";
         HttpURLConnection conn = null;
         try {
             URL url = new URL(apiUrl);
             conn = (HttpURLConnection) url.openConnection();
+            synchronized (connectionLock) {
+                activeConnection = conn;
+            }
+            if (cancelled || Thread.currentThread().isInterrupted()) {
+                conn.disconnect();
+                throw new IOException("Cancelled");
+            }
             conn.setRequestMethod("GET");
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
             conn.setReadTimeout(READ_TIMEOUT_MS);
@@ -153,6 +196,11 @@ public final class ObsUpdateHost {
 
             return buildSuccess(tag, version, name, htmlUrl, notes);
         } finally {
+            synchronized (connectionLock) {
+                if (activeConnection == conn) {
+                    activeConnection = null;
+                }
+            }
             if (conn != null) {
                 conn.disconnect();
             }
@@ -160,11 +208,21 @@ public final class ObsUpdateHost {
     }
 
     private static JSONObject fetchFromReleasesRedirect(String repo) throws IOException, JSONException {
+        if (cancelled || Thread.currentThread().isInterrupted()) {
+            throw new IOException("Cancelled");
+        }
         String webUrl = "https://github.com/" + repo + "/releases/latest";
         HttpURLConnection conn = null;
         try {
             URL url = new URL(webUrl);
             conn = (HttpURLConnection) url.openConnection();
+            synchronized (connectionLock) {
+                activeConnection = conn;
+            }
+            if (cancelled || Thread.currentThread().isInterrupted()) {
+                conn.disconnect();
+                throw new IOException("Cancelled");
+            }
             conn.setRequestMethod("HEAD");
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
             conn.setReadTimeout(READ_TIMEOUT_MS);
@@ -202,6 +260,11 @@ public final class ObsUpdateHost {
             String version = normalizeVersion(tag);
             return buildSuccess(tag, version, tag, location, "");
         } finally {
+            synchronized (connectionLock) {
+                if (activeConnection == conn) {
+                    activeConnection = null;
+                }
+            }
             if (conn != null) {
                 conn.disconnect();
             }

@@ -1551,9 +1551,14 @@ void OBSBasic::applicationShutdown() noexcept
 	QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 #endif
 
+#ifdef __ANDROID__
+	extern void CancelAndroidUpdateChecks();
+	CancelAndroidUpdateChecks();
+#else
 	if (updateCheckThread && updateCheckThread->isRunning()) {
 		updateCheckThread->wait();
 	}
+#endif
 
 	if (patronJsonThread && patronJsonThread->isRunning()) {
 		patronJsonThread->wait();
@@ -2154,9 +2159,14 @@ void OBSBasic::closeWindow()
 	if (whatsNewInitThread) {
 		whatsNewInitThread->wait();
 	}
+#ifdef __ANDROID__
+	extern void CancelAndroidUpdateChecks();
+	CancelAndroidUpdateChecks();
+#else
 	if (updateCheckThread) {
 		updateCheckThread->wait();
 	}
+#endif
 #ifndef __ANDROID__
 	if (logUploadThread) {
 		logUploadThread->wait();

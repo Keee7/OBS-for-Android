@@ -56,6 +56,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <atomic>
 #include <vector>
 #endif
 
@@ -70,6 +71,9 @@ namespace {
 
 constexpr auto ANDROID_GITHUB_REPO = "Keee7/OBS-for-Android";
 constexpr auto ANDROID_DEFAULT_RELEASE_URL = "https://github.com/Keee7/OBS-for-Android/releases/latest";
+
+std::atomic<bool> g_androidUpdateInFlight{false};
+std::atomic<bool> g_androidShutdownRequested{false};
 
 struct ParsedSemVer {
 	std::vector<int> core;
@@ -358,6 +362,12 @@ void ShowAndroidUpdateResultDialog(QWidget *parent, bool manualUpdate, const QSt
 }
 
 } // namespace
+
+void CancelAndroidUpdateChecks()
+{
+	g_androidShutdownRequested.store(true);
+	QJniObject::callStaticMethod<void>("com/obsproject/studio/ObsUpdateHost", "cancelChecks", "()V");
+}
 #endif
 struct QCefCookieManager;
 
@@ -514,7 +524,12 @@ void OBSBasic::TimedCheckForUpdates()
 		CheckForUpdates(false);
 	}
 #elif defined(__ANDROID__)
-	QTimer::singleShot(800, this, [this]() { CheckForUpdates(false); });
+	QPointer<OBSBasic> weakThis(this);
+	QTimer::singleShot(800, this, [weakThis]() {
+		if (!weakThis || g_androidShutdownRequested.load())
+			return;
+		weakThis->CheckForUpdates(false);
+	});
 #endif
 }
 
@@ -541,10 +556,11 @@ void OBSBasic::CheckForUpdates(bool manualUpdate)
 	updateCheckThread.reset(mut);
 	updateCheckThread->start();
 #elif defined(__ANDROID__)
-	if (App()->IsUpdaterDisabled()) {
+	if (App()->IsUpdaterDisabled() || g_androidShutdownRequested.load()) {
 		return;
 	}
-	if (updateCheckThread && updateCheckThread->isRunning()) {
+	bool expected = false;
+	if (!g_androidUpdateInFlight.compare_exchange_strong(expected, true)) {
 		return;
 	}
 	if (ui->actionCheckForUpdates) {
@@ -553,26 +569,29 @@ void OBSBasic::CheckForUpdates(bool manualUpdate)
 
 	const QString currentVersion = GetAndroidInstalledVersionName();
 	const QPointer<OBSBasic> weakThis(this);
-	updateCheckThread.reset(QThread::create([weakThis, manualUpdate, currentVersion]() {
+	QThread *worker = QThread::create([weakThis, manualUpdate, currentVersion]() {
 		const QJniObject repoArg = QJniObject::fromString(QString::fromUtf8(ANDROID_GITHUB_REPO));
 		const QJniObject jsonObj = QJniObject::callStaticObjectMethod(
 			"com/obsproject/studio/ObsUpdateHost", "fetchLatestRelease",
 			"(Ljava/lang/String;)Ljava/lang/String;", repoArg.object<jstring>());
 		const QString rawJson = jsonObj.isValid() ? jsonObj.toString() : QString();
+		g_androidUpdateInFlight.store(false);
 
-		if (!weakThis)
+		if (!weakThis || g_androidShutdownRequested.load())
 			return;
 		QMetaObject::invokeMethod(
 			weakThis,
 			[weakThis, manualUpdate, currentVersion, rawJson]() {
-				if (!weakThis)
+				if (!weakThis || g_androidShutdownRequested.load())
 					return;
 				weakThis->updateCheckFinished();
 				ShowAndroidUpdateResultDialog(weakThis.data(), manualUpdate, currentVersion, rawJson);
 			},
 			Qt::QueuedConnection);
-	}));
-	updateCheckThread->start();
+	});
+	worker->setParent(nullptr);
+	connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+	worker->start();
 #else
 	UNUSED_PARAMETER(manualUpdate);
 #endif
