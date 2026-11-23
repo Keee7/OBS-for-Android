@@ -248,10 +248,53 @@ static obs_properties_t *ffmpeg_source_getproperties(void *data)
 	return props;
 }
 
+static bool should_redact_input(const char *input, bool is_local_file)
+{
+	if (!input || !*input)
+		return false;
+	if (!is_local_file)
+		return true;
+	return strstr(input, "://") != NULL && strncmp(input, "content://", 10) != 0 &&
+	       strncmp(input, "file://", 7) != 0;
+}
+
+static void redact_input_for_log(const char *input, bool is_local_file, struct dstr *out)
+{
+	if (!input || !*input) {
+		dstr_copy(out, "(null)");
+		return;
+	}
+	if (!should_redact_input(input, is_local_file)) {
+		dstr_copy(out, input);
+		return;
+	}
+	const char *sep = strstr(input, "://");
+	if (sep && sep > input) {
+		bool valid_scheme = true;
+		for (const char *p = input; p < sep; ++p) {
+			const unsigned char ch = (unsigned char)*p;
+			const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+					(ch >= '0' && ch <= '9') || ch == '+' || ch == '-' || ch == '.';
+			if (!ok) {
+				valid_scheme = false;
+				break;
+			}
+		}
+		if (valid_scheme) {
+			dstr_printf(out, "%.*s://<redacted>", (int)(sep - input), input);
+			return;
+		}
+	}
+	dstr_copy(out, "<redacted>");
+}
+
 static void dump_source_info(struct ffmpeg_source *s, const char *input, const char *input_format)
 {
 	if (!s->log_changes)
 		return;
+	struct dstr safe_input = {0};
+	redact_input_for_log(input, s->is_local_file, &safe_input);
+	const char *safe_options = (s->ffmpeg_options && *s->ffmpeg_options) ? "<redacted>" : "(null)";
 	FF_BLOG(LOG_INFO,
 		"settings:\n"
 		"\tinput:                   %s\n"
@@ -265,10 +308,11 @@ static void dump_source_info(struct ffmpeg_source *s, const char *input, const c
 		"\tclose_when_inactive:     %s\n"
 		"\tfull_decode:             %s\n"
 		"\tffmpeg_options:          %s",
-		input ? input : "(null)", input_format ? input_format : "(null)", s->speed_percent,
+		safe_input.array ? safe_input.array : "(null)", input_format ? input_format : "(null)", s->speed_percent,
 		s->is_looping ? "yes" : "no", s->is_linear_alpha ? "yes" : "no", s->is_hw_decoding ? "yes" : "no",
 		s->is_clear_on_media_end ? "yes" : "no", s->restart_on_activate ? "yes" : "no",
-		s->close_when_inactive ? "yes" : "no", s->full_decode ? "yes" : "no", s->ffmpeg_options);
+		s->close_when_inactive ? "yes" : "no", s->full_decode ? "yes" : "no", safe_options);
+	dstr_free(&safe_input);
 }
 
 static inline void set_cpu_video_size(struct ffmpeg_source *s, const struct obs_source_frame *f)

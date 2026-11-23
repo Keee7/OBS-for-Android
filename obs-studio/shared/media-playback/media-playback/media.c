@@ -396,6 +396,14 @@ static inline int64_t mp_media_get_base_pts(mp_media_t *m)
 /* maximum timestamp variance in nanoseconds */
 #define MAX_TS_VAR 2000000000LL
 
+static inline bool mp_is_network_or_uri_input(const mp_media_t *m)
+{
+	if (!m->is_local_file)
+		return true;
+	return m->path && strstr(m->path, "://") != NULL && strncmp(m->path, "content://", 10) != 0 &&
+	       strncmp(m->path, "file://", 7) != 0;
+}
+
 static inline bool mp_media_can_play_frame(mp_media_t *m, struct mp_decode *d)
 {
 	if (m->full_decode)
@@ -454,8 +462,8 @@ void mp_media_next_video(mp_media_t *m, bool preload)
 	}
 
 	if (!f->width || !f->height) {
-		blog(LOG_ERROR, "MP: media frame width or height are zero ('%s': %" PRIu32 "x%" PRIu32 ")", m->path,
-		     f->width, f->height);
+		blog(LOG_ERROR, "MP: media frame width or height are zero ('%s': %" PRIu32 "x%" PRIu32 ")",
+		     mp_is_network_or_uri_input(m) ? "<network input>" : m->path, f->width, f->height);
 		return;
 	}
 
@@ -782,11 +790,12 @@ static bool init_avformat(mp_media_t *m)
 
 	if (m->format_name && *m->format_name) {
 		format = av_find_input_format(m->format_name);
-		if (!format)
-			blog(LOG_INFO,
-			     "MP: Unable to find input format for "
-			     "'%s'",
-			     m->path);
+		if (!format) {
+			if (mp_is_network_or_uri_input(m))
+				blog(LOG_INFO, "MP: Unable to find input format '%s'", m->format_name);
+			else
+				blog(LOG_INFO, "MP: Unable to find input format for '%s'", m->path);
+		}
 	}
 
 	AVDictionary *opts = NULL;
@@ -799,7 +808,7 @@ static bool init_avformat(mp_media_t *m)
 	if (m->ffmpeg_options) {
 		int ret = av_dict_parse_string(&opts, m->ffmpeg_options, "=", " ", 0);
 		if (ret)
-			blog(LOG_WARNING, "Failed to parse FFmpeg options: %s\n%s", av_err2str(ret), m->ffmpeg_options);
+			blog(LOG_WARNING, "Failed to parse FFmpeg options: %s (options redacted)", av_err2str(ret));
 	}
 
 	m->fmt = avformat_alloc_context();
@@ -844,7 +853,7 @@ static bool init_avformat(mp_media_t *m)
 
 	if (ret < 0) {
 		if (!m->reconnecting) {
-			if (!m->is_local_file)
+			if (mp_is_network_or_uri_input(m))
 				blog(LOG_WARNING, "MP: Failed to open network input: %s", av_err2str(ret));
 			else
 				blog(LOG_WARNING, "MP: Failed to open media: '%s': %s", m->path, av_err2str(ret));
