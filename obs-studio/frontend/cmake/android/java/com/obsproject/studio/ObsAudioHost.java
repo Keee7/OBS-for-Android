@@ -294,9 +294,11 @@ public final class ObsAudioHost {
             return -1;
 
         // 1) Exact USB bus/device address match (/dev/bus/usb/NNN/MMM).
+        String targetVidPid = target.vidPid();
         AudioInInfo exactBest = null;
         for (AudioInInfo in : audioInputs) {
-            if (!in.resolvedUsbPath.isEmpty() && usbDeviceName.equals(in.resolvedUsbPath)) {
+            if (!in.resolvedUsbPath.isEmpty() && usbDeviceName.equals(in.resolvedUsbPath) &&
+                !belongsToDifferentUsbDevice(in, usbDeviceName, targetVidPid)) {
                 if (isBetterCandidate(in, exactBest))
                     exactBest = in;
             }
@@ -309,7 +311,6 @@ public final class ObsAudioHost {
 
         // Disqualify any input whose resolved USB path or VID:PID explicitly
         // identifies a different physical USB device.
-        String targetVidPid = target.vidPid();
         List<AudioInInfo> eligibleInputs = new ArrayList<>();
         for (AudioInInfo in : audioInputs) {
             if (!belongsToDifferentUsbDevice(in, usbDeviceName, targetVidPid))
