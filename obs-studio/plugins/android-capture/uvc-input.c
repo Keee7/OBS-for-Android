@@ -197,7 +197,7 @@ struct uvc_source {
 	volatile long thread_started;
 	volatile long shutting_down;
 
-	/* Capture status and descriptor snapshot, shared with the properties dialog. */
+	/* USB identity, capture status and descriptor snapshot shared with the properties dialog. */
 	pthread_mutex_t mtx;
 	char status[256];
 
@@ -1553,6 +1553,25 @@ static AAudioStream *uvc_audio_open(struct uvc_source *s, const char *usb_device
 	return stream;
 }
 
+/* A reconnected device may have a new USB path. Prefer the configured path. */
+static int find_usb_device(const struct obs_android_usb_device *devs, int count, const char *path,
+			   const char *usb_id)
+{
+	for (int i = 0; i < count; ++i) {
+		if (strcmp(devs[i].name, path) == 0)
+			return i;
+	}
+
+	if (*usb_id) {
+		const size_t idlen = strlen(usb_id);
+		for (int i = 0; i < count; ++i) {
+			if (strncmp(devs[i].label, usb_id, idlen) == 0)
+				return i;
+		}
+	}
+	return -1;
+}
+
 static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 {
 	struct uvc_dev d = {.bridge_fd = -1};
@@ -1587,38 +1606,27 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		return false;
 	}
 
-	/* 精确路径匹配优先；失配按 vid:pid（label 前缀，如 "2b89:5348"）认同一台设备
-	 * —— 拔插后内核可能换个节点号也可能复用，路径字符串靠不住（真机第四轮） */
-	int sel = -1;
-	for (int i = 0; i < ndev; i++) {
-		if (strcmp(devs[i].name, s->usb_device) == 0) {
-			sel = i;
-			break;
-		}
-	}
-	if (sel < 0 && s->usb_id[0]) {
-		for (int i = 0; i < ndev; i++) {
-			if (strncmp(devs[i].label, s->usb_id, strlen(s->usb_id)) == 0) {
-				blog(LOG_INFO, "uvc: 原设备路径 '%s' 不可用，已根据标识 %s 匹配到新路径 '%s'",
-				     s->usb_device, s->usb_id, devs[i].name);
-				sel = i;
-				break;
-			}
-		}
-	}
+	const int sel = find_usb_device(devs, ndev, s->usb_device, s->usb_id);
 	if (sel < 0) {
 		const char *args[] = {s->usb_device};
 		set_status_key(s, "Status.DeviceMissing", args, 1);
 		return false;
 	}
+	const char *open_name = devs[sel].name;
+	if (strcmp(open_name, s->usb_device) != 0)
+		blog(LOG_INFO, "uvc: 原设备路径 '%s' 不可用，已根据标识 %s 匹配到新路径 '%s'", s->usb_device,
+		     s->usb_id, open_name);
+
 	/* 记下这台设备的 vid:pid（label 第一个空格前的 token），拔插换号后靠它认回来 */
 	{
 		const char *sp = strchr(devs[sel].label, ' ');
 		const size_t idlen = sp ? (size_t)(sp - devs[sel].label) : strlen(devs[sel].label);
-		if (idlen > 0 && idlen < sizeof(s->usb_id))
+		if (idlen > 0 && idlen < sizeof(s->usb_id)) {
+			pthread_mutex_lock(&s->mtx);
 			snprintf(s->usb_id, sizeof(s->usb_id), "%.*s", (int)idlen, devs[sel].label);
+			pthread_mutex_unlock(&s->mtx);
+		}
 	}
-	const char *open_name = devs[sel].name;
 
 	/* 怪癖表：命中后先算"生效参数"。设置还是出厂默认（MJPEG 1080p60 未动过）时，
 	 * 按怪癖改有效默认（这台卡仅 YUYV 出图，720p60 是平板实测稳定档；1080p60 YUYV
@@ -2561,7 +2569,11 @@ static int fmt_string_to_kind(const char *fmt)
 static void uvc_settings_apply(struct uvc_source *s, obs_data_t *settings)
 {
 	const char *dev = obs_data_get_string(settings, "usb_device");
-	snprintf(s->usb_device, sizeof(s->usb_device), "%s", dev ? dev : "");
+	pthread_mutex_lock(&s->mtx);
+	if (strcmp(dev, s->usb_device) != 0)
+		s->usb_id[0] = 0;
+	snprintf(s->usb_device, sizeof(s->usb_device), "%s", dev);
+	pthread_mutex_unlock(&s->mtx);
 
 	s->width = (int)obs_data_get_int(settings, "width");
 	s->height = (int)obs_data_get_int(settings, "height");
@@ -2608,7 +2620,6 @@ static void uvc_settings_apply(struct uvc_source *s, obs_data_t *settings)
 		s->width &= ~1;
 		s->height &= ~1;
 	}
-	s->usb_id[0] = 0; /* 设置变了，旧设备的 vid:pid 记忆作废（防认错成上一台） */
 	if (s->fps < 1 || s->fps > 240) {
 		blog(LOG_WARNING, "uvc: 配置帧率 %d 超出有效范围，已回退为 60", s->fps);
 		s->fps = 60;
@@ -2773,7 +2784,58 @@ static bool on_mode_change(obs_properties_t *props, obs_property_t *property, ob
 	return true;
 }
 
-static bool load_device_modes(void *data, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+static void load_audio_inputs(struct uvc_source *s, obs_property_t *list, const char *path)
+{
+	int matched = -1;
+	if (*path) {
+		char usb_id[sizeof(s->usb_id)] = {0};
+		if (s) {
+			pthread_mutex_lock(&s->mtx);
+			if (strcmp(path, s->usb_device) == 0)
+				memcpy(usb_id, s->usb_id, sizeof(usb_id));
+			pthread_mutex_unlock(&s->mtx);
+		}
+		struct obs_android_usb_device devs[8];
+		const int count = obs_android_usb_enum_devices(devs, sizeof(devs) / sizeof(devs[0]));
+		const int selected = find_usb_device(devs, count, path, usb_id);
+		if (selected >= 0)
+			matched = obs_android_audio_find_usb_input(devs[selected].name);
+	}
+
+	obs_property_list_clear(list);
+	obs_property_list_add_int(list, obs_module_text("AudioInput.Disabled"), UVC_AUDIO_DISABLED);
+	obs_property_list_add_int(list, obs_module_text("AudioInput.Default"), UVC_AUDIO_SYSTEM_DEFAULT);
+
+	struct obs_android_audio_device devices[32];
+	const char *product = NULL;
+	const int count = obs_android_audio_enum_devices(devices, sizeof(devices) / sizeof(devices[0]));
+	for (int i = 0; i < count; ++i) {
+		const struct obs_android_audio_device *device = &devices[i];
+		if (!device->is_source || device->id <= 0)
+			continue;
+		obs_property_list_add_int(list, device->label, device->id);
+		if (device->id == matched)
+			product = device->product;
+	}
+
+	if (!product) {
+		obs_property_list_insert_int(list, 0, obs_module_text("AudioInput.AutoNoMatch"), UVC_AUDIO_AUTO);
+		return;
+	}
+
+	char name[OBS_ANDROID_AUDIO_PRODUCT_LEN + 24];
+	if (*product)
+		snprintf(name, sizeof(name), "%s (ID %d)", product, matched);
+	else
+		snprintf(name, sizeof(name), "ID %d", matched);
+	const char *args[] = {name};
+	struct dstr label;
+	obs_android_format_locale(&label, obs_module_text("AudioInput.Auto"), args, 1);
+	obs_property_list_insert_int(list, 0, label.array, UVC_AUDIO_AUTO);
+	dstr_free(&label);
+}
+
+static bool on_usb_device_change(void *data, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(property);
 	const char *name = obs_data_get_string(settings, "usb_device");
@@ -2808,6 +2870,7 @@ static bool load_device_modes(void *data, obs_properties_t *props, obs_property_
 			obs_property_list_item_disable(list, item, true);
 		}
 	}
+	load_audio_inputs(data, obs_properties_get(props, "audio_device"), name);
 	return on_mode_change(props, list, settings);
 }
 
@@ -2844,7 +2907,7 @@ static obs_properties_t *uvc_properties(void *data)
 						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(mode, obs_module_text("DeviceMode.Manual"), "");
 	obs_property_set_modified_callback(mode, on_mode_change);
-	obs_property_set_modified_callback2(dev_list, load_device_modes, s);
+	obs_property_set_modified_callback2(dev_list, on_usb_device_change, s);
 
 	obs_properties_add_int(props, "width", obs_module_text("Width"), 16, 7680, 2);
 	obs_properties_add_int(props, "height", obs_module_text("Height"), 16, 4320, 2);
@@ -2878,19 +2941,8 @@ static obs_properties_t *uvc_properties(void *data)
 	obs_property_list_add_int(range, obs_module_text("ColorRange.Full"), VIDEO_RANGE_FULL);
 	obs_property_set_long_description(range, obs_module_text("ColorRange.Description"));
 
-	obs_property_t *audio = obs_properties_add_list(props, "audio_device", obs_module_text("AudioInput"),
-							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(audio, obs_module_text("AudioInput.Auto"), UVC_AUDIO_AUTO);
-	obs_property_list_add_int(audio, obs_module_text("AudioInput.Disabled"), UVC_AUDIO_DISABLED);
-	obs_property_list_add_int(audio, obs_module_text("AudioInput.Default"), UVC_AUDIO_SYSTEM_DEFAULT);
-	struct obs_android_audio_device audio_devices[32];
-	const int inputs = obs_android_audio_enum_devices(audio_devices, sizeof(audio_devices) / sizeof(audio_devices[0]));
-	for (int i = 0; i < inputs; ++i) {
-		const struct obs_android_audio_device *device = &audio_devices[i];
-		if (!device->is_source || device->id <= 0)
-			continue;
-		obs_property_list_add_int(audio, device->label, device->id);
-	}
+	obs_properties_add_list(props, "audio_device", obs_module_text("AudioInput"), OBS_COMBO_TYPE_LIST,
+				OBS_COMBO_FORMAT_INT);
 
 	obs_property_t *latency = obs_properties_add_bool(props, "yuv_low_latency", obs_module_text("YuvPassthrough"));
 	obs_property_set_long_description(
