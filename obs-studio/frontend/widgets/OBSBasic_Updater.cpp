@@ -38,11 +38,327 @@
 #endif
 #include <qt-wrappers.hpp>
 
+#ifdef __ANDROID__
+#include <utility/android-window-fit.hpp>
+
+#include <QDesktopServices>
+#include <QDialog>
+#include <QHBoxLayout>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJniObject>
+#include <QLabel>
+#include <QMetaObject>
+#include <QPointer>
+#include <QPushButton>
+#include <QTextBrowser>
+#include <QTimer>
+#include <QUrl>
+#include <QVBoxLayout>
+#include <algorithm>
+#include <vector>
+#endif
+
 #ifdef _WIN32
 #define UPDATE_CHECK_INTERVAL (60 * 60 * 24 * 4) /* 4 days */
 #endif
 
 struct QCef;
+
+#ifdef __ANDROID__
+namespace {
+
+constexpr auto ANDROID_GITHUB_REPO = "Keee7/OBS-for-Android";
+constexpr auto ANDROID_DEFAULT_RELEASE_URL = "https://github.com/Keee7/OBS-for-Android/releases/latest";
+
+struct ParsedSemVer {
+	std::vector<int> core;
+	QString preRelease;
+	bool valid = false;
+};
+
+ParsedSemVer ParseReleaseVersion(const QString &raw)
+{
+	ParsedSemVer out;
+	QString trimmed = raw.trimmed();
+	if (trimmed.isEmpty())
+		return out;
+
+	if ((trimmed.startsWith('v') || trimmed.startsWith('V')) && trimmed.size() > 1)
+		trimmed = trimmed.mid(1).trimmed();
+
+	const qsizetype plusIdx = trimmed.indexOf('+');
+	if (plusIdx >= 0)
+		trimmed = trimmed.left(plusIdx).trimmed();
+
+	const qsizetype dashIdx = trimmed.indexOf('-');
+	QString corePart = dashIdx >= 0 ? trimmed.left(dashIdx) : trimmed;
+	out.preRelease = dashIdx >= 0 ? trimmed.mid(dashIdx + 1).trimmed() : QString();
+
+	const QStringList segments = corePart.split('.', Qt::SkipEmptyParts);
+	if (segments.isEmpty())
+		return out;
+
+	for (const QString &seg : segments) {
+		bool ok = false;
+		const int val = seg.toInt(&ok);
+		if (!ok || val < 0)
+			return {};
+		out.core.push_back(val);
+	}
+
+	out.valid = true;
+	return out;
+}
+
+int ComparePreReleaseIds(const QString &a, const QString &b)
+{
+	const QStringList aParts = a.split('.', Qt::SkipEmptyParts);
+	const QStringList bParts = b.split('.', Qt::SkipEmptyParts);
+	const qsizetype count = std::min(aParts.size(), bParts.size());
+
+	for (qsizetype i = 0; i < count; ++i) {
+		const QString &sa = aParts[i];
+		const QString &sb = bParts[i];
+		bool aNumOk = false;
+		bool bNumOk = false;
+		const int na = sa.toInt(&aNumOk);
+		const int nb = sb.toInt(&bNumOk);
+
+		if (aNumOk && bNumOk) {
+			if (na != nb)
+				return na < nb ? -1 : 1;
+		} else if (aNumOk != bNumOk) {
+			return aNumOk ? -1 : 1;
+		} else {
+			const int cmp = QString::compare(sa, sb, Qt::CaseInsensitive);
+			if (cmp != 0)
+				return cmp < 0 ? -1 : 1;
+		}
+	}
+
+	if (aParts.size() == bParts.size())
+		return 0;
+	return aParts.size() < bParts.size() ? -1 : 1;
+}
+
+int CompareReleaseVersions(const QString &lhsRaw, const QString &rhsRaw)
+{
+	const ParsedSemVer lhs = ParseReleaseVersion(lhsRaw);
+	const ParsedSemVer rhs = ParseReleaseVersion(rhsRaw);
+
+	if (!lhs.valid || !rhs.valid) {
+		const int cmp = QString::compare(lhsRaw.trimmed(), rhsRaw.trimmed(), Qt::CaseInsensitive);
+		return cmp == 0 ? 0 : (cmp < 0 ? -1 : 1);
+	}
+
+	const size_t maxLen = std::max(lhs.core.size(), rhs.core.size());
+	for (size_t i = 0; i < maxLen; ++i) {
+		const int a = i < lhs.core.size() ? lhs.core[i] : 0;
+		const int b = i < rhs.core.size() ? rhs.core[i] : 0;
+		if (a != b)
+			return a < b ? -1 : 1;
+	}
+
+	const bool lhsPre = !lhs.preRelease.isEmpty();
+	const bool rhsPre = !rhs.preRelease.isEmpty();
+	if (!lhsPre && !rhsPre)
+		return 0;
+	if (!lhsPre && rhsPre)
+		return 1;
+	if (lhsPre && !rhsPre)
+		return -1;
+	return ComparePreReleaseIds(lhs.preRelease, rhs.preRelease);
+}
+
+QString GetAndroidInstalledVersionName()
+{
+	QString version;
+	const QJniObject activity = QJniObject::callStaticObjectMethod(
+		"org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
+	if (activity.isValid()) {
+		const QJniObject verObj = QJniObject::callStaticObjectMethod(
+			"com/obsproject/studio/ObsUpdateHost", "installedVersionName",
+			"(Landroid/content/Context;)Ljava/lang/String;", activity.object());
+		if (verObj.isValid())
+			version = verObj.toString().trimmed();
+	}
+	if (version.isEmpty())
+		version = QStringLiteral("0.2.5");
+	return version;
+}
+
+bool OpenAndroidReleaseUrl(const QString &url)
+{
+	const QString target = url.trimmed().isEmpty() ? QString::fromUtf8(ANDROID_DEFAULT_RELEASE_URL) : url.trimmed();
+	const QJniObject activity = QJniObject::callStaticObjectMethod(
+		"org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
+	if (activity.isValid()) {
+		const QJniObject urlObj = QJniObject::fromString(target);
+		const jboolean opened = QJniObject::callStaticMethod<jboolean>(
+			"com/obsproject/studio/ObsUpdateHost", "openUrl",
+			"(Landroid/content/Context;Ljava/lang/String;)Z", activity.object(), urlObj.object<jstring>());
+		if (opened == JNI_TRUE)
+			return true;
+	}
+	return QDesktopServices::openUrl(QUrl(target));
+}
+
+void ShowAndroidUpdateResultDialog(QWidget *parent, bool manualUpdate, const QString &currentVersion,
+				   const QString &rawJson)
+{
+	static bool dialogOpen = false;
+	if (dialogOpen)
+		return;
+
+	const QJsonDocument doc = QJsonDocument::fromJson(rawJson.toUtf8());
+	const QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject{};
+	if (!obj.value(QStringLiteral("ok")).toBool(false)) {
+		const QString err = obj.value(QStringLiteral("error")).toString().trimmed();
+		blog(LOG_INFO, "Android release update check failed (%s): %s",
+		     manualUpdate ? "manual" : "startup",
+		     err.isEmpty() ? "unknown error" : QT_TO_UTF8(err));
+		if (manualUpdate) {
+			const QString detail = err.isEmpty() ? QStringLiteral("Network unavailable") : err;
+			OBSMessageBox::warning(parent, QTStr("Basic.MainMenu.Help.CheckForUpdates"),
+					       QTStr("Updater.CheckFailed").arg(detail));
+		}
+		return;
+	}
+
+	const QString latestVersion = obj.value(QStringLiteral("version")).toString().trimmed();
+	const QString latestTag = obj.value(QStringLiteral("tag")).toString().trimmed();
+	const QString releaseName = obj.value(QStringLiteral("name")).toString().trimmed();
+	const QString releaseUrl = obj.value(QStringLiteral("url")).toString().trimmed();
+	const QString releaseNotes = obj.value(QStringLiteral("notes")).toString().trimmed();
+
+	blog(LOG_INFO, "Android release update check (%s): current=%s, latest=%s (%s)",
+	     manualUpdate ? "manual" : "startup", QT_TO_UTF8(currentVersion),
+	     QT_TO_UTF8(latestVersion), QT_TO_UTF8(latestTag));
+
+	if (latestVersion.isEmpty() || CompareReleaseVersions(latestVersion, currentVersion) <= 0) {
+		if (manualUpdate) {
+			OBSMessageBox::information(parent, QTStr("Updater.NoUpdatesAvailable.Title"),
+						   QTStr("Updater.NoUpdatesAvailable.Text"));
+		}
+		return;
+	}
+
+	if (!manualUpdate) {
+		const char *skipped = config_get_string(App()->GetAppConfig(), "General", "SkippedUpdateVersion");
+		if (skipped && *skipped &&
+		    CompareReleaseVersions(QString::fromUtf8(skipped), latestVersion) >= 0) {
+			blog(LOG_INFO, "Skipping Android update prompt for %s (already skipped %s)",
+			     QT_TO_UTF8(latestVersion), skipped);
+			return;
+		}
+	}
+
+	dialogOpen = true;
+	QDialog dlg(parent);
+	dlg.setObjectName(QStringLiteral("OBSAndroidUpdateDialog"));
+	dlg.setWindowTitle(QTStr("Updater.Title"));
+	dlg.setWindowFlags(dlg.windowFlags() & ~Qt::WindowContextHelpButtonHint);
+	dlg.setModal(true);
+	dlg.setMinimumSize(0, 0);
+
+	auto *rootLayout = new QVBoxLayout(&dlg);
+	rootLayout->setContentsMargins(16, 14, 16, 14);
+	rootLayout->setSpacing(10);
+
+	const QString displayLatest = latestTag.isEmpty() ? latestVersion : latestTag;
+	auto *headerLabel = new QLabel(&dlg);
+	QFont headerFont = headerLabel->font();
+	headerFont.setBold(true);
+	headerFont.setPointSizeF(std::max(headerFont.pointSizeF(), 11.0));
+	headerLabel->setFont(headerFont);
+	headerLabel->setWordWrap(true);
+	headerLabel->setText(!releaseName.isEmpty() && releaseName != displayLatest
+				     ? QStringLiteral("%1 %2 — %3").arg(QTStr("Updater.Text"), displayLatest, releaseName)
+				     : QStringLiteral("%1 %2").arg(QTStr("Updater.Text"), displayLatest));
+	rootLayout->addWidget(headerLabel);
+
+	auto *versionLabel = new QLabel(
+		QTStr("Updater.VersionSummary").arg(currentVersion, displayLatest), &dlg);
+	versionLabel->setWordWrap(true);
+	rootLayout->addWidget(versionLabel);
+
+	auto *notesBrowser = new QTextBrowser(&dlg);
+	notesBrowser->setReadOnly(true);
+	notesBrowser->setOpenLinks(false);
+	notesBrowser->setOpenExternalLinks(false);
+	notesBrowser->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	QObject::connect(notesBrowser, &QTextBrowser::anchorClicked, &dlg,
+			 [](const QUrl &link) { OpenAndroidReleaseUrl(link.toString()); });
+
+	const QString effectiveUrl =
+		releaseUrl.isEmpty() ? QString::fromUtf8(ANDROID_DEFAULT_RELEASE_URL) : releaseUrl;
+	if (!releaseNotes.isEmpty()) {
+		notesBrowser->setMarkdown(releaseNotes);
+	} else {
+		notesBrowser->setPlainText(QTStr("Updater.ReleasePageHint").arg(effectiveUrl));
+	}
+	rootLayout->addWidget(notesBrowser, 1);
+
+	auto *buttonLayout = new QHBoxLayout();
+	buttonLayout->setSpacing(8);
+
+	constexpr int ACTION_REMIND = QDialog::Rejected;
+	constexpr int ACTION_UPDATE = QDialog::Accepted;
+	constexpr int ACTION_SKIP = QDialog::Accepted + 1;
+
+	if (!manualUpdate) {
+		auto *skipBtn = new QPushButton(QTStr("Updater.Skip"), &dlg);
+		skipBtn->setMinimumHeight(34);
+		QObject::connect(skipBtn, &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(ACTION_SKIP); });
+		buttonLayout->addWidget(skipBtn);
+	}
+
+	buttonLayout->addStretch(1);
+
+	auto *laterBtn = new QPushButton(
+		QTStr(manualUpdate ? "Cancel" : "Updater.RemindMeLater"), &dlg);
+	laterBtn->setMinimumHeight(34);
+	QObject::connect(laterBtn, &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(ACTION_REMIND); });
+	buttonLayout->addWidget(laterBtn);
+
+	auto *updateBtn = new QPushButton(QTStr("Updater.UpdateNow"), &dlg);
+	updateBtn->setMinimumHeight(34);
+	updateBtn->setDefault(true);
+	QObject::connect(updateBtn, &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(ACTION_UPDATE); });
+	buttonLayout->addWidget(updateBtn);
+
+	rootLayout->addLayout(buttonLayout);
+
+	const QRect avail = androidAvailableWindowRect(&dlg);
+	if (!avail.isEmpty()) {
+		const int w = qBound(280, qMin(560, avail.width() - 24), avail.width());
+		const int h = qBound(220, qMin(330, avail.height() - 24), avail.height());
+		dlg.resize(w, h);
+	} else {
+		dlg.resize(520, 320);
+	}
+	androidFitTopLevelToScreen(&dlg);
+	if (!avail.isEmpty()) {
+		dlg.move(avail.center() - QPoint(dlg.width() / 2, dlg.height() / 2));
+	}
+
+	const int choice = dlg.exec();
+	dialogOpen = false;
+
+	if (choice == ACTION_UPDATE) {
+		if (!OpenAndroidReleaseUrl(effectiveUrl)) {
+			OBSMessageBox::warning(parent, QTStr("Updater.Title"), effectiveUrl);
+		}
+	} else if (choice == ACTION_SKIP && !manualUpdate) {
+		config_set_string(App()->GetAppConfig(), "General", "SkippedUpdateVersion",
+				  QT_TO_UTF8(latestVersion));
+		config_save_safe(App()->GetAppConfig(), "tmp", nullptr);
+	}
+}
+
+} // namespace
+#endif
 struct QCefCookieManager;
 
 extern QCef *cef;
@@ -197,6 +513,8 @@ void OBSBasic::TimedCheckForUpdates()
 	if (secs > UPDATE_CHECK_INTERVAL) {
 		CheckForUpdates(false);
 	}
+#elif defined(__ANDROID__)
+	QTimer::singleShot(800, this, [this]() { CheckForUpdates(false); });
 #endif
 }
 
@@ -221,6 +539,39 @@ void OBSBasic::CheckForUpdates(bool manualUpdate)
 	MacUpdateThread *mut = new MacUpdateThread(manualUpdate);
 	connect(mut, &MacUpdateThread::Result, this, &OBSBasic::MacBranchesFetched, Qt::QueuedConnection);
 	updateCheckThread.reset(mut);
+	updateCheckThread->start();
+#elif defined(__ANDROID__)
+	if (App()->IsUpdaterDisabled()) {
+		return;
+	}
+	if (updateCheckThread && updateCheckThread->isRunning()) {
+		return;
+	}
+	if (ui->actionCheckForUpdates) {
+		ui->actionCheckForUpdates->setEnabled(false);
+	}
+
+	const QString currentVersion = GetAndroidInstalledVersionName();
+	const QPointer<OBSBasic> weakThis(this);
+	updateCheckThread.reset(QThread::create([weakThis, manualUpdate, currentVersion]() {
+		const QJniObject repoArg = QJniObject::fromString(QString::fromUtf8(ANDROID_GITHUB_REPO));
+		const QJniObject jsonObj = QJniObject::callStaticObjectMethod(
+			"com/obsproject/studio/ObsUpdateHost", "fetchLatestRelease",
+			"(Ljava/lang/String;)Ljava/lang/String;", repoArg.object<jstring>());
+		const QString rawJson = jsonObj.isValid() ? jsonObj.toString() : QString();
+
+		if (!weakThis)
+			return;
+		QMetaObject::invokeMethod(
+			weakThis,
+			[weakThis, manualUpdate, currentVersion, rawJson]() {
+				if (!weakThis)
+					return;
+				weakThis->updateCheckFinished();
+				ShowAndroidUpdateResultDialog(weakThis.data(), manualUpdate, currentVersion, rawJson);
+			},
+			Qt::QueuedConnection);
+	}));
 	updateCheckThread->start();
 #else
 	UNUSED_PARAMETER(manualUpdate);

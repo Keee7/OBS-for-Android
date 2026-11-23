@@ -109,8 +109,10 @@ void OBSBasic::CreateFiltersWindow(obs_source_t *source)
 
 void OBSBasic::updateCheckFinished()
 {
-	ui->actionCheckForUpdates->setEnabled(true);
-	ui->actionRepair->setEnabled(true);
+	if (ui->actionCheckForUpdates)
+		ui->actionCheckForUpdates->setEnabled(true);
+	if (ui->actionRepair)
+		ui->actionRepair->setEnabled(true);
 }
 
 void OBSBasic::ResetUI()

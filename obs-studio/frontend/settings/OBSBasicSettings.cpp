@@ -374,7 +374,9 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 
 	/* clang-format off */
 	HookWidget(ui->language,             COMBO_CHANGED,  GENERAL_CHANGED);
+#if !defined(__ANDROID__)
 	HookWidget(ui->updateChannelBox,     COMBO_CHANGED,  GENERAL_CHANGED);
+#endif
 	HookWidget(ui->enableAutoUpdates,    CHECK_CHANGED,  GENERAL_CHANGED);
 	HookWidget(ui->openStatsOnStartup,   CHECK_CHANGED,  GENERAL_CHANGED);
 	HookWidget(ui->hideOBSFromCapture,   CHECK_CHANGED,  GENERAL_CHANGED);
@@ -623,13 +625,23 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	ui->advOutFFVBitrate->setSuffix(" Kbps");
 	ui->advOutFFABitrate->setSuffix(" Kbps");
 
-#if !defined(_WIN32) && !defined(ENABLE_SPARKLE_UPDATER)
+#if !defined(_WIN32) && !defined(ENABLE_SPARKLE_UPDATER) && !defined(__ANDROID__)
 	delete ui->updateSettingsGroupBox;
 	ui->updateSettingsGroupBox = nullptr;
 	ui->updateChannelLabel = nullptr;
 	ui->updateChannelBox = nullptr;
 	ui->enableAutoUpdates = nullptr;
 #else
+#if defined(__ANDROID__)
+	if (auto *formLayout = qobject_cast<QFormLayout *>(ui->updateSettingsGroupBox->layout())) {
+		formLayout->removeRow(ui->updateChannelBox);
+	} else {
+		delete ui->updateChannelLabel;
+		delete ui->updateChannelBox;
+	}
+	ui->updateChannelLabel = nullptr;
+	ui->updateChannelBox = nullptr;
+#endif
 	// Hide update section if disabled
 	if (App()->IsUpdaterDisabled()) {
 		ui->updateSettingsGroupBox->hide();
@@ -1358,11 +1370,14 @@ void OBSBasicSettings::LoadGeneralSettings()
 
 	LoadLanguageList();
 
-#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
+#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER) || defined(__ANDROID__)
 	bool enableAutoUpdates = config_get_bool(App()->GetAppConfig(), "General", "EnableAutoUpdates");
-	ui->enableAutoUpdates->setChecked(enableAutoUpdates);
+	if (ui->enableAutoUpdates)
+		ui->enableAutoUpdates->setChecked(enableAutoUpdates);
 
+#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
 	LoadBranchesList();
+#endif
 #endif
 	bool openStatsOnStartup = config_get_bool(main->Config(), "General", "OpenStatsOnStartup");
 	ui->openStatsOnStartup->setChecked(openStatsOnStartup);
@@ -3169,11 +3184,12 @@ void OBSBasicSettings::SaveGeneralSettings()
 		config_set_string(App()->GetUserConfig(), "General", "Language", language.c_str());
 	}
 
-#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
-	if (WidgetChanged(ui->enableAutoUpdates)) {
+#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER) || defined(__ANDROID__)
+	if (ui->enableAutoUpdates && WidgetChanged(ui->enableAutoUpdates)) {
 		config_set_bool(App()->GetAppConfig(), "General", "EnableAutoUpdates",
 				ui->enableAutoUpdates->isChecked());
 	}
+#if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
 	int branchIdx = ui->updateChannelBox->currentIndex();
 	QString branchName = ui->updateChannelBox->itemData(branchIdx).toString();
 
@@ -3181,6 +3197,7 @@ void OBSBasicSettings::SaveGeneralSettings()
 		config_set_string(App()->GetAppConfig(), "General", "UpdateBranch", QT_TO_UTF8(branchName));
 		forceUpdateCheck = true;
 	}
+#endif
 #endif
 #ifdef _WIN32
 	if (ui->hideOBSFromCapture && WidgetChanged(ui->hideOBSFromCapture)) {

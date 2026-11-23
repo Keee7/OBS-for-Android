@@ -1467,11 +1467,13 @@ void OBSBasic::OBSInit()
 	delete ui->actionShowCrashLogs;
 	delete ui->actionUploadLastCrashLog;
 	delete ui->menuCrashLogs;
-	delete ui->actionCheckForUpdates;
 	ui->actionShowCrashLogs = nullptr;
 	ui->actionUploadLastCrashLog = nullptr;
 	ui->menuCrashLogs = nullptr;
+#if !defined(__ANDROID__)
+	delete ui->actionCheckForUpdates;
 	ui->actionCheckForUpdates = nullptr;
+#endif
 #endif
 #endif
 
@@ -1485,11 +1487,13 @@ void OBSBasic::OBSInit()
 	ui->actionShowMacPermissions = nullptr;
 #endif
 
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__APPLE__) || defined(__ANDROID__)
 	if (App()->IsUpdaterDisabled()) {
-		ui->actionCheckForUpdates->setEnabled(false);
+		if (ui->actionCheckForUpdates)
+			ui->actionCheckForUpdates->setEnabled(false);
 #if defined(_WIN32)
-		ui->actionRepair->setEnabled(false);
+		if (ui->actionRepair)
+			ui->actionRepair->setEnabled(false);
 #endif
 	}
 #endif
