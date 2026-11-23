@@ -370,15 +370,37 @@ function(_ffmpeg_android_find_static_library out_var lib_name hint_target)
     if(_hint_lib)
       cmake_path(GET _hint_lib PARENT_PATH _hint_dir)
       list(APPEND _hint_dirs "${_hint_dir}")
+      cmake_path(GET _hint_dir PARENT_PATH _hint_prefix)
+      if(_hint_prefix)
+        list(APPEND _hint_dirs "${_hint_prefix}/lib")
+        if(ANDROID_ABI)
+          list(APPEND _hint_dirs "${_hint_prefix}/lib/${ANDROID_ABI}")
+        endif()
+        if(CMAKE_LIBRARY_ARCHITECTURE)
+          list(APPEND _hint_dirs "${_hint_prefix}/lib/${CMAKE_LIBRARY_ARCHITECTURE}")
+        endif()
+      endif()
     endif()
   endif()
-  find_library(
-    "${out_var}"
-    NAMES "${CMAKE_STATIC_LIBRARY_PREFIX}${lib_name}${CMAKE_STATIC_LIBRARY_SUFFIX}"
-    HINTS ${_hint_dirs}
-    NO_CMAKE_FIND_ROOT_PATH
-    NO_CMAKE_SYSTEM_PATH
-  )
+  list(REMOVE_DUPLICATES _hint_dirs)
+  # Search Android FFmpeg's own prefix before CMAKE_PREFIX_PATH so a host prefix
+  # on CMAKE_PREFIX_PATH cannot shadow target archives like libxml2.a.
+  if(_hint_dirs)
+    find_library(
+      "${out_var}"
+      NAMES "${CMAKE_STATIC_LIBRARY_PREFIX}${lib_name}${CMAKE_STATIC_LIBRARY_SUFFIX}"
+      PATHS ${_hint_dirs}
+      NO_DEFAULT_PATH
+    )
+  endif()
+  if(NOT ${out_var})
+    find_library(
+      "${out_var}"
+      NAMES "${CMAKE_STATIC_LIBRARY_PREFIX}${lib_name}${CMAKE_STATIC_LIBRARY_SUFFIX}"
+      NO_CMAKE_FIND_ROOT_PATH
+      NO_CMAKE_SYSTEM_PATH
+    )
+  endif()
 endfunction()
 
 # Append the configured Android STL runtime to an imported FFmpeg target whose
