@@ -1056,6 +1056,7 @@ bool mp_media_init(mp_media_t *media, const struct mp_media_info *info)
 	media->speed = info->speed;
 	media->request_preload = info->request_preload;
 	media->is_local_file = info->is_local_file;
+	media->reconnecting = info->reconnecting;
 	da_init(media->packet_pool);
 
 	if (!info->is_local_file || media->speed < 1 || media->speed > 200)

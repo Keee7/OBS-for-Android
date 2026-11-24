@@ -17,6 +17,10 @@
 
 #include <assert.h>
 
+#ifdef __ANDROID__
+#include <unistd.h>
+#endif
+
 #include "../util/base.h"
 #include "../util/bmem.h"
 #include "../util/platform.h"
@@ -1470,6 +1474,22 @@ gs_texture_t *gs_android_external_texture_render(gs_android_external_texture_t *
 	if (!texture || !transform || !gs_valid("gs_android_external_texture_render"))
 		return NULL;
 	return thread_graphics->exports.device_android_external_texture_render(texture, transform);
+}
+
+gs_texture_t *gs_android_external_texture_render_fenced(gs_android_external_texture_t *texture,
+						       const float transform[16], int acquire_fence_fd,
+						       int *release_fence_fd)
+{
+	if (release_fence_fd)
+		*release_fence_fd = -1;
+	if (!texture || !transform || !gs_valid("gs_android_external_texture_render_fenced")) {
+		if (acquire_fence_fd >= 0)
+			close(acquire_fence_fd);
+		return NULL;
+	}
+	return thread_graphics->exports.device_android_external_texture_render_fenced(texture, transform,
+										     acquire_fence_fd,
+										     release_fence_fd);
 }
 
 bool gs_android_external_texture_set_buffer(gs_android_external_texture_t *texture, void *ahardware_buffer)

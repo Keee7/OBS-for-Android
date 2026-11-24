@@ -95,6 +95,8 @@ if(OS_ANDROID)
   target_sources(
     obs-ffmpeg
     PRIVATE
+      android-srt-lifecycle.c
+      android-surface-health.h
       ../obs-outputs/mp4-mux.c
       ../obs-outputs/rtmp-av1.c
       $<$<BOOL:${ENABLE_HEVC}>:../obs-outputs/rtmp-hevc.c>
@@ -128,5 +130,5 @@ if(OS_ANDROID)
   #    `__*tf3` 编译器内建（clang 驱动自带的 libclang_rt 静态库提供，实测未报错）。
   find_package(ZLIB REQUIRED)
   target_link_libraries(obs-ffmpeg PRIVATE log android mediandk ZLIB::ZLIB camera2ndk)
-  target_link_options(obs-ffmpeg PRIVATE -Wl,--exclude-libs,ALL)
+  target_link_options(obs-ffmpeg PRIVATE -Wl,--exclude-libs,ALL -Wl,--wrap=srt_startup -Wl,--wrap=srt_cleanup)
 endif()

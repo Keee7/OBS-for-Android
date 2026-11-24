@@ -6,7 +6,10 @@
 #include <android/native_window.h>
 #include <android/hardware_buffer.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <poll.h>
 #include <string.h>
+#include <unistd.h>
 #include "gl-subsystem.h"
 
 #ifndef GL_TEXTURE_EXTERNAL_OES
@@ -21,6 +24,21 @@
 #endif
 #ifndef EGL_IMAGE_PRESERVED_KHR
 #define EGL_IMAGE_PRESERVED_KHR 0x30D2
+#endif
+#ifndef EGL_SYNC_NATIVE_FENCE_ANDROID
+#define EGL_SYNC_NATIVE_FENCE_ANDROID 0x3144
+#endif
+#ifndef EGL_SYNC_NATIVE_FENCE_FD_ANDROID
+#define EGL_SYNC_NATIVE_FENCE_FD_ANDROID 0x3145
+#endif
+#ifndef EGL_NO_NATIVE_FENCE_FD_ANDROID
+#define EGL_NO_NATIVE_FENCE_FD_ANDROID -1
+#endif
+#ifndef EGL_NO_SYNC_KHR
+#define EGL_NO_SYNC_KHR ((EGLSyncKHR)0)
+#endif
+#ifndef EGL_SYNC_FLUSH_COMMANDS_BIT_KHR
+#define EGL_SYNC_FLUSH_COMMANDS_BIT_KHR 0x0001
 #endif
 
 /* OBS FBOs use a top-down texture convention. Flip once when crossing the
@@ -382,9 +400,103 @@ struct external_texture {
 	PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC get_native_client_buffer;
 	pfn_ahardwarebuffer_get_id_t get_buffer_id;
 	bool get_buffer_id_probed;
+	PFNEGLCREATESYNCKHRPROC create_sync;
+	PFNEGLDESTROYSYNCKHRPROC destroy_sync;
+	PFNEGLCLIENTWAITSYNCKHRPROC client_wait_sync;
+	PFNEGLWAITSYNCKHRPROC wait_sync;
+	PFNEGLDUPNATIVEFENCEFDANDROIDPROC dup_native_fence_fd;
+	bool native_fence_sync;
 	struct external_image_slot image_cache[EGL_IMAGE_CACHE_CAP];
 	uint32_t cache_tick;
 };
+
+static bool has_egl_extension(const char *extensions, const char *name)
+{
+	if (!extensions || !name || !*name)
+		return false;
+	const size_t len = strlen(name);
+	const char *p = extensions;
+	while ((p = strstr(p, name)) != NULL) {
+		const bool start_ok = (p == extensions) || (p[-1] == ' ');
+		const char end = p[len];
+		const bool end_ok = (end == '\0') || (end == ' ');
+		if (start_ok && end_ok)
+			return true;
+		p += len;
+	}
+	return false;
+}
+
+static void drain_gl_errors(void)
+{
+	while (glGetError() != GL_NO_ERROR) {
+	}
+}
+
+static void wait_and_close_fence_fd(int fence_fd)
+{
+	if (fence_fd < 0)
+		return;
+	struct pollfd pfd = {
+		.fd = fence_fd,
+		.events = POLLIN,
+	};
+	int ret;
+	do {
+		ret = poll(&pfd, 1, 1000);
+	} while (ret < 0 && errno == EINTR);
+	if (ret == 0)
+		blog(LOG_WARNING, "Android interop: timed out waiting on acquire fence fd");
+	close(fence_fd);
+}
+
+static void wait_acquire_fence(struct external_texture *t, int acquire_fence_fd)
+{
+	if (acquire_fence_fd < 0)
+		return;
+	if (t->native_fence_sync && (t->wait_sync || t->client_wait_sync)) {
+		const EGLint attribs[] = {
+			EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
+			acquire_fence_fd,
+			EGL_NONE,
+		};
+		EGLSyncKHR sync = t->create_sync(t->egl_display, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+		if (sync != EGL_NO_SYNC_KHR) {
+			/* eglCreateSyncKHR took ownership of acquire_fence_fd. */
+			const bool waited = t->wait_sync && (t->wait_sync(t->egl_display, sync, 0) == EGL_TRUE);
+			if (!waited && t->client_wait_sync) {
+				(void)eglGetError();
+				t->client_wait_sync(t->egl_display, sync, 0, 1000000000ULL);
+			} else if (!waited) {
+				(void)eglGetError();
+			}
+			t->destroy_sync(t->egl_display, sync);
+			return;
+		}
+		(void)eglGetError();
+	}
+	wait_and_close_fence_fd(acquire_fence_fd);
+}
+
+static int create_release_fence(struct external_texture *t)
+{
+	if (t->native_fence_sync) {
+		EGLSyncKHR sync = t->create_sync(t->egl_display, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+		if (sync != EGL_NO_SYNC_KHR) {
+			/* Mandatory flush before eglDupNativeFenceFDANDROID per EGL_ANDROID_native_fence_sync. */
+			glFlush();
+			const EGLint fd = t->dup_native_fence_fd(t->egl_display, sync);
+			t->destroy_sync(t->egl_display, sync);
+			if (fd != EGL_NO_NATIVE_FENCE_FD_ANDROID && fd >= 0)
+				return (int)fd;
+			(void)eglGetError();
+		} else {
+			(void)eglGetError();
+		}
+	}
+	glFinish();
+	return -1;
+}
 
 gs_android_external_texture_t *device_android_external_texture_create(gs_device_t *device, uint32_t width,
 								      uint32_t height)
@@ -414,6 +526,35 @@ gs_android_external_texture_t *device_android_external_texture_create(gs_device_
 	t->destroy_image = destroy_image;
 	t->get_native_client_buffer =
 		(PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC)eglGetProcAddress("eglGetNativeClientBufferANDROID");
+
+	const char *egl_exts = eglQueryString(egl_display, EGL_EXTENSIONS);
+	const bool has_native_fence = has_egl_extension(egl_exts, "EGL_ANDROID_native_fence_sync") &&
+				      has_egl_extension(egl_exts, "EGL_KHR_fence_sync");
+	const bool has_wait_sync = has_egl_extension(egl_exts, "EGL_KHR_wait_sync");
+	t->create_sync = has_native_fence ? (PFNEGLCREATESYNCKHRPROC)eglGetProcAddress("eglCreateSyncKHR") : NULL;
+	t->destroy_sync = has_native_fence ? (PFNEGLDESTROYSYNCKHRPROC)eglGetProcAddress("eglDestroySyncKHR") : NULL;
+	t->client_wait_sync =
+		has_native_fence ? (PFNEGLCLIENTWAITSYNCKHRPROC)eglGetProcAddress("eglClientWaitSyncKHR") : NULL;
+	t->wait_sync = (has_native_fence && has_wait_sync)
+			       ? (PFNEGLWAITSYNCKHRPROC)eglGetProcAddress("eglWaitSyncKHR")
+			       : NULL;
+	t->dup_native_fence_fd =
+		has_native_fence ? (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)eglGetProcAddress("eglDupNativeFenceFDANDROID")
+				 : NULL;
+	t->native_fence_sync = has_native_fence && t->create_sync && t->destroy_sync && t->dup_native_fence_fd;
+	static bool logged_fence_mode;
+	if (!logged_fence_mode) {
+		logged_fence_mode = true;
+		if (t->native_fence_sync) {
+			blog(LOG_INFO,
+			     "Android interop: external texture sync using EGL_ANDROID_native_fence_sync (gpu_wait=%s)",
+			     t->wait_sync ? "yes" : "no");
+		} else {
+			blog(LOG_WARNING,
+			     "Android interop: EGL_ANDROID_native_fence_sync unavailable; falling back to glFinish() sync");
+		}
+	}
+
 	struct gl_state state;
 	save_state(&state);
 	glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
@@ -449,11 +590,16 @@ uint32_t device_android_external_texture_get_id(gs_android_external_texture_t *t
 	return ((struct external_texture *)texture)->external;
 }
 
-gs_texture_t *device_android_external_texture_render(gs_android_external_texture_t *texture, const float *transform)
+static gs_texture_t *render_external_texture(struct external_texture *t, const float *transform, int acquire_fence_fd,
+					     int *release_fence_fd)
 {
-	struct external_texture *t = texture;
+	if (release_fence_fd)
+		*release_fence_fd = -1;
+	wait_acquire_fence(t, acquire_fence_fd);
+
 	struct gl_state state;
 	save_state(&state);
+	drain_gl_errors();
 	glBindFramebuffer(GL_FRAMEBUFFER, t->fbo);
 	glViewport(0, 0, (GLsizei)t->width, (GLsizei)t->height);
 	glDisable(GL_BLEND);
@@ -473,9 +619,37 @@ gs_texture_t *device_android_external_texture_render(gs_android_external_texture
 	glUniform1i(t->image, 0);
 	glUniformMatrix4fv(t->transform, 1, GL_FALSE, transform);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
-	bool ok = glGetError() == GL_NO_ERROR;
+	const bool ok = glGetError() == GL_NO_ERROR;
+	if (release_fence_fd) {
+		if (ok) {
+			*release_fence_fd = create_release_fence(t);
+		} else {
+			glFinish();
+			*release_fence_fd = -1;
+		}
+	}
 	restore_state(&state);
 	return ok ? t->output : NULL;
+}
+
+gs_texture_t *device_android_external_texture_render(gs_android_external_texture_t *texture, const float *transform)
+{
+	return render_external_texture((struct external_texture *)texture, transform, -1, NULL);
+}
+
+gs_texture_t *device_android_external_texture_render_fenced(gs_android_external_texture_t *texture,
+							    const float *transform, int acquire_fence_fd,
+							    int *release_fence_fd)
+{
+	if (release_fence_fd)
+		*release_fence_fd = -1;
+	if (!texture || !transform) {
+		if (acquire_fence_fd >= 0)
+			close(acquire_fence_fd);
+		return NULL;
+	}
+	return render_external_texture((struct external_texture *)texture, transform, acquire_fence_fd,
+				       release_fence_fd);
 }
 
 bool device_android_external_texture_set_buffer(gs_android_external_texture_t *texture, void *hardware_buffer)
@@ -608,6 +782,7 @@ bool device_android_external_texture_set_buffer(gs_android_external_texture_t *t
 
 	struct gl_state state;
 	save_state(&state);
+	drain_gl_errors();
 	glBindTexture(GL_TEXTURE_EXTERNAL_OES, t->external);
 	glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)image);
 	const bool ok = glGetError() == GL_NO_ERROR;

@@ -909,6 +909,7 @@ static int libsrt_close(URLContext *h)
 	int err = srt_close(s->fd);
 	if (err < 0) {
 		blog(LOG_ERROR, "[obs-ffmpeg mpegts muxer / libsrt]: %s", srt_getlasterror_str());
+		srt_cleanup();
 		return -1;
 	}
 

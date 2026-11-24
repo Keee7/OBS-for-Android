@@ -316,6 +316,14 @@ EXPORT uint32_t gs_android_external_texture_get_id(gs_android_external_texture_t
 /* The returned texture belongs to the external-texture handle. */
 EXPORT gs_texture_t *gs_android_external_texture_render(gs_android_external_texture_t *texture,
 							const float transform[16]);
+/* Fenced variant of gs_android_external_texture_render for AImageReader callers.
+ * Takes ownership of acquire_fence_fd (>= 0) on all paths (including errors).
+ * When release_fence_fd is non-NULL, outputs a native sync fence fd signaling
+ * when the GPU finishes sampling the bound external buffer, or -1 after
+ * completing a synchronous glFinish() fallback. */
+EXPORT gs_texture_t *gs_android_external_texture_render_fenced(gs_android_external_texture_t *texture,
+							       const float transform[16], int acquire_fence_fd,
+							       int *release_fence_fd);
 /* Reader mode: bind an AHardwareBuffer (an EGLImage is created and sampled on
  * the GPU, no pixel copy). The buffer must stay valid until the next call; the
  * previous image is released here, one frame after its last use. */
