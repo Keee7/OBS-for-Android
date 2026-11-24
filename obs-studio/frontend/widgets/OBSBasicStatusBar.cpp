@@ -233,8 +233,11 @@ void OBSBasicStatusBar::UpdateCPUUsage()
 	QString text;
 	text += QString("CPU: ") + QString::number(main->GetCPUUsage(), 'f', 1) + QString("%");
 
-	statusWidget->ui->cpuUsage->setText(text);
-	statusWidget->ui->cpuUsage->setMinimumWidth(statusWidget->ui->cpuUsage->width());
+	if (statusWidget->ui->cpuUsage->text() != text)
+		statusWidget->ui->cpuUsage->setText(text);
+	const int w = statusWidget->ui->cpuUsage->width();
+	if (w > statusWidget->ui->cpuUsage->minimumWidth())
+		statusWidget->ui->cpuUsage->setMinimumWidth(w);
 
 	UpdateCurrentFPS();
 }
@@ -247,8 +250,11 @@ void OBSBasicStatusBar::UpdateCurrentFPS()
 
 	QString text = QString::asprintf("%.2f / %.2f FPS", obs_get_active_fps(), targetFPS);
 
-	statusWidget->ui->fpsCurrent->setText(text);
-	statusWidget->ui->fpsCurrent->setMinimumWidth(statusWidget->ui->fpsCurrent->width());
+	if (statusWidget->ui->fpsCurrent->text() != text)
+		statusWidget->ui->fpsCurrent->setText(text);
+	const int w = statusWidget->ui->fpsCurrent->width();
+	if (w > statusWidget->ui->fpsCurrent->minimumWidth())
+		statusWidget->ui->fpsCurrent->setMinimumWidth(w);
 }
 
 void OBSBasicStatusBar::UpdateStreamTime()

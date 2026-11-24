@@ -130,7 +130,7 @@
 +#endif // QANDROIDRHIBACKINGSTORE_H
 --- /dev/null
 +++ b/src/plugins/platforms/android/qandroidrhibackingstore.cpp
-@@ -0,0 +1,752 @@
+@@ -0,0 +1,807 @@
 +// Copyright (C) 2021 The Qt Company Ltd.
 +// SPDX-License-Identifier: LicenseRef-Qt-Commercial OR LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
 +
@@ -146,6 +146,8 @@
 +#include <QtGui/qwindow.h>
 +#include <qpa/qplatformgraphicsbuffer.h>
 +
++#include <limits>
++
 +QT_BEGIN_NAMESPACE
 +
 +using namespace Qt::StringLiterals;
@@ -153,7 +155,63 @@
 +namespace {
 +
 +constexpr int kUbufSize = 120;
-+constexpr int kMaxPerRectUploadCount = 8;
++constexpr int kMaxPerRectUploadCount = 12;
++
++QList<QRect> coalesceDirtyRects(const QRegion &region, const QRect &bounds, int maxRects)
++{
++    QList<QRect> rects;
++    rects.reserve(region.rectCount());
++    for (const QRect &r : region) {
++        const QRect clipped = r & bounds;
++        if (!clipped.isEmpty())
++            rects.append(clipped);
++    }
++    if (rects.size() <= maxRects)
++        return rects;
++
++    // Merge overlapping or tightly adjacent fragments (within 8 px) first, so
++    // adjacent bars do not force distant regions into one full-screen upload.
++    for (int i = 0; i < rects.size(); ++i) {
++        for (int j = i + 1; j < rects.size();) {
++            if (rects[i].adjusted(-8, -8, 8, 8).intersects(rects[j])) {
++                rects[i] |= rects[j];
++                rects.removeAt(j);
++            } else {
++                ++j;
++            }
++        }
++    }
++
++    if (rects.size() > 64) {
++        const QRect all = region.boundingRect() & bounds;
++        return all.isEmpty() ? QList<QRect>{} : QList<QRect>{ all };
++    }
++
++    while (rects.size() > maxRects) {
++        int bestI = 0;
++        int bestJ = 1;
++        qint64 bestWaste = std::numeric_limits<qint64>::max();
++        qint64 bestMergedArea = std::numeric_limits<qint64>::max();
++        for (int i = 0; i < rects.size(); ++i) {
++            const qint64 areaI = qint64(rects[i].width()) * rects[i].height();
++            for (int j = i + 1; j < rects.size(); ++j) {
++                const QRect merged = rects[i] | rects[j];
++                const qint64 mergedArea = qint64(merged.width()) * merged.height();
++                const qint64 areaJ = qint64(rects[j].width()) * rects[j].height();
++                const qint64 waste = mergedArea - areaI - areaJ;
++                if (waste < bestWaste || (waste == bestWaste && mergedArea < bestMergedArea)) {
++                    bestWaste = waste;
++                    bestMergedArea = mergedArea;
++                    bestI = i;
++                    bestJ = j;
++                }
++            }
++        }
++        rects[bestI] |= rects[bestJ];
++        rects.removeAt(bestJ);
++    }
++    return rects;
++}
 +
 +inline QRect scaledRect(const QRect &rect, qreal factor)
 +{
@@ -546,13 +604,10 @@
 +            entries.append(QRhiTextureUploadEntry(0, 0, subresDesc));
 +        };
 +
-+        if (dirtyRegion.rectCount() <= kMaxPerRectUploadCount) {
-+            entries.reserve(dirtyRegion.rectCount());
-+            for (const QRect &rect : dirtyRegion)
-+                appendSlice(rect);
-+        } else {
-+            appendSlice(dirtyRegion.boundingRect());
-+        }
++        const QList<QRect> slices = coalesceDirtyRects(dirtyRegion, imageRect, kMaxPerRectUploadCount);
++        entries.reserve(slices.size());
++        for (const QRect &rect : slices)
++            appendSlice(rect);
 +
 +        if (!entries.isEmpty()) {
 +            QRhiTextureUploadDescription uploadDesc;

@@ -4,8 +4,10 @@
 
 #include <QMutex>
 #include <QPixmap>
+#include <QRegion>
 #include <QWidget>
 
+#include <array>
 #include <atomic>
 
 #define FADER_PRECISION 4096.0
@@ -130,7 +132,30 @@ private:
 	QColor p_foregroundWarningColor;
 	QColor p_foregroundErrorColor;
 
+	struct PaintedSnapshot {
+		bool valid = false;
+		bool idle = true;
+		bool clipping = false;
+		bool vertical = false;
+		bool muted = false;
+		bool useDisabledColors = false;
+		bool atFloor = true;
+		QSize widgetSize;
+		int channels = 0;
+		int meterLength = 0;
+		std::array<int, MAX_AUDIO_CHANNELS> peakPos{};
+		std::array<int, MAX_AUDIO_CHANNELS> holdPos{};
+		std::array<int, MAX_AUDIO_CHANNELS> magPos{};
+		std::array<QRgb, MAX_AUDIO_CHANNELS> holdColor{};
+		std::array<QRgb, MAX_AUDIO_CHANNELS> inputColor{};
+	};
+
+	bool advanceBallistics(uint64_t ts);
+	PaintedSnapshot captureSnapshot(bool idle);
+	QRegion computeDeltaRegion(const PaintedSnapshot &prev, const PaintedSnapshot &cur) const;
+
 	uint64_t lastRedrawTime{0};
+	uint64_t lastBallisticsTime{0};
 	int channels{0};
 	std::atomic<bool> needsRedraw{true};
 	std::atomic<bool> settledAtFloor{false};
@@ -141,6 +166,10 @@ private:
 	bool hidden{false};
 	bool muted{false};
 	bool useDisabledColors{false};
+	PaintedSnapshot lastSnapshot;
+	PaintedSnapshot pendingTimerSnapshot;
+	QRegion pendingTimerRegion;
+	bool hasPendingTimerSnapshot{false};
 
 public:
 	explicit VolumeMeter(QWidget *parent = nullptr, obs_source_t *source = nullptr);

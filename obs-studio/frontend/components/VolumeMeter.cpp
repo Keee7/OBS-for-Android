@@ -347,6 +347,8 @@ VolumeMeter::VolumeMeter(QWidget *parent, obs_source_t *source)
 		if (needLayoutChange()) {
 			doLayout();
 			needsRedraw.store(false, std::memory_order_release);
+			lastSnapshot.valid = false;
+			hasPendingTimerSnapshot = false;
 			update();
 			return;
 		}
@@ -361,14 +363,32 @@ VolumeMeter::VolumeMeter(QWidget *parent, obs_source_t *source)
 				}
 			}
 		}
-		if (dirty) {
-			update(getBarRect());
+		if (!dirty) {
+			return;
 		}
+
+		const uint64_t ts = os_gettime_ns();
+		const bool idle = advanceBallistics(ts);
+		const PaintedSnapshot curSnap = captureSnapshot(idle);
+		lastPaintedIdle = idle;
+		settledAtFloor.store(curSnap.atFloor, std::memory_order_release);
+
+		const QRegion delta = computeDeltaRegion(lastSnapshot, curSnap);
+		if (delta.isEmpty()) {
+			return;
+		}
+
+		pendingTimerSnapshot = curSnap;
+		pendingTimerRegion = delta;
+		hasPendingTimerSnapshot = true;
+		update(delta);
 	});
 
 	connect(App(), &OBSApp::StyleChanged, this, [this]() {
 		updateTickLabelTokenSize();
 		updateBackgroundCache(true);
+		lastSnapshot.valid = false;
+		hasPendingTimerSnapshot = false;
 		doLayout();
 	});
 
@@ -480,6 +500,8 @@ void VolumeMeter::setUseDisabledColors(bool enable)
 
 	bool forceUpdate = true;
 	updateBackgroundCache(forceUpdate);
+	lastSnapshot.valid = false;
+	hasPendingTimerSnapshot = false;
 	needsRedraw.store(true, std::memory_order_release);
 }
 
@@ -490,6 +512,8 @@ void VolumeMeter::setMuted(bool mute)
 	}
 
 	muted = mute;
+	lastSnapshot.valid = false;
+	hasPendingTimerSnapshot = false;
 	needsRedraw.store(true, std::memory_order_release);
 }
 
@@ -504,6 +528,8 @@ void VolumeMeter::refreshColors()
 
 	bool forceUpdate = true;
 	updateBackgroundCache(forceUpdate);
+	lastSnapshot.valid = false;
+	hasPendingTimerSnapshot = false;
 }
 
 QRect VolumeMeter::getBarRect() const
@@ -532,6 +558,8 @@ inline void VolumeMeter::doLayout()
 
 	updateBackgroundCache();
 	resetLevels();
+	lastSnapshot.valid = false;
+	hasPendingTimerSnapshot = false;
 
 	updateGeometry();
 }
@@ -775,12 +803,155 @@ inline int VolumeMeter::convertToInt(float number)
 	}
 }
 
-void VolumeMeter::paintEvent(QPaintEvent *)
+bool VolumeMeter::advanceBallistics(uint64_t ts)
+{
+	const qreal dt = (lastBallisticsTime == 0 || ts <= lastBallisticsTime)
+				 ? 0.0
+				 : (ts - lastBallisticsTime) * 0.000000001;
+	calculateBallistics(ts, dt);
+	lastBallisticsTime = ts;
+	return detectIdle(ts);
+}
+
+VolumeMeter::PaintedSnapshot VolumeMeter::captureSnapshot(bool idle)
+{
+	PaintedSnapshot snap;
+	snap.valid = !size().isEmpty() && displayNrAudioChannels > 0;
+	snap.idle = idle;
+	snap.vertical = vertical;
+	snap.muted = muted;
+	snap.useDisabledColors = useDisabledColors;
+	snap.widgetSize = size();
+	snap.channels = std::min(displayNrAudioChannels, MAX_AUDIO_CHANNELS);
+
+	const int meterStart = INDICATOR_THICKNESS + 2;
+	const int meterLength = vertical ? rect().height() - meterStart : rect().width() - meterStart;
+	snap.meterLength = meterLength;
+	if (!snap.valid || meterLength <= 0) {
+		snap.valid = false;
+		snap.atFloor = !clipping;
+		return snap;
+	}
+
+	const qreal scale = meterLength / minimumLevel;
+	const int clipPosition = meterLength - convertToInt(clipLevel * scale);
+
+	bool atFloor = !clipping;
+	bool triggeredClip = false;
+	{
+		QMutexLocker locker(&dataMutex);
+		for (int channelNr = 0; channelNr < snap.channels; channelNr++) {
+			const int channelNrFixed = (displayNrAudioChannels == 1 && channels > 2) ? 2 : channelNr;
+			if (displayPeak[channelNrFixed] > minimumLevel ||
+			    displayPeakHold[channelNrFixed] > minimumLevel ||
+			    displayMagnitude[channelNrFixed] > minimumLevel ||
+			    displayInputPeakHold[channelNrFixed] > minimumInputLevel) {
+				atFloor = false;
+			}
+			const int rawPeak = meterLength - convertToInt(displayPeak[channelNrFixed] * scale);
+			if (rawPeak >= clipPosition) {
+				triggeredClip = true;
+			}
+			const int peakPos = (rawPeak <= meterStart) ? 0 : std::min(rawPeak, meterLength);
+			const int rawHold = meterLength - convertToInt(displayPeakHold[channelNrFixed] * scale);
+			const int holdPos = (rawHold <= 3) ? 0 : std::min(rawHold, meterLength);
+			const int rawMag = meterLength - convertToInt(displayMagnitude[channelNrFixed] * scale);
+			const int magPos = (rawMag < 3) ? 0 : std::min(rawMag, meterLength);
+
+			snap.peakPos[channelNr] = peakPos;
+			snap.holdPos[channelNr] = holdPos;
+			snap.magPos[channelNr] = magPos;
+			snap.holdColor[channelNr] = getPeakColor(displayPeakHold[channelNrFixed]).rgb();
+			snap.inputColor[channelNr] = idle ? 0 : getPeakColor(displayInputPeakHold[channelNrFixed]).rgb();
+		}
+	}
+
+	if (triggeredClip && !clipping) {
+		QTimer::singleShot(CLIP_FLASH_DURATION_MS, this, [this]() {
+			clipping = false;
+			needsRedraw.store(true, std::memory_order_release);
+		});
+		clipping = true;
+		atFloor = false;
+	}
+
+	snap.clipping = clipping;
+	snap.atFloor = atFloor;
+	if (clipping) {
+		for (int channelNr = 0; channelNr < snap.channels; channelNr++)
+			snap.peakPos[channelNr] = meterLength;
+	}
+	return snap;
+}
+
+QRegion VolumeMeter::computeDeltaRegion(const PaintedSnapshot &prev, const PaintedSnapshot &cur) const
+{
+	if (!prev.valid || !cur.valid || prev.widgetSize != cur.widgetSize || prev.channels != cur.channels ||
+	    prev.meterLength != cur.meterLength || prev.vertical != cur.vertical || prev.muted != cur.muted ||
+	    prev.useDisabledColors != cur.useDisabledColors || prev.clipping != cur.clipping) {
+		return QRegion(getBarRect());
+	}
+	if (cur.clipping) {
+		return QRegion();
+	}
+
+	const int meterStart = INDICATOR_THICKNESS + 2;
+	const int meterLength = cur.meterLength;
+	const QRect bounds = rect();
+	constexpr int kAxisMargin = 4;
+
+	QRegion dirty;
+	auto addAxisSpan = [&](int channelOffset, int posA, int posB) {
+		const int lo = std::min(posA, posB);
+		const int hi = std::max(posA, posB);
+		QRect band;
+		if (vertical) {
+			const int yLo = std::max(0, meterLength - hi - kAxisMargin);
+			const int yHi = std::min(bounds.height(), meterLength - lo + kAxisMargin);
+			band = QRect(channelOffset, yLo, meterThickness, std::max(0, yHi - yLo));
+		} else {
+			const int xLo = std::max(meterStart, meterStart + lo - kAxisMargin);
+			const int xHi = std::min(bounds.width(), meterStart + hi + kAxisMargin);
+			band = QRect(xLo, channelOffset, std::max(0, xHi - xLo), meterThickness);
+		}
+		if (!band.isEmpty())
+			dirty += band;
+	};
+
+	for (int ch = 0; ch < cur.channels; ch++) {
+		const int channelOffset = ch * (meterThickness + 1);
+		if (prev.peakPos[ch] != cur.peakPos[ch])
+			addAxisSpan(channelOffset, prev.peakPos[ch], cur.peakPos[ch]);
+
+		if (prev.holdPos[ch] != cur.holdPos[ch] || prev.holdColor[ch] != cur.holdColor[ch]) {
+			if (prev.holdPos[ch] > 3)
+				addAxisSpan(channelOffset, prev.holdPos[ch] - 3, prev.holdPos[ch]);
+			if (cur.holdPos[ch] > 3)
+				addAxisSpan(channelOffset, cur.holdPos[ch] - 3, cur.holdPos[ch]);
+		}
+
+		if (prev.magPos[ch] != cur.magPos[ch]) {
+			if (prev.magPos[ch] >= 3)
+				addAxisSpan(channelOffset, prev.magPos[ch] - 3, prev.magPos[ch]);
+			if (cur.magPos[ch] >= 3)
+				addAxisSpan(channelOffset, cur.magPos[ch] - 3, cur.magPos[ch]);
+		}
+
+		if (prev.idle != cur.idle || prev.inputColor[ch] != cur.inputColor[ch]) {
+			QRect ind = vertical ? QRect(channelOffset, bounds.height() - INDICATOR_THICKNESS - 1,
+						     meterThickness, INDICATOR_THICKNESS + 1)
+					     : QRect(0, channelOffset, INDICATOR_THICKNESS + 1, meterThickness);
+			dirty += (ind & bounds);
+		}
+	}
+	return dirty;
+}
+
+void VolumeMeter::paintEvent(QPaintEvent *event)
 {
 	uint64_t ts = os_gettime_ns();
-	qreal timeSinceLastRedraw = (ts - lastRedrawTime) * 0.000000001;
-	calculateBallistics(ts, timeSinceLastRedraw);
-	bool idle = detectIdle(ts);
+	bool idle = advanceBallistics(ts);
+	const PaintedSnapshot curSnap = captureSnapshot(idle);
 
 	QPainter painter(this);
 
@@ -789,22 +960,8 @@ void VolumeMeter::paintEvent(QPaintEvent *)
 	QColor warning = disabledColors ? foregroundWarningColorDisabled : foregroundWarningColor;
 	QColor error = disabledColors ? foregroundErrorColorDisabled : foregroundErrorColor;
 
-	bool atFloor = !clipping;
-	{
-		QMutexLocker locker(&dataMutex);
-		for (int channelNr = 0; channelNr < displayNrAudioChannels; channelNr++) {
-			int channelNrFixed = (displayNrAudioChannels == 1 && channels > 2) ? 2 : channelNr;
-			if (displayPeak[channelNrFixed] > minimumLevel ||
-			    displayPeakHold[channelNrFixed] > minimumLevel ||
-			    displayMagnitude[channelNrFixed] > minimumLevel ||
-			    displayInputPeakHold[channelNrFixed] > minimumInputLevel) {
-				atFloor = false;
-				break;
-			}
-		}
-	}
 	lastPaintedIdle = idle;
-	settledAtFloor.store(atFloor, std::memory_order_release);
+	settledAtFloor.store(curSnap.atFloor, std::memory_order_release);
 
 	int meterStart = INDICATOR_THICKNESS + 2;
 	int meterLength = vertical ? rect().height() - (INDICATOR_THICKNESS + 2)
@@ -916,18 +1073,30 @@ void VolumeMeter::paintEvent(QPaintEvent *)
 		}
 	}
 
+	const QRegion paintedRegion = event ? event->region() : QRegion(rect());
+	if ((hasPendingTimerSnapshot && pendingTimerRegion.subtracted(paintedRegion).isEmpty()) ||
+	    paintedRegion.contains(getBarRect()) || paintedRegion.contains(rect())) {
+		lastSnapshot = hasPendingTimerSnapshot ? pendingTimerSnapshot : curSnap;
+	} else {
+		lastSnapshot.valid = false;
+	}
+	hasPendingTimerSnapshot = false;
 	lastRedrawTime = ts;
 }
 
 void VolumeMeter::resizeEvent(QResizeEvent *event)
 {
 	updateBackgroundCache();
+	lastSnapshot.valid = false;
+	hasPendingTimerSnapshot = false;
 	needsRedraw.store(true, std::memory_order_release);
 	return QWidget::resizeEvent(event);
 }
 
 void VolumeMeter::showEvent(QShowEvent *event)
 {
+	lastSnapshot.valid = false;
+	hasPendingTimerSnapshot = false;
 	needsRedraw.store(true, std::memory_order_release);
 	QWidget::showEvent(event);
 }

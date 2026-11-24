@@ -55,6 +55,9 @@ MediaControls::MediaControls(QWidget *parent, bool compact)
 {
 	ui->setupUi(this);
 	setFocusPolicy(Qt::StrongFocus);
+#ifdef __ANDROID__
+	ui->slider->setLightweightMode(true);
+#endif
 	if (compact) {
 		auto *transport = new QHBoxLayout;
 		for (auto *button : {ui->playPauseButton, ui->previousButton, ui->stopButton, ui->nextButton}) {
@@ -155,7 +158,7 @@ void MediaControls::AbsoluteSliderClicked()
 		StopMediaTimer();
 	}
 
-	seek = ui->slider->value();
+	seek = ui->slider->effectiveValue();
 	seekTimer.start(100);
 }
 
@@ -263,7 +266,7 @@ void MediaControls::SetRestartState()
 	ui->playPauseButton->style()->polish(ui->playPauseButton);
 	ui->playPauseButton->setToolTip(QTStr("ContextBar.MediaControls.RestartMedia"));
 
-	ui->slider->setValue(0);
+	ui->slider->setProgressValue(0);
 
 	if (!isSlideshow) {
 		ui->timerLabel->setText("--:--:--");
@@ -442,14 +445,14 @@ void MediaControls::SetSliderPosition()
 	}
 
 	if (!ui->slider->isSliderDown()) {
-		const int curPos = ui->slider->value();
+		const int curPos = ui->slider->effectiveValue();
 #ifdef __ANDROID__
 		const int trackPixels = ui->slider->width();
 		const int minStep = (trackPixels > 0) ? std::max(1, maxSlider / trackPixels) : 1;
 		if (sliderPosition != curPos &&
 		    (sliderPosition == 0 || sliderPosition == maxSlider ||
 		     std::abs(sliderPosition - curPos) >= minStep)) {
-			ui->slider->setValue(sliderPosition);
+			ui->slider->setProgressValue(sliderPosition);
 		}
 #else
 		if (sliderPosition != curPos) {
