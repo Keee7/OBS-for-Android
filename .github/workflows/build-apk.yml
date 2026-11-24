@@ -1,27 +1,48 @@
 name: Build Android APK
 
-# 触发：
-#   push 到 main           → 构建；有密钥则签名
-#   push tag v*            → 构建 + 创建 GitHub Release
-#   pull_request           → 使用公开的开发密钥签名（fork 的 PR 拿不到 Secrets）
-#   workflow_dispatch      → 手动，可勾"签名 / 发布 Release"
+# 触发（节省 Actions 配额策略）：
+#   push tag v*                      → 必定构建 + 签名 + 创建 GitHub Release
+#   workflow_dispatch                → 手动触发，可勾"签名 / 发布 Release"
+#   pull_request（非 Draft）         → 使用公开开发密钥签名
+#   push 到 main（提交含 [build-apk]） → 显式请求构建（普通代码/文档 push 跳过不计费）
 on:
   push:
     branches: [main]
     tags: ['v*']
-    # 纯文档改动不触发 180 分钟构建。tag push 不受 paths 过滤影响，发版仍会触发。
-    # 布局：OBS 源码在 obs-studio/ 子目录，依赖/脚本在仓库根。
+    # tag push 不受 paths 过滤影响，发版必定触发。
     paths:
       - 'obs-studio/**'
+      - '!obs-studio/**/*.md'
+      - '!obs-studio/docs/**'
+      - '!obs-studio/.github/**'
+      - '!obs-studio/plugins/win-*/**'
+      - '!obs-studio/plugins/mac-*/**'
+      - '!obs-studio/plugins/linux-*/**'
       - 'deps-android/**'
+      - '!deps-android/**/*.md'
       - 'scripts/**'
+      - '!scripts/**/*.md'
+      - '!scripts/build-frontend-apk-windows.ps1'
+      - '!scripts/build-deps-windows.sh'
+      - '!scripts/build-frontend-apk-wsl.sh'
       - '.github/workflows/build-apk.yml'
   pull_request:
     branches: [main]
     paths:
       - 'obs-studio/**'
+      - '!obs-studio/**/*.md'
+      - '!obs-studio/docs/**'
+      - '!obs-studio/.github/**'
+      - '!obs-studio/plugins/win-*/**'
+      - '!obs-studio/plugins/mac-*/**'
+      - '!obs-studio/plugins/linux-*/**'
       - 'deps-android/**'
+      - '!deps-android/**/*.md'
       - 'scripts/**'
+      - '!scripts/**/*.md'
+      - '!scripts/build-frontend-apk-windows.ps1'
+      - '!scripts/build-deps-windows.sh'
+      - '!scripts/build-frontend-apk-wsl.sh'
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
     inputs:
@@ -45,33 +66,53 @@ permissions:
 jobs:
   build:
     name: Build arm64-v8a APK
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
+      (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-apk]'))
     # Ubuntu 24.04：自带 JDK 17、NDK r30、Android SDK (36/36.0.0) 与 CMake 3.31.6。
-    # 由 workflow 开头通过 setup-gradle 锁定 Gradle 版本、aqt 安装并缓存 Qt。
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 90
 
-    # 工作流级只给 read（默认最小权限）；这一级要 write 是因为"打 tag 时创建 Release"
-    # 需要 contents:write。只在 push tag（已完成过仓库写权限校验）或手动触发时才会走到发布那一步，
-    # PR 事件拿不到这个写权限。
+    # 只在打 tag 或手动勾选发布时用到 contents:write 创建 Release。
     permissions:
       contents: write
 
     env:
-      # 工具链版本。runner 环境准备在 workflow 开头统一完成；BUILD_TOOLS / PLATFORM 用于配置与签名校验。
       NDK_VERSION: r30
       QT_VERSION: 6.12.0
       GRADLE_VERSION: '9.5.1'
       BUILD_TOOLS: 36.0.0
       PLATFORM: android-36
-      # 下载物放到工作区**外**（$GITHUB_WORKSPACE/.. 就是 runner 的 work 目录；
-      # job 级 env 里没有 runner.* 上下文，也不能直接写 $GITHUB_WORKSPACE）：
-      # 它有几 GB，不能被工作区或缓存打包。
       DL_ROOT: ${{ github.workspace }}/../obs-dl
 
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+
+      # ---- 先恢复预编依赖缓存，据此决定需要安装哪些宿主包 ----
+      - name: Compute dependency cache key
+        id: depkey
+        run: |
+          set -euo pipefail
+          HASH="$(cat deps-android/versions.sh deps-android/defs.sh deps-android/build.sh \
+                  scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch \
+                  scripts/android-native-deps/ffmpeg-8.0.3-android-tls.patch \
+                  scripts/android-native-deps/ffmpeg-8.0.3-srt-rendezvous.patch \
+                  scripts/android-native-deps/build-librist.sh \
+                  scripts/android-native-deps/x265-3.6-android-asm-target.patch \
+                  scripts/relocate-android-pkgconfig.sh | sha256sum | cut -c1-16)"
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "依赖缓存键哈希=$HASH"
+
+      - name: Cache prebuilt dependencies
+        id: deps_cache
+        uses: actions/cache@v4
+        with:
+          path: deps-android/prebuilt
+          key: obsdeps-v2-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-${{ steps.depkey.outputs.hash }}
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -87,34 +128,46 @@ jobs:
 
       - name: Install host build tools
         timeout-minutes: 10
+        env:
+          DEPS_CACHE_HIT: ${{ steps.deps_cache.outputs.cache-hit }}
         run: |
-          # 7-Zip：Ubuntu 24.04 上 **p7zip-full 已变成 transitional 包**，不再提供
-          # /usr/bin/7z；提供二进制的是 7zip 包（7z/7za/7zr）。所以这里装 7zip。
-          # autoconf/automake/libtool：deps-android 里部分依赖走 autoconf（autoreconf -fi），缺了会直接失败。
-          # 基础包大多已预装在 runner 镜像中（apt 会直接跳过，几乎零耗时），显式保留以避免镜像调整导致缺失；
-          # 仅去掉 arm64 打包用不到的 x86 汇编器 nasm/yasm。
+          # 命中 obsdeps-v2 时无需构建第三方依赖，只装 OBS 主构建与 Qt 打包所需的最小工具集；
+          # 并先检查 dpkg 状态，若全部已存在则跳过 apt-get update。
           host_packages=(
-            7zip ninja-build meson build-essential curl unzip zip ca-certificates
-            patch pkg-config dpkg-dev autoconf automake libtool ccache
+            ninja-build ccache
             libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev
           )
-          apt_network_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
-          fetch_host_packages() {
-            sudo timeout -k 5s 90s apt-get "${apt_network_options[@]}" update --error-on=any &&
-              sudo timeout -k 5s 150s apt-get "${apt_network_options[@]}" install \
-                -y --no-install-recommends --download-only "${host_packages[@]}"
-          }
-          if ! fetch_host_packages; then
-            echo "::warning::Ubuntu mirror update or download failed. Retrying with archive.ubuntu.com."
-            sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors\.txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
-            fetch_host_packages
+          if [ "${DEPS_CACHE_HIT:-}" != "true" ]; then
+            host_packages+=(
+              7zip meson build-essential curl unzip zip ca-certificates
+              patch pkg-config dpkg-dev autoconf automake libtool
+            )
           fi
-          # 下载完成后再运行 dpkg，避免下载超时中断包安装。
-          sudo apt-get install -y --no-install-recommends --no-download "${host_packages[@]}"
-          # 确认解包器真的在（脚本也会自己找一遍；早点失败更好定位）
-          for c in 7z 7zz 7za 7zr; do command -v "$c" >/dev/null 2>&1 && { echo "7-Zip: $c"; break; }; done
-          # 确认 autoreconf 就位（依赖构建的硬前提）
-          autoreconf --version | head -1
+          missing=()
+          for pkg in "${host_packages[@]}"; do
+            dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+          done
+          if [ ${#missing[@]} -eq 0 ]; then
+            echo "所有必需宿主包均已就位，跳过 apt-get"
+          else
+            echo "需要安装的宿主包：${missing[*]}"
+            apt_network_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+            fetch_host_packages() {
+              sudo timeout -k 5s 90s apt-get "${apt_network_options[@]}" update --error-on=any &&
+                sudo timeout -k 5s 150s apt-get "${apt_network_options[@]}" install \
+                  -y --no-install-recommends --download-only "${missing[@]}"
+            }
+            if ! fetch_host_packages; then
+              echo "::warning::Ubuntu mirror update or download failed. Retrying with archive.ubuntu.com."
+              sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors\.txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
+              fetch_host_packages
+            fi
+            sudo apt-get install -y --no-install-recommends --no-download "${missing[@]}"
+          fi
+          if [ "${DEPS_CACHE_HIT:-}" != "true" ]; then
+            for c in 7z 7zz 7za 7zr; do command -v "$c" >/dev/null 2>&1 && { echo "7-Zip: $c"; break; }; done
+            autoreconf --version | head -1
+          fi
 
       - name: Cache Qt toolchain
         uses: actions/cache@v4
@@ -139,41 +192,14 @@ jobs:
             exit 1
           }
 
-      # ---- ccache：编译对象缓存（deps 与主构建共用一份） ----
-      # key 带 sha + run_attempt：同一提交的手动 re-run 不会因 immutable key 报
-      # Cache save failed；restore-keys 前缀不含 sha/attempt，历史缓存仍可命中。
-      - name: Cache ccache objects
-        uses: actions/cache@v4
+      # ---- ccache：仅缓存 OBS 主构建（≤512M）；PR 只读不回写，防挤爆 10 GB 配额淘汰 deps/Qt ----
+      - name: Restore ccache objects
+        uses: actions/cache/restore@v4
         with:
           path: ~/.ccache
-          key: obsccache-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-${{ github.sha }}-${{ github.run_attempt }}
+          key: obsccache-v2-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-${{ github.sha }}-${{ github.run_attempt }}
           restore-keys: |
-            obsccache-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-
-
-      # ---- 依赖缓存：FFmpeg 与 Android 静态依赖 ----
-      # 键里带 versions.sh/defs.sh/ffmpeg 补丁的内容哈希：依赖定义一变缓存即失效，
-      # 避免"用了旧二进制却以为源码编译过了"。
-      - name: Compute dependency cache key
-        id: depkey
-        run: |
-          set -euo pipefail
-          HASH="$(cat deps-android/versions.sh deps-android/defs.sh deps-android/build.sh \
-                  scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch \
-                  scripts/android-native-deps/ffmpeg-8.0.3-android-tls.patch \
-                  scripts/android-native-deps/ffmpeg-8.0.3-srt-rendezvous.patch \
-                  scripts/android-native-deps/build-librist.sh \
-                  scripts/android-native-deps/x265-3.6-android-asm-target.patch \
-                  scripts/relocate-android-pkgconfig.sh | sha256sum | cut -c1-16)"
-          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
-          echo "依赖缓存键哈希=$HASH"
-
-      - name: Cache dependency sources and prebuilt libs
-        uses: actions/cache@v4
-        with:
-          path: |
-            deps-android/src
-            deps-android/prebuilt
-          key: obsdeps-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-${{ steps.depkey.outputs.hash }}
+            obsccache-v2-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-
 
       # 独立一步恢复密钥：这样"有没有密钥"的判断只在一处，构建步骤里不再套条件表达式。
       - name: Restore signing keystore from secrets
@@ -209,6 +235,13 @@ jobs:
           SIGN_STORE_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEYSTORE_PASSWORD }}
           SIGN_KEY_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEY_PASSWORD }}
         run: bash scripts/ci-build-android.sh
+
+      - name: Save ccache objects
+        if: github.event_name != 'pull_request'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: obsccache-v2-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-${{ github.sha }}-${{ github.run_attempt }}
 
       - name: Locate APK and checksum
         id: apk
@@ -247,13 +280,19 @@ jobs:
             echo "| ABI / API | arm64-v8a / minSdk 29 |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Release 资产不计入 Actions Artifact 500 MB 存储配额，发版时跳过重复的 artifact 上传。
       - name: Upload APK artifact
+        if: |
+          !(steps.apk.outputs.signed == 'yes' &&
+            (startsWith(github.ref, 'refs/tags/v') ||
+             (github.event_name == 'workflow_dispatch' && inputs.create_release)))
         uses: actions/upload-artifact@v4
         with:
           name: obs-android-apk-${{ github.sha }}
           path: ${{ steps.apk.outputs.path }}
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
+          compression-level: 0
 
       - name: Create GitHub Release
         # 只在打 v* tag 时发布（手动触发要先勾 create_release）；
@@ -280,25 +319,7 @@ jobs:
             未在真机验证的范围见仓库 README 的 Limitations 一节。
           fail_on_unmatched_files: true
 
-      # ---- 失败诊断：跑挂时把能定位问题的碎片留下来 ----
-      # 构建脚本 500 行、单次 10+ 分钟，失败后翻 16k 行日志成本太高。
-      - name: 失败时上传构建日志
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs-${{ github.run_attempt }}
-          path: |
-            build-fe-*/CMakeFiles/CMakeConfigureLog.yaml
-            build-fe-*/CMakeCache.txt
-            build-fe-*/CMakeFiles/CMakeOutput.log
-            build-fe-*/CMakeFiles/CMakeError.log
-            build-fe-*/frontend/android-*-deployment-settings.json
-            build-fe-*/frontend/android-build/build.gradle
-            build-fe-*/frontend/android-build/build/outputs/logs/*.txt
-            build-fe-*/.final-apk-path
-          if-no-files-found: warn
-          retention-days: 7
-
+      # ---- 失败诊断：生成摘要并与构建日志合并单包上传 ----
       - name: 失败时诊断
         if: failure()
         run: |
@@ -332,11 +353,20 @@ jobs:
           cat diagnostics.txt
           echo "::endgroup::"
 
-      - name: 失败时上传诊断摘要
+      - name: 失败时上传构建日志与诊断
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-diagnostics-${{ github.run_attempt }}
-          path: diagnostics.txt
+          name: build-logs-${{ github.run_attempt }}
+          path: |
+            diagnostics.txt
+            build-fe-*/CMakeFiles/CMakeConfigureLog.yaml
+            build-fe-*/CMakeCache.txt
+            build-fe-*/CMakeFiles/CMakeOutput.log
+            build-fe-*/CMakeFiles/CMakeError.log
+            build-fe-*/frontend/android-*-deployment-settings.json
+            build-fe-*/frontend/android-build/build.gradle
+            build-fe-*/frontend/android-build/build/outputs/logs/*.txt
+            build-fe-*/.final-apk-path
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 3

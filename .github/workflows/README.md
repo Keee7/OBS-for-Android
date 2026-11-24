@@ -48,16 +48,16 @@ bash scripts/generate-release-key.sh ~/obs-release.jks
 
 ---
 
-## 二、触发构建
+## 二、触发构建（节省 CI 配额）
 
 | 方式 | 结果 |
 | --- | --- |
-| push 到 `main` | 构建；配了 Secrets 就签名 |
-| push 一个 `v*` tag（如 `v0.1.19`） | 构建 + 签名 + **创建 GitHub Release** 并附件 APK |
-| Pull Request | 使用仓库中的公开开发密钥签名，产物可安装；与私有密钥签名的包不能直接覆盖安装 |
+| push 到 `main`（commit 含 `[build-apk]`） | 构建；配了 Secrets 就签名（普通提交跳过，不消耗分钟数） |
+| push 一个 `v*` tag（如 `v0.1.19`） | 构建 + 签名 + **创建 GitHub Release** 并附件 APK（跳过重复 Artifact 上传） |
+| Pull Request（非 Draft） | 使用仓库中的公开开发密钥签名，产物可安装；与私有密钥签名的包不能直接覆盖安装 |
 | 手动 `workflow_dispatch` | 可勾选"签名"与"发布 Release" |
 
-产物在 Actions 页面的 **Artifacts** 里（保留 30 天），文件名 `obs-android-apk-<commit sha>`。
+产物在 Actions 页面的 **Artifacts** 里（默认保留 3 天，Release 触发不额外占 Artifact 配额），文件名 `obs-android-apk-<commit sha>`。
 每次构建的 SHA-256 与是否签名会写进该次运行的 **Summary**。
 
 打 tag 发版：
@@ -65,6 +65,12 @@ bash scripts/generate-release-key.sh ~/obs-release.jks
 ```sh
 git tag v0.1.19
 git push origin v0.1.19
+```
+
+日常提交如确需直接构建 APK，在 commit message 中带上 `[build-apk]`：
+
+```sh
+git commit -m "fix(uvc): ... [build-apk]"
 ```
 
 ---
@@ -76,16 +82,16 @@ git push origin v0.1.19
 
 | 场景 | 大致耗时 |
 | --- | --- |
-| 首次（缓存全空） | **40–60 分钟** |
-| 依赖 + 工具链都命中缓存 | **10–15 分钟** |
+| 首次（缓存全空） | **35–50 分钟** |
+| 依赖 + 工具链 + ccache 命中 | **6–10 分钟** |
 
-CI 复用 runner 上的 Android SDK、NDK 和 CMake，使用 JDK 17，并通过 `setup-gradle` 安装 Gradle 9.5.1。缓存如下。
+CI 复用 runner 上的 Android SDK、NDK 和 CMake，使用 JDK 17，通过 `setup-gradle` 安装 Gradle 9.5.1（开启 `--parallel`），OBS 主构建使用 `-O2 -g0 -DNDEBUG` 并关闭 IPO（最终 `.so` 都会被 strip，免去无谓的调试符号生成以提速并压小缓存）。缓存如下：
 
-| 缓存 | 内容 | 失效条件 |
+| 缓存 | 内容 | 失效条件 / 策略 |
 | --- | --- | --- |
-| `obsdeps-…` | `deps-android/src` + `deps-android/prebuilt` | `versions.sh`/`defs.sh`/`build.sh`/FFmpeg 补丁 的内容变了 |
+| `obsdeps-v2-…` | `deps-android/prebuilt`（仅预编产物，不含 `src/`） | `versions.sh`/`defs.sh`/`build.sh`/FFmpeg 补丁 的内容变了 |
 | `obsqt-v2-…` | `~/Qt`（Qt 宿主和 Android arm64 套件） | Qt 版本变了 |
-| `obsccache-…` | `~/.ccache`（原生编译缓存） | 首选当前提交和构建次数，按 NDK 与 Qt 版本回退 |
+| `obsccache-v2-…` | `~/.ccache`（仅缓存 OBS 主构建，上限 512M；PR 只读不回写） | 首选当前提交和构建次数，按 NDK 与 Qt 版本回退 |
 | `setup-gradle` | Gradle 用户目录中的缓存 | 由 `gradle/actions/setup-gradle` 管理，PR 只读 |
 
 > GitHub 的 Actions 缓存**约 7 天不用会被回收**，且仓库总量有配额。如果长时间没构建，

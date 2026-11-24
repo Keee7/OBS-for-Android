@@ -105,9 +105,7 @@ export PATH="$SDK/platform-tools:$SDK/cmdline-tools/latest/bin:$JAVA_HOME/bin:$P
 
 log() { echo ""; echo "########## $* ##########"; }
 
-# ccache：按「预处理后的源码 + 编译器 + 完整编译选项」的内容哈希复用 .o。
-# 三层共用一份缓存：deps 的 autotools/x264/ffmpeg 走 build.sh 里的同名 wrapper，
-# deps 的 CMake 系与 OBS 主构建走 CMAKE_{C,CXX}_COMPILER_LAUNCHER。
+# ccache：仅缓存 OBS 主体与插件编译产物（deps 产物另由 obsdeps 缓存，不混入以防超出 CI 配额淘汰）。
 # COMPILERCHECK=content 是因为 NDK 是解压出来的，不同 runner 上 mtime 不同。
 setup_ccache() {
     if ! command -v ccache >/dev/null 2>&1; then
@@ -119,9 +117,12 @@ setup_ccache() {
     export CCACHE_BASEDIR="${CCACHE_BASEDIR:-$ROOT}"
     export CCACHE_NOHASHDIR=true
     export CCACHE_COMPILERCHECK=content
-    export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-3G}"
+    export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-512M}"
     export CCACHE_COMPRESS=true
-    log "ccache 已启用：$(ccache --version | head -1) dir=$CCACHE_DIR"
+    export CCACHE_COMPRESSLEVEL="${CCACHE_COMPRESSLEVEL:-6}"
+    export CCACHE_SLOPPINESS="time_macros,include_file_mtime,include_file_ctime"
+    ccache -z >/dev/null 2>&1 || true
+    log "ccache 已启用：$(ccache --version | head -1) dir=$CCACHE_DIR max=$CCACHE_MAXSIZE"
 }
 
 # ---------------------------------------------------------------- 工具链校验
@@ -243,7 +244,7 @@ build_deps() {
     log "拉取依赖源码"
     ( cd "$ROOT/deps-android" && bash fetch.sh )
     log "交叉编译依赖（含 FFmpeg/x264，最慢的一环）"
-    ( cd "$ROOT/deps-android" && NDK="$NDK" API="$API" JOBS="$JOBS" USE_CCACHE="${USE_CCACHE:-0}" bash build.sh "$ABI" )
+    ( cd "$ROOT/deps-android" && NDK="$NDK" API="$API" JOBS="$JOBS" USE_CCACHE=0 bash build.sh "$ABI" )
     for lib in libavcodec.a libusb-1.0.a libturbojpeg.a; do
         [ -f "$PREFIX/lib/$lib" ] || { echo "FATAL: 依赖缺失：$PREFIX/lib/$lib" >&2; exit 1; }
     done
@@ -329,10 +330,13 @@ configure_obs() {
         -DANDROID_PLATFORM="android-$API" \
         -DANDROID_STL=c++_shared \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DHAS_INTERPROCEDURAL_OPTIMIZATION=OFF \
+        -DCMAKE_C_FLAGS_RELWITHDEBINFO="-O2 -g0 -DNDEBUG" \
+        -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g0 -DNDEBUG" \
         -DCMAKE_PREFIX_PATH="$PREFIX;$QT/android_arm64_v8a" \
         -DQT_HOST_PATH="$HOST" \
         -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-        -DENABLE_PLUGINS=ON \
+        -DENABLE_CORE_MODULES=ON \
         -DENABLE_FRONTEND=ON \
         -DENABLE_SCRIPTING=OFF \
         -DENABLE_HEVC=ON \
@@ -345,6 +349,9 @@ configure_obs() {
 build_obs() {
     log "构建整树（-j$JOBS）"
     cmake --build "$BUILD_DIR" -j"$JOBS"
+    if [ "${USE_CCACHE:-0}" = "1" ] && command -v ccache >/dev/null 2>&1; then
+        ccache -s || true
+    fi
 }
 
 package_apk() {
@@ -425,7 +432,7 @@ package_apk() {
     cp -f "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" "$ab_dir/libs/Qt6Android.jar"
     cp -f "$BUILD_DIR/qt-android-platform/libplugins_platforms_qtforandroid_arm64-v8a.so" \
         "$ab_dir/libs/arm64-v8a/libplugins_platforms_qtforandroid_arm64-v8a.so"
-    "$GRADLE_BIN" --no-daemon -p "$ab_dir" assembleRelease
+    "$GRADLE_BIN" --no-daemon --parallel -p "$ab_dir" assembleRelease
 
 
     local apk
