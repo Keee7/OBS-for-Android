@@ -46,15 +46,18 @@ endfunction()
 FetchContent_MakeAvailable(obs_qtbase_android)
 set(QtBase_SOURCE_DIR "${obs_qtbase_android_SOURCE_DIR}")
 
-set(patch "${CMAKE_CURRENT_LIST_DIR}/qt-6.12.0-accessibility.patch")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${patch}")
-file(SHA256 "${patch}" patch_hash)
+set(accessibility_patch "${CMAKE_CURRENT_LIST_DIR}/qt-6.12.0-accessibility.patch")
+set(backingstore_patch "${CMAKE_CURRENT_LIST_DIR}/qt-6.12.0-backingstore.patch")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${accessibility_patch}" "${backingstore_patch}")
+file(SHA256 "${accessibility_patch}" accessibility_hash)
+file(SHA256 "${backingstore_patch}" backingstore_hash)
+string(SHA256 patch_hash "${accessibility_hash}${backingstore_hash}")
 string(SUBSTRING "${patch_hash}" 0 16 patch_hash)
 set(patched_source "${CMAKE_CURRENT_BINARY_DIR}/qtbase-${patch_hash}")
 if(NOT EXISTS "${patched_source}/applied")
   file(COPY "${QtBase_SOURCE_DIR}/src/plugins/platforms/android" DESTINATION "${patched_source}/src/plugins/platforms")
   execute_process(
-    COMMAND git -c core.longpaths=true apply "${patch}"
+    COMMAND git -c core.longpaths=true apply "${accessibility_patch}" "${backingstore_patch}"
     WORKING_DIRECTORY "${patched_source}"
     COMMAND_ERROR_IS_FATAL ANY
   )

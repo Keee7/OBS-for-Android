@@ -1,4 +1,8 @@
 #include "MediaControls.hpp"
+
+#include <QFontMetrics>
+#include <algorithm>
+#include <cstdlib>
 #include "ui_media-controls.h"
 
 #include <OBSApp.hpp>
@@ -213,7 +217,8 @@ void MediaControls::StartMediaTimer()
 
 	if (!mediaTimer.isActive()) {
 #ifdef __ANDROID__
-		mediaTimer.start(compact ? 100 : 50);
+		mediaTimer.setTimerType(Qt::CoarseTimer);
+		mediaTimer.start(250);
 #else
 		mediaTimer.start(compact ? 50 : 16);
 #endif
@@ -356,6 +361,65 @@ void MediaControls::SetSource(OBSSource source)
 	RefreshControls();
 }
 
+namespace {
+constexpr char kLastSecProp[] = "_obs_last_sec";
+constexpr char kLastCountDownProp[] = "_obs_last_countdown";
+constexpr char kLastFontKeyProp[] = "_obs_last_font_key";
+
+void ensureStableLabelWidth(QLabel *label, const QString &sampleText)
+{
+	const QString fontKey = label->font().key();
+	if (label->property(kLastFontKeyProp).toString() == fontKey) {
+		return;
+	}
+
+	const int minW = QFontMetrics(label->font()).horizontalAdvance(sampleText) + 4;
+	if (label->minimumWidth() < minW) {
+		label->setMinimumWidth(minW);
+	}
+	label->setProperty(kLastFontKeyProp, fontKey);
+}
+
+void updateTimeLabelIfChanged(QLabel *label, int seconds, bool negativePrefix, const QString &formatted)
+{
+	const QVariant prevSec = label->property(kLastSecProp);
+	const QVariant prevNeg = label->property(kLastCountDownProp);
+	if (prevSec.isValid() && prevSec.toInt() == seconds && prevNeg.isValid() && prevNeg.toBool() == negativePrefix) {
+		return;
+	}
+
+	label->setText(negativePrefix ? (QLatin1Char('-') + formatted) : formatted);
+	label->setProperty(kLastSecProp, seconds);
+	label->setProperty(kLastCountDownProp, negativePrefix);
+}
+
+template<typename FormatFn>
+void syncMediaTimeLabels(QLabel *timerLabel, QLabel *durationLabel, bool compact, bool countDownTimer,
+			 int64_t timeMs, int64_t durationMs, FormatFn &&formatFn)
+{
+	ensureStableLabelWidth(timerLabel, QStringLiteral("88:88:88"));
+	const int curSec = (int)(timeMs / 1000);
+	const QVariant prevTimer = timerLabel->property(kLastSecProp);
+	if (!prevTimer.isValid() || prevTimer.toInt() != curSec) {
+		updateTimeLabelIfChanged(timerLabel, curSec, false, formatFn(curSec));
+	}
+
+	if (compact) {
+		return;
+	}
+
+	ensureStableLabelWidth(durationLabel, QStringLiteral("-88:88:88"));
+	const int64_t durMs = countDownTimer ? std::max<int64_t>(0, durationMs - timeMs) : durationMs;
+	const int durSec = (int)(durMs / 1000);
+	const QVariant prevDur = durationLabel->property(kLastSecProp);
+	const QVariant prevNeg = durationLabel->property(kLastCountDownProp);
+	if (!prevDur.isValid() || prevDur.toInt() != durSec || !prevNeg.isValid() ||
+	    prevNeg.toBool() != countDownTimer) {
+		updateTimeLabelIfChanged(durationLabel, durSec, countDownTimer, formatFn(durSec));
+	}
+}
+} // namespace
+
 void MediaControls::SetSliderPosition()
 {
 	if (!isVisible()) {
@@ -367,19 +431,35 @@ void MediaControls::SetSliderPosition()
 		return;
 	}
 
-	float time = (float)obs_source_media_get_time(source);
-	float duration = (float)obs_source_media_get_duration(source);
+	const int64_t durationMs = std::max<int64_t>(0, obs_source_media_get_duration(source));
+	const int64_t timeMs = (durationMs > 0) ? std::clamp<int64_t>(obs_source_media_get_time(source), 0, durationMs)
+						: 0;
+	const int maxSlider = ui->slider->maximum();
 
-	float sliderPosition;
-
-	if (duration) {
-		sliderPosition = (time / duration) * (float)ui->slider->maximum();
-	} else {
-		sliderPosition = 0.0f;
+	int sliderPosition = 0;
+	if (durationMs > 0 && maxSlider > 0) {
+		sliderPosition = (int)std::clamp<int64_t>((timeMs * maxSlider) / durationMs, 0, maxSlider);
 	}
 
-	ui->slider->setValue((int)sliderPosition);
-	UpdateLabels((int)sliderPosition);
+	if (!ui->slider->isSliderDown()) {
+		const int curPos = ui->slider->value();
+#ifdef __ANDROID__
+		const int trackPixels = ui->slider->width();
+		const int minStep = (trackPixels > 0) ? std::max(1, maxSlider / trackPixels) : 1;
+		if (sliderPosition != curPos &&
+		    (sliderPosition == 0 || sliderPosition == maxSlider ||
+		     std::abs(sliderPosition - curPos) >= minStep)) {
+			ui->slider->setValue(sliderPosition);
+		}
+#else
+		if (sliderPosition != curPos) {
+			ui->slider->setValue(sliderPosition);
+		}
+#endif
+	}
+
+	syncMediaTimeLabels(ui->timerLabel, ui->durationLabel, compact, countDownTimer, timeMs, durationMs,
+			    [this](int sec) { return FormatSeconds(sec); });
 }
 
 QString MediaControls::FormatSeconds(int totalSeconds)
@@ -559,18 +639,12 @@ void MediaControls::UpdateLabels(int val)
 		return;
 	}
 
-	float duration = (float)obs_source_media_get_duration(source);
-	float percent = (float)val / (float)ui->slider->maximum();
+	const int64_t durationMs = std::max<int64_t>(0, obs_source_media_get_duration(source));
+	const int maxSlider = ui->slider->maximum();
+	const int64_t timeMs = (durationMs > 0 && maxSlider > 0)
+				       ? std::clamp<int64_t>((int64_t(val) * durationMs) / maxSlider, 0, durationMs)
+				       : 0;
 
-	float time = percent * duration;
-
-	ui->timerLabel->setText(FormatSeconds((int)(time / 1000.0f)));
-
-	if (compact)
-		return;
-	if (!countDownTimer) {
-		ui->durationLabel->setText(FormatSeconds((int)(duration / 1000.0f)));
-	} else {
-		ui->durationLabel->setText(QString("-") + FormatSeconds((int)((duration - time) / 1000.0f)));
-	}
+	syncMediaTimeLabels(ui->timerLabel, ui->durationLabel, compact, countDownTimer, timeMs, durationMs,
+			    [this](int sec) { return FormatSeconds(sec); });
 }

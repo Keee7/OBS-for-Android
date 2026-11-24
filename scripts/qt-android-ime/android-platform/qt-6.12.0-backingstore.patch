@@ -1,0 +1,885 @@
+--- a/src/plugins/platforms/android/CMakeLists.txt
++++ b/src/plugins/platforms/android/CMakeLists.txt
+@@ -34,6 +34,7 @@
+         qandroidplatformservices.cpp qandroidplatformservices.h
+         qandroidplatformtheme.cpp qandroidplatformtheme.h
+         qandroidplatformwindow.cpp qandroidplatformwindow.h
++        qandroidrhibackingstore.cpp qandroidrhibackingstore.h
+         androidwindowembedding.cpp androidwindowembedding.h
+         androidbackendregister.cpp androidbackendregister.h
+     NO_UNITY_BUILD_SOURCES
+@@ -51,6 +52,7 @@
+         qandroidplatformscreen.cpp
+         qandroidplatformservices.cpp
+         qandroidplatformwindow.cpp
++        qandroidrhibackingstore.cpp
+     INCLUDE_DIRECTORIES
+         ${CMAKE_CURRENT_SOURCE_DIR}
+         ${QtBase_SOURCE_DIR}/src/3rdparty/android
+--- a/src/plugins/platforms/android/qandroidplatformintegration.cpp
++++ b/src/plugins/platforms/android/qandroidplatformintegration.cpp
+@@ -51,6 +51,8 @@
+ #include "qandroidplatformvulkaninstance.h"
+ #endif
+ 
++#include "qandroidrhibackingstore.h"
++
+ #include <QtGui/qpa/qplatforminputcontextfactory_p.h>
+ 
+ QT_BEGIN_NAMESPACE
+@@ -359,7 +360,7 @@
+     if (!QtAndroidPrivate::activity().isValid())
+         return nullptr;
+ 
+-    return new QRhiBackingStore(window);
++    return new QAndroidRhiBackingStore(window);
+ }
+ 
+ #if QT_CONFIG(egl)
+--- /dev/null
++++ b/src/plugins/platforms/android/qandroidrhibackingstore.h
+@@ -0,0 +1,89 @@
++// Copyright (C) 2021 The Qt Company Ltd.
++// SPDX-License-Identifier: LicenseRef-Qt-Commercial OR LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
++
++#ifndef QANDROIDRHIBACKINGSTORE_H
++#define QANDROIDRHIBACKINGSTORE_H
++
++#include <QtGui/private/qrhibackingstore_p.h>
++#include <QtCore/qhash.h>
++#include <QtCore/qobject.h>
++#include <QtCore/qvarlengtharray.h>
++#include <rhi/qrhi.h>
++
++#include <memory>
++
++QT_BEGIN_NAMESPACE
++
++class QAndroidRhiBackingStore : public QRhiBackingStore
++{
++public:
++    explicit QAndroidRhiBackingStore(QWindow *window);
++    ~QAndroidRhiBackingStore() override;
++
++    FlushResult rhiFlush(QWindow *window,
++                         qreal sourceDevicePixelRatio,
++                         const QRegion &region,
++                         const QPoint &offset,
++                         QPlatformTextureList *textures,
++                         bool translucentBackground,
++                         qreal sourceTransformFactor = 0) override;
++
++    void destroySwapchainForWindow(QWindow *window);
++
++private:
++    enum UpdateUniformOption {
++        NeedsRedBlueSwap = 1 << 0,
++        NeedsAlphaRotate = 1 << 1
++    };
++    Q_DECLARE_FLAGS(UpdateUniformOptions, UpdateUniformOption)
++
++    enum UpdateQuadDataOption {
++        NeedsLinearFiltering = 1 << 0
++    };
++    Q_DECLARE_FLAGS(UpdateQuadDataOptions, UpdateQuadDataOption)
++
++    struct PerQuadData {
++        QRhiBuffer *ubuf = nullptr;
++        QRhiShaderResourceBindings *srb = nullptr;
++        QRhiShaderResourceBindings *srbExtra = nullptr;
++        QRhiTexture *lastUsedTexture = nullptr;
++        QRhiTexture *lastUsedTextureExtra = nullptr;
++        QRhiSampler::Filter lastUsedFilter = QRhiSampler::None;
++        bool isValid() const { return ubuf && srb; }
++        void reset();
++    };
++
++    struct SwapchainData {
++        QRhiSwapChain *swapchain = nullptr;
++        QRhiRenderPassDescriptor *renderPassDescriptor = nullptr;
++        QObject *windowWatcher = nullptr;
++        void reset();
++    };
++
++    void resetCompositor();
++    QRhiSwapChain *swapchainForWindow(QRhi *rhi, QWindow *window);
++    QRhiTexture *updateBackingStoreTexture(QRhi *rhi,
++                                           QRhiResourceUpdateBatch *resourceUpdates,
++                                           const QRegion &dirtyRegion,
++                                           TextureFlags *flags);
++    void ensureResources(QRhiResourceUpdateBatch *resourceUpdates, QRhiRenderPassDescriptor *rpDesc);
++    PerQuadData createPerQuadData(QRhiTexture *texture, QRhiTexture *textureExtra = nullptr);
++    void updatePerQuadData(PerQuadData *d, QRhiTexture *texture, QRhiTexture *textureExtra, UpdateQuadDataOptions options = {});
++    void updateUniforms(PerQuadData *d, QRhiResourceUpdateBatch *resourceUpdates, const QMatrix4x4 &target, const QMatrix3x3 &source, UpdateUniformOptions options = {});
++
++    QRhi *m_rhi = nullptr;
++    std::unique_ptr<QRhiTexture> m_texture;
++    std::unique_ptr<QRhiBuffer> m_vbuf;
++    std::unique_ptr<QRhiSampler> m_samplerNearest;
++    std::unique_ptr<QRhiSampler> m_samplerLinear;
++    std::unique_ptr<QRhiGraphicsPipeline> m_psNoBlend;
++    std::unique_ptr<QRhiGraphicsPipeline> m_psBlend;
++    std::unique_ptr<QRhiGraphicsPipeline> m_psPremulBlend;
++    PerQuadData m_widgetQuadData;
++    QVarLengthArray<PerQuadData, 8> m_textureQuadData;
++    QHash<QWindow *, SwapchainData> m_swapchains;
++};
++
++QT_END_NAMESPACE
++
++#endif // QANDROIDRHIBACKINGSTORE_H
+--- /dev/null
++++ b/src/plugins/platforms/android/qandroidrhibackingstore.cpp
+@@ -0,0 +1,752 @@
++// Copyright (C) 2021 The Qt Company Ltd.
++// SPDX-License-Identifier: LicenseRef-Qt-Commercial OR LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
++
++#include "qandroidrhibackingstore.h"
++
++#include <QtCore/qfile.h>
++#include <QtCore/qlist.h>
++#include <QtGui/private/qmath_p.h>
++#include <QtGui/private/qwindow_p.h>
++#include <QtGui/qevent.h>
++#include <QtGui/qsurfaceformat.h>
++#include <QtGui/qtransform.h>
++#include <QtGui/qwindow.h>
++#include <qpa/qplatformgraphicsbuffer.h>
++
++QT_BEGIN_NAMESPACE
++
++using namespace Qt::StringLiterals;
++
++namespace {
++
++constexpr int kUbufSize = 120;
++constexpr int kMaxPerRectUploadCount = 8;
++
++inline QRect scaledRect(const QRect &rect, qreal factor)
++{
++    return qt_mapFillRect(rect, QTransform::fromScale(factor, factor));
++}
++
++inline QPoint scaledOffset(const QPoint &pt, qreal factor)
++{
++    return pt * factor;
++}
++
++QRegion scaledDirtyRegion(const QRegion &region, qreal factor, const QPoint &offset)
++{
++    if (offset.isNull() && factor <= 1)
++        return region;
++
++    QTransform xf = QTransform::fromScale(factor, factor);
++    xf.translate(offset.x(), offset.y());
++    return xf.map(region);
++}
++
++QMatrix4x4 targetTransform(const QRectF &target, const QRect &viewport, bool invertY)
++{
++    const qreal xScale = target.width() / viewport.width();
++    const qreal yScale = target.height() / viewport.height();
++
++    const QPointF relativeToViewport = target.topLeft() - viewport.topLeft();
++    const qreal xTranslate = xScale - 1 + ((relativeToViewport.x() / viewport.width()) * 2);
++    const qreal yTranslate = invertY
++            ? (yScale - 1 + ((relativeToViewport.y() / viewport.height()) * 2))
++            : (-yScale + 1 - ((relativeToViewport.y() / viewport.height()) * 2));
++
++    QMatrix4x4 matrix;
++    matrix(0, 3) = xTranslate;
++    matrix(1, 3) = yTranslate;
++    matrix(0, 0) = xScale;
++    matrix(1, 1) = (invertY ? -1.0 : 1.0) * yScale;
++    return matrix;
++}
++
++enum class SourceTransformOrigin {
++    BottomLeft,
++    TopLeft
++};
++
++QMatrix3x3 sourceTransform(const QRectF &subTexture, const QSize &textureSize, SourceTransformOrigin origin)
++{
++    const qreal xScale = subTexture.width() / textureSize.width();
++    qreal yScale = subTexture.height() / textureSize.height();
++
++    const QPointF topLeft = subTexture.topLeft();
++    const qreal xTranslate = topLeft.x() / textureSize.width();
++    qreal yTranslate = topLeft.y() / textureSize.height();
++
++    if (origin == SourceTransformOrigin::TopLeft) {
++        yScale = -yScale;
++        yTranslate = 1 - yTranslate;
++    }
++
++    QMatrix3x3 matrix;
++    matrix(0, 2) = xTranslate;
++    matrix(1, 2) = yTranslate;
++    matrix(0, 0) = xScale;
++    matrix(1, 1) = yScale;
++    return matrix;
++}
++
++inline QRect toBottomLeftRect(const QRect &topLeftRect, int windowHeight)
++{
++    return QRect(topLeftRect.x(), windowHeight - topLeftRect.bottomRight().y() - 1,
++                 topLeftRect.width(), topLeftRect.height());
++}
++
++bool prepareDrawForRenderToTextureWidget(const QPlatformTextureList *textures,
++                                         int idx,
++                                         QWindow *window,
++                                         const QRect &deviceWindowRect,
++                                         const QPoint &offset,
++                                         bool invertTargetY,
++                                         bool invertSource,
++                                         QMatrix4x4 *target,
++                                         QMatrix3x3 *source)
++{
++    const QRect clipRect = textures->clipRect(idx);
++    if (clipRect.isEmpty())
++        return false;
++
++    QRect rectInWindow = textures->geometry(idx);
++    rectInWindow.translate(-offset);
++
++    const QRect clippedRectInWindow = rectInWindow & clipRect.translated(rectInWindow.topLeft());
++    const QRect srcRect = toBottomLeftRect(clipRect, rectInWindow.height());
++
++    *target = targetTransform(scaledRect(clippedRectInWindow, window->devicePixelRatio()),
++                              deviceWindowRect,
++                              invertTargetY);
++
++    *source = sourceTransform(scaledRect(srcRect, window->devicePixelRatio()),
++                              scaledRect(rectInWindow, window->devicePixelRatio()).size(),
++                              invertSource ? SourceTransformOrigin::TopLeft : SourceTransformOrigin::BottomLeft);
++
++    return true;
++}
++
++QShader getShader(const QString &name)
++{
++    QFile f(name);
++    if (f.open(QIODevice::ReadOnly))
++        return QShader::fromSerialized(f.readAll());
++
++    qWarning("QAndroidRhiBackingStore: Could not find built-in shader %s", qPrintable(name));
++    return QShader();
++}
++
++void updateMatrix3x3(QRhiResourceUpdateBatch *resourceUpdates, QRhiBuffer *ubuf, const QMatrix3x3 &m)
++{
++    float f[12];
++    const float *src = static_cast<const float *>(m.constData());
++    memcpy(f, src, 3 * sizeof(float));
++    memcpy(f + 4, src + 3, 3 * sizeof(float));
++    memcpy(f + 8, src + 6, 3 * sizeof(float));
++    resourceUpdates->updateDynamicBuffer(ubuf, 64, 48, f);
++}
++
++enum class PipelineBlend {
++    None,
++    Alpha,
++    PremulAlpha
++};
++
++QRhiGraphicsPipeline *createGraphicsPipeline(QRhi *rhi,
++                                             QRhiShaderResourceBindings *srb,
++                                             QRhiRenderPassDescriptor *rpDesc,
++                                             PipelineBlend blendMode)
++{
++    QRhiGraphicsPipeline *ps = rhi->newGraphicsPipeline();
++    if (blendMode == PipelineBlend::Alpha || blendMode == PipelineBlend::PremulAlpha) {
++        QRhiGraphicsPipeline::TargetBlend blend;
++        blend.enable = true;
++        blend.srcColor = (blendMode == PipelineBlend::PremulAlpha)
++                ? QRhiGraphicsPipeline::One
++                : QRhiGraphicsPipeline::SrcAlpha;
++        blend.dstColor = QRhiGraphicsPipeline::OneMinusSrcAlpha;
++        blend.srcAlpha = QRhiGraphicsPipeline::One;
++        blend.dstAlpha = QRhiGraphicsPipeline::One;
++        ps->setTargetBlends({ blend });
++    }
++
++    ps->setShaderStages({
++        { QRhiShaderStage::Vertex, getShader(":/qt-project.org/gui/painting/shaders/backingstorecompose.vert.qsb"_L1) },
++        { QRhiShaderStage::Fragment, getShader(":/qt-project.org/gui/painting/shaders/backingstorecompose.frag.qsb"_L1) }
++    });
++    QRhiVertexInputLayout inputLayout;
++    inputLayout.setBindings({ { 5 * sizeof(float) } });
++    inputLayout.setAttributes({
++        { 0, 0, QRhiVertexInputAttribute::Float3, 0 },
++        { 0, 1, QRhiVertexInputAttribute::Float2, quint32(3 * sizeof(float)) }
++    });
++    ps->setVertexInputLayout(inputLayout);
++    ps->setShaderResourceBindings(srb);
++    ps->setRenderPassDescriptor(rpDesc);
++
++    if (!ps->create()) {
++        qWarning("QAndroidRhiBackingStore: Failed to build graphics pipeline");
++        delete ps;
++        return nullptr;
++    }
++    return ps;
++}
++
++bool analyzeImageFormat(QImage::Format fmt, QPlatformBackingStore::TextureFlags *flags)
++{
++    *flags = {};
++    switch (fmt) {
++    case QImage::Format_ARGB32_Premultiplied:
++        *flags |= QPlatformBackingStore::TexturePremultiplied;
++        Q_FALLTHROUGH();
++    case QImage::Format_RGB32:
++    case QImage::Format_ARGB32:
++        *flags |= QPlatformBackingStore::TextureSwizzle;
++        return false;
++    case QImage::Format_RGBA8888_Premultiplied:
++        *flags |= QPlatformBackingStore::TexturePremultiplied;
++        Q_FALLTHROUGH();
++    case QImage::Format_RGBX8888:
++    case QImage::Format_RGBA8888:
++        return false;
++    default:
++        return true;
++    }
++}
++
++class SwapchainWindowWatcher final : public QObject
++{
++public:
++    SwapchainWindowWatcher(QAndroidRhiBackingStore *store, QWindow *window)
++        : m_store(store)
++        , m_window(window)
++    {
++    }
++
++    bool eventFilter(QObject *obj, QEvent *event) override
++    {
++        if (obj == m_window
++            && (event->type() == QEvent::WindowAboutToChangeInternal
++                || (event->type() == QEvent::PlatformSurface
++                    && static_cast<QPlatformSurfaceEvent *>(event)->surfaceEventType()
++                            == QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed))) {
++            m_store->destroySwapchainForWindow(m_window);
++        }
++        return false;
++    }
++
++private:
++    QAndroidRhiBackingStore *m_store;
++    QWindow *m_window;
++};
++
++} // namespace
++
++void QAndroidRhiBackingStore::PerQuadData::reset()
++{
++    delete ubuf;
++    ubuf = nullptr;
++    delete srb;
++    srb = nullptr;
++    delete srbExtra;
++    srbExtra = nullptr;
++    lastUsedTexture = nullptr;
++    lastUsedTextureExtra = nullptr;
++    lastUsedFilter = QRhiSampler::None;
++}
++
++void QAndroidRhiBackingStore::SwapchainData::reset()
++{
++    delete swapchain;
++    swapchain = nullptr;
++    delete renderPassDescriptor;
++    renderPassDescriptor = nullptr;
++    if (windowWatcher) {
++        windowWatcher->deleteLater();
++        windowWatcher = nullptr;
++    }
++}
++
++QAndroidRhiBackingStore::QAndroidRhiBackingStore(QWindow *window)
++    : QRhiBackingStore(window)
++{
++}
++
++QAndroidRhiBackingStore::~QAndroidRhiBackingStore()
++{
++    resetCompositor();
++}
++
++void QAndroidRhiBackingStore::resetCompositor()
++{
++    for (auto it = m_swapchains.begin(); it != m_swapchains.end(); ++it)
++        it.value().reset();
++    m_swapchains.clear();
++
++    m_rhi = nullptr;
++    m_psNoBlend.reset();
++    m_psBlend.reset();
++    m_psPremulBlend.reset();
++    m_samplerNearest.reset();
++    m_samplerLinear.reset();
++    m_vbuf.reset();
++    m_texture.reset();
++    m_widgetQuadData.reset();
++    for (PerQuadData &d : m_textureQuadData)
++        d.reset();
++    m_textureQuadData.clear();
++}
++
++void QAndroidRhiBackingStore::destroySwapchainForWindow(QWindow *window)
++{
++    auto it = m_swapchains.find(window);
++    if (it != m_swapchains.end()) {
++        SwapchainData data = it.value();
++        m_swapchains.erase(it);
++        if (window && data.windowWatcher)
++            window->removeEventFilter(data.windowWatcher);
++        data.reset();
++    }
++}
++
++QRhiSwapChain *QAndroidRhiBackingStore::swapchainForWindow(QRhi *rhi, QWindow *window)
++{
++    auto it = m_swapchains.constFind(window);
++    if (it != m_swapchains.constEnd())
++        return it.value().swapchain;
++
++    if (!rhi || !window)
++        return nullptr;
++
++    QRhiSwapChain::Flags scFlags;
++    const QSurfaceFormat format = window->requestedFormat();
++    if (format.swapInterval() == 0)
++        scFlags |= QRhiSwapChain::NoVSync;
++    if (format.alphaBufferSize() > 0)
++        scFlags |= QRhiSwapChain::SurfaceHasNonPreMulAlpha;
++
++    QRhiSwapChain *swapchain = rhi->newSwapChain();
++    swapchain->setWindow(window);
++    swapchain->setFlags(scFlags);
++    QRhiRenderPassDescriptor *rp = swapchain->newCompatibleRenderPassDescriptor();
++    swapchain->setRenderPassDescriptor(rp);
++    if (!swapchain->createOrResize()) {
++        delete rp;
++        delete swapchain;
++        return nullptr;
++    }
++
++    SwapchainData data;
++    data.swapchain = swapchain;
++    data.renderPassDescriptor = rp;
++    auto *watcher = new SwapchainWindowWatcher(this, window);
++    data.windowWatcher = watcher;
++    window->installEventFilter(watcher);
++    QObject::connect(window, &QObject::destroyed, watcher, [this, window]() {
++        destroySwapchainForWindow(window);
++    });
++    m_swapchains.insert(window, data);
++    return swapchain;
++}
++
++QRhiTexture *QAndroidRhiBackingStore::updateBackingStoreTexture(QRhi *rhi,
++                                                                QRhiResourceUpdateBatch *resourceUpdates,
++                                                                const QRegion &dirtyRegion,
++                                                                TextureFlags *flags)
++{
++    QImage sourceImage;
++    bool unlockedNeeded = false;
++    QPlatformGraphicsBuffer *gb = graphicsBuffer();
++    if (gb && gb->lock(QPlatformGraphicsBuffer::SWReadAccess)) {
++        const QImage::Format gbFmt = QImage::toImageFormat(gb->format());
++        const QSize gbSize = gb->size();
++        sourceImage = QImage(gb->data(), gbSize.width(), gbSize.height(), gb->bytesPerLine(), gbFmt);
++        unlockedNeeded = true;
++    } else {
++        sourceImage = m_image;
++    }
++
++    const bool needsConversion = analyzeImageFormat(sourceImage.format(), flags);
++    if (unlockedNeeded && gb->origin() == QPlatformGraphicsBuffer::OriginBottomLeft)
++        *flags |= TextureFlip;
++
++    if (sourceImage.size().isEmpty()) {
++        if (unlockedNeeded)
++            gb->unlock();
++        return nullptr;
++    }
++
++    const bool resized = !m_texture || m_texture->pixelSize() != sourceImage.size();
++    if (dirtyRegion.isEmpty() && !resized) {
++        if (unlockedNeeded)
++            gb->unlock();
++        return m_texture.get();
++    }
++
++    if (resized) {
++        if (!m_texture)
++            m_texture.reset(rhi->newTexture(QRhiTexture::RGBA8, sourceImage.size()));
++        else
++            m_texture->setPixelSize(sourceImage.size());
++        if (!m_texture->create()) {
++            m_texture.reset();
++            if (unlockedNeeded)
++                gb->unlock();
++            return nullptr;
++        }
++        QImage fullUpload = needsConversion
++                ? sourceImage.convertToFormat(QImage::Format_RGBA8888)
++                : sourceImage.copy();
++        resourceUpdates->uploadTexture(m_texture.get(), fullUpload);
++    } else {
++        // Copy and upload only the modified sub-rectangles instead of detaching the entire backing store.
++        const QRect imageRect = sourceImage.rect();
++        QList<QRhiTextureUploadEntry> entries;
++        auto appendSlice = [&](const QRect &rect) {
++            const QRect clipped = rect & imageRect;
++            if (clipped.isEmpty())
++                return;
++            QImage slice = sourceImage.copy(clipped);
++            if (needsConversion)
++                slice = slice.convertToFormat(QImage::Format_RGBA8888);
++            QRhiTextureSubresourceUploadDescription subresDesc(slice);
++            subresDesc.setDestinationTopLeft(clipped.topLeft());
++            entries.append(QRhiTextureUploadEntry(0, 0, subresDesc));
++        };
++
++        if (dirtyRegion.rectCount() <= kMaxPerRectUploadCount) {
++            entries.reserve(dirtyRegion.rectCount());
++            for (const QRect &rect : dirtyRegion)
++                appendSlice(rect);
++        } else {
++            appendSlice(dirtyRegion.boundingRect());
++        }
++
++        if (!entries.isEmpty()) {
++            QRhiTextureUploadDescription uploadDesc;
++            uploadDesc.setEntries(entries.cbegin(), entries.cend());
++            resourceUpdates->uploadTexture(m_texture.get(), uploadDesc);
++        }
++    }
++
++    if (unlockedNeeded)
++        gb->unlock();
++    return m_texture.get();
++}
++
++QAndroidRhiBackingStore::PerQuadData QAndroidRhiBackingStore::createPerQuadData(QRhiTexture *texture, QRhiTexture *textureExtra)
++{
++    PerQuadData d;
++    d.ubuf = m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, kUbufSize);
++    d.ubuf->create();
++
++    d.srb = m_rhi->newShaderResourceBindings();
++    d.srb->setBindings({
++        QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage, d.ubuf, 0, kUbufSize),
++        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, texture, m_samplerNearest.get())
++    });
++    d.srb->create();
++    d.lastUsedTexture = texture;
++
++    if (textureExtra) {
++        d.srbExtra = m_rhi->newShaderResourceBindings();
++        d.srbExtra->setBindings({
++            QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage, d.ubuf, 0, kUbufSize),
++            QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, textureExtra, m_samplerNearest.get())
++        });
++        d.srbExtra->create();
++    }
++    d.lastUsedTextureExtra = textureExtra;
++    return d;
++}
++
++void QAndroidRhiBackingStore::updatePerQuadData(PerQuadData *d, QRhiTexture *texture, QRhiTexture *textureExtra, UpdateQuadDataOptions options)
++{
++    const QRhiSampler::Filter filter = options.testFlag(NeedsLinearFiltering) ? QRhiSampler::Linear : QRhiSampler::Nearest;
++    if ((d->lastUsedTexture == texture && d->lastUsedFilter == filter && d->lastUsedTextureExtra == textureExtra) || !d->srb)
++        return;
++
++    QRhiSampler *sampler = filter == QRhiSampler::Linear ? m_samplerLinear.get() : m_samplerNearest.get();
++    d->srb->setBindings({
++        QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage, d->ubuf, 0, kUbufSize),
++        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, texture, sampler)
++    });
++    d->srb->updateResources(QRhiShaderResourceBindings::BindingsAreSorted);
++    d->lastUsedTexture = texture;
++    d->lastUsedFilter = filter;
++
++    if (textureExtra) {
++        const bool needsCreate = !d->srbExtra;
++        if (needsCreate)
++            d->srbExtra = m_rhi->newShaderResourceBindings();
++        d->srbExtra->setBindings({
++            QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage, d->ubuf, 0, kUbufSize),
++            QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, textureExtra, sampler)
++        });
++        if (needsCreate)
++            d->srbExtra->create();
++        else
++            d->srbExtra->updateResources(QRhiShaderResourceBindings::BindingsAreSorted);
++        d->lastUsedTextureExtra = textureExtra;
++    }
++}
++
++void QAndroidRhiBackingStore::updateUniforms(PerQuadData *d, QRhiResourceUpdateBatch *resourceUpdates, const QMatrix4x4 &target, const QMatrix3x3 &source, UpdateUniformOptions options)
++{
++    resourceUpdates->updateDynamicBuffer(d->ubuf, 0, 64, target.constData());
++    updateMatrix3x3(resourceUpdates, d->ubuf, source);
++    const float opacity = 1.0f;
++    resourceUpdates->updateDynamicBuffer(d->ubuf, 112, 4, &opacity);
++    const qint32 textureSwizzle = int(options);
++    resourceUpdates->updateDynamicBuffer(d->ubuf, 116, 4, &textureSwizzle);
++}
++
++void QAndroidRhiBackingStore::ensureResources(QRhiResourceUpdateBatch *resourceUpdates, QRhiRenderPassDescriptor *rpDesc)
++{
++    static const float vertexData[] = {
++        -1, -1, 0, 0, 0,
++        -1,  1, 0, 0, 1,
++         1, -1, 0, 1, 0,
++        -1,  1, 0, 0, 1,
++         1, -1, 0, 1, 0,
++         1,  1, 0, 1, 1
++    };
++
++    if (!m_vbuf) {
++        m_vbuf.reset(m_rhi->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::VertexBuffer, sizeof(vertexData)));
++        if (m_vbuf->create())
++            resourceUpdates->uploadStaticBuffer(m_vbuf.get(), vertexData);
++    }
++    if (!m_samplerNearest) {
++        m_samplerNearest.reset(m_rhi->newSampler(QRhiSampler::Nearest, QRhiSampler::Nearest, QRhiSampler::None,
++                                                 QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
++        m_samplerNearest->create();
++    }
++    if (!m_samplerLinear) {
++        m_samplerLinear.reset(m_rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None,
++                                                QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
++        m_samplerLinear->create();
++    }
++    if (!m_widgetQuadData.isValid() && m_texture)
++        m_widgetQuadData = createPerQuadData(m_texture.get());
++
++    QRhiShaderResourceBindings *srb = m_widgetQuadData.srb;
++    if (srb) {
++        if (!m_psNoBlend)
++            m_psNoBlend.reset(createGraphicsPipeline(m_rhi, srb, rpDesc, PipelineBlend::None));
++        if (!m_psBlend)
++            m_psBlend.reset(createGraphicsPipeline(m_rhi, srb, rpDesc, PipelineBlend::Alpha));
++        if (!m_psPremulBlend)
++            m_psPremulBlend.reset(createGraphicsPipeline(m_rhi, srb, rpDesc, PipelineBlend::PremulAlpha));
++    }
++}
++
++QPlatformBackingStore::FlushResult QAndroidRhiBackingStore::rhiFlush(QWindow *window,
++                                                                     qreal sourceDevicePixelRatio,
++                                                                     const QRegion &region,
++                                                                     const QPoint &offset,
++                                                                     QPlatformTextureList *textures,
++                                                                     bool translucentBackground,
++                                                                     qreal sourceTransformFactor)
++{
++    if (!window)
++        return FlushFailed;
++
++    if (window->surfaceType() != QSurface::OpenGLSurface)
++        return QRhiBackingStore::rhiFlush(window, sourceDevicePixelRatio, region, offset, textures, translucentBackground, sourceTransformFactor);
++
++    QRhi *currentRhi = rhi(window);
++    if (!currentRhi) {
++        QPlatformBackingStoreRhiConfig config(QPlatformBackingStoreRhiConfig::OpenGL);
++        createRhi(window, config);
++        currentRhi = rhi(window);
++    }
++    if (!currentRhi)
++        return FlushFailed;
++
++    if (!textures) {
++        static QPlatformTextureList emptyTextures;
++        textures = &emptyTextures;
++    }
++
++    if (!sourceTransformFactor)
++        sourceTransformFactor = sourceDevicePixelRatio;
++
++    if (m_rhi != currentRhi) {
++        resetCompositor();
++        m_rhi = currentRhi;
++    }
++
++    if (!qt_window_private(window)->receivedExpose)
++        return FlushSuccess;
++
++    QRhiSwapChain *swapchain = swapchainForWindow(currentRhi, window);
++    if (!swapchain)
++        return FlushFailed;
++
++    QWindowPrivate::get(window)->lastComposeTime.start();
++
++    if (swapchain->currentPixelSize() != swapchain->surfacePixelSize()) {
++        if (!swapchain->createOrResize()) {
++            if (currentRhi->isDeviceLost()) {
++                resetCompositor();
++                return FlushFailedDueToLostDevice;
++            }
++            return FlushFailed;
++        }
++    }
++
++    QRhi::FrameOpResult frameResult = currentRhi->beginFrame(swapchain);
++    if (frameResult == QRhi::FrameOpSwapChainOutOfDate) {
++        if (!swapchain->createOrResize()) {
++            if (currentRhi->isDeviceLost()) {
++                resetCompositor();
++                return FlushFailedDueToLostDevice;
++            }
++            return FlushFailed;
++        }
++        frameResult = currentRhi->beginFrame(swapchain);
++    }
++    if (frameResult == QRhi::FrameOpDeviceLost) {
++        resetCompositor();
++        return FlushFailedDueToLostDevice;
++    }
++    if (frameResult != QRhi::FrameOpSuccess)
++        return FlushFailed;
++
++    QRhiResourceUpdateBatch *resourceUpdates = currentRhi->nextResourceUpdateBatch();
++    TextureFlags flags;
++    const QRegion dirtyRegion = scaledDirtyRegion(region, sourceTransformFactor, offset);
++    updateBackingStoreTexture(currentRhi, resourceUpdates, dirtyRegion, &flags);
++    if (m_texture)
++        ensureResources(resourceUpdates, swapchain->renderPassDescriptor());
++
++    UpdateUniformOptions uniformOptions;
++    if (flags & TextureSwizzle) {
++#if Q_BYTE_ORDER == Q_LITTLE_ENDIAN
++        uniformOptions |= NeedsRedBlueSwap;
++#else
++        uniformOptions |= NeedsAlphaRotate;
++#endif
++    }
++    const bool premultiplied = (flags & TexturePremultiplied) != 0;
++    const SourceTransformOrigin origin = (flags & TextureFlip)
++            ? SourceTransformOrigin::BottomLeft
++            : SourceTransformOrigin::TopLeft;
++
++    const qreal dpr = window->devicePixelRatio();
++    const QRect deviceWindowRect = scaledRect(QRect(QPoint(), window->size()), dpr);
++    const QRect sourceWindowRect = scaledRect(QRect(QPoint(), window->size()), sourceDevicePixelRatio);
++    const bool needsLinearSampler = sourceWindowRect.width() > deviceWindowRect.width()
++            && sourceWindowRect.height() > deviceWindowRect.height();
++    const bool invertTargetY = !currentRhi->isYUpInNDC();
++    const bool invertSource = !currentRhi->isYUpInFramebuffer();
++
++    if (m_texture && m_widgetQuadData.isValid()) {
++        const QPoint sourceWindowOffset = scaledOffset(offset, sourceTransformFactor);
++        const QRect srcRect = toBottomLeftRect(sourceWindowRect.translated(sourceWindowOffset), m_texture->pixelSize().height());
++        const QMatrix3x3 source = sourceTransform(srcRect, m_texture->pixelSize(), origin);
++        QMatrix4x4 target;
++        if (invertTargetY)
++            target.data()[5] = -1.0f;
++        updatePerQuadData(&m_widgetQuadData, m_texture.get(), nullptr,
++                          needsLinearSampler ? NeedsLinearFiltering : UpdateQuadDataOptions{});
++        updateUniforms(&m_widgetQuadData, resourceUpdates, target, source, uniformOptions);
++    }
++
++    const int textureWidgetCount = textures->count();
++    if (m_textureQuadData.size() != textureWidgetCount) {
++        for (int i = textureWidgetCount; i < m_textureQuadData.size(); ++i)
++            m_textureQuadData[i].reset();
++        m_textureQuadData.resize(textureWidgetCount);
++    }
++
++    for (int i = 0; i < textureWidgetCount; ++i) {
++        const bool invertSourceForTextureWidget = textures->flags(i).testFlag(QPlatformTextureList::MirrorVertically)
++                ? !invertSource : invertSource;
++        QMatrix4x4 target;
++        QMatrix3x3 source;
++        if (!prepareDrawForRenderToTextureWidget(textures, i, window, deviceWindowRect, offset,
++                                                 invertTargetY, invertSourceForTextureWidget,
++                                                 &target, &source)) {
++            m_textureQuadData[i].reset();
++            continue;
++        }
++        QRhiTexture *t = textures->texture(i);
++        QRhiTexture *tExtra = textures->textureExtra(i);
++        if (t && m_samplerNearest) {
++            if (!m_textureQuadData[i].isValid())
++                m_textureQuadData[i] = createPerQuadData(t, tExtra);
++            else
++                updatePerQuadData(&m_textureQuadData[i], t, tExtra,
++                                  needsLinearSampler ? NeedsLinearFiltering : UpdateQuadDataOptions{});
++            updateUniforms(&m_textureQuadData[i], resourceUpdates, target, source);
++        } else {
++            m_textureQuadData[i].reset();
++        }
++    }
++
++    QRhiCommandBuffer *cb = swapchain->currentFrameCommandBuffer();
++    const QSize outputSizeInPixels = swapchain->currentPixelSize();
++    const QColor clearColor = translucentBackground ? Qt::transparent : Qt::black;
++    cb->resourceUpdate(resourceUpdates);
++
++    auto render = [&](std::optional<QRhiSwapChain::StereoTargetBuffer> buffer = std::nullopt) {
++        QRhiRenderTarget *target = buffer.has_value()
++                ? swapchain->currentFrameRenderTarget(buffer.value())
++                : swapchain->currentFrameRenderTarget();
++        cb->beginPass(target, clearColor, { 1.0f, 0 });
++        if (m_vbuf && m_psNoBlend && m_psBlend && m_psPremulBlend) {
++            cb->setGraphicsPipeline(m_psNoBlend.get());
++            cb->setViewport({ 0, 0, float(outputSizeInPixels.width()), float(outputSizeInPixels.height()) });
++            QRhiCommandBuffer::VertexInput vbufBinding(m_vbuf.get(), 0);
++            cb->setVertexInput(0, 1, &vbufBinding);
++
++            for (int i = 0; i < textureWidgetCount; ++i) {
++                if (!textures->flags(i).testFlag(QPlatformTextureList::StacksOnTop) && m_textureQuadData[i].isValid()) {
++                    QRhiShaderResourceBindings *srb = m_textureQuadData[i].srb;
++                    if (buffer == QRhiSwapChain::RightBuffer && m_textureQuadData[i].srbExtra)
++                        srb = m_textureQuadData[i].srbExtra;
++                    cb->setShaderResources(srb);
++                    cb->draw(6);
++                }
++            }
++
++            if (m_texture && m_widgetQuadData.isValid()) {
++                cb->setGraphicsPipeline(premultiplied ? m_psPremulBlend.get() : m_psBlend.get());
++                cb->setShaderResources(m_widgetQuadData.srb);
++                cb->draw(6);
++            }
++
++            for (int i = 0; i < textureWidgetCount; ++i) {
++                const QPlatformTextureList::Flags texFlags = textures->flags(i);
++                if (texFlags.testFlag(QPlatformTextureList::StacksOnTop) && m_textureQuadData[i].isValid()) {
++                    cb->setGraphicsPipeline(texFlags.testFlag(QPlatformTextureList::NeedsPremultipliedAlphaBlending)
++                                                    ? m_psPremulBlend.get()
++                                                    : m_psBlend.get());
++                    QRhiShaderResourceBindings *srb = m_textureQuadData[i].srb;
++                    if (buffer == QRhiSwapChain::RightBuffer && m_textureQuadData[i].srbExtra)
++                        srb = m_textureQuadData[i].srbExtra;
++                    cb->setShaderResources(srb);
++                    cb->draw(6);
++                }
++            }
++        }
++        cb->endPass();
++    };
++
++    if (swapchain->window()->format().stereo()) {
++        render(QRhiSwapChain::LeftBuffer);
++        render(QRhiSwapChain::RightBuffer);
++    } else {
++        render();
++    }
++
++    const QRhi::FrameOpResult endResult = currentRhi->endFrame(swapchain);
++    if (endResult == QRhi::FrameOpDeviceLost) {
++        resetCompositor();
++        return FlushFailedDueToLostDevice;
++    }
++    return (endResult == QRhi::FrameOpSuccess) ? FlushSuccess : FlushFailed;
++}
++
++QT_END_NAMESPACE
