@@ -513,7 +513,7 @@ static obs_properties_t *properties(void *unused)
 }
 static bool signal_end_of_input(struct encoder *e)
 {
-	if (!e->format->p010)
+	if (e->input_mode == MC_INPUT_SURFACE)
 		return AMediaCodec_signalEndOfInputStream(e->codec) == AMEDIA_OK;
 	const ssize_t index = AMediaCodec_dequeueInputBuffer(e->codec, 200000);
 	return index >= 0 && AMediaCodec_queueInputBuffer(e->codec, (size_t)index, 0, 0, 0,
@@ -765,11 +765,13 @@ static bool start_candidate(struct encoder *e, const char *component, int w, int
 		obs_leave_graphics();
 		if (!e->surface)
 			goto error;
-		const int32_t dataspace = mc_dataspace(e->color_standard, e->color_transfer, e->color_range);
-		if (ANativeWindow_setBuffersDataSpace(e->window, dataspace) != 0)
-			mc_log(LOG_WARNING,
-			       "[android-mediacodec] ANativeWindow_setBuffersDataSpace(0x%08x) rejected for %s",
-			       dataspace, component);
+		if (e->color_range == MC_COLOR_RANGE_FULL) {
+			const int32_t dataspace = mc_dataspace(e->color_standard, e->color_transfer, e->color_range);
+			if (ANativeWindow_setBuffersDataSpace(e->window, dataspace) != 0)
+				mc_log(LOG_WARNING,
+				       "[android-mediacodec] ANativeWindow_setBuffersDataSpace(0x%08x) rejected for %s",
+				       dataspace, component);
+		}
 		e->input_mode = MC_INPUT_SURFACE;
 	} else {
 		if (!read_yuv_layout(e, w, h, input_color_format))
@@ -1095,18 +1097,24 @@ static bool take_packet(struct encoder *e, struct encoder_packet *packet, bool *
 }
 enum submit_result { SUBMIT_OK, SUBMIT_BUSY, SUBMIT_FAILED };
 
-static void copy_plane(uint8_t *dst, size_t dst_stride, const uint8_t *src, size_t src_stride,
-		       size_t row_bytes, size_t rows)
+static void copy_plane_padded(uint8_t *dst, size_t dst_stride, const uint8_t *src, size_t src_stride,
+			      size_t row_bytes, size_t rows, size_t slice_rows, uint8_t pad_byte)
 {
 	if (dst_stride == row_bytes && src_stride == row_bytes) {
 		memcpy(dst, src, row_bytes * rows);
-		return;
+	} else {
+		const size_t pad_bytes = dst_stride - row_bytes;
+		uint8_t *out = dst;
+		for (size_t row = 0; row < rows; row++) {
+			memcpy(out, src, row_bytes);
+			if (pad_bytes)
+				memset(out + row_bytes, pad_byte, pad_bytes);
+			out += dst_stride;
+			src += src_stride;
+		}
 	}
-	for (size_t row = 0; row < rows; row++) {
-		memcpy(dst, src, row_bytes);
-		dst += dst_stride;
-		src += src_stride;
-	}
+	if (slice_rows > rows)
+		memset(dst + rows * dst_stride, pad_byte, (slice_rows - rows) * dst_stride);
 }
 
 static enum submit_result submit_yuv(struct encoder *e, const struct encoder_frame *frame, int64_t ns)
@@ -1125,14 +1133,14 @@ static enum submit_result submit_yuv(struct encoder *e, const struct encoder_fra
 	uint8_t *dst = AMediaCodec_getInputBuffer(e->codec, (size_t)index, &capacity);
 	if (!dst || capacity < e->yuv_size)
 		return SUBMIT_FAILED;
-	if (e->yuv_stride != e->yuv_row_bytes || e->yuv_slice_height != e->yuv_height)
-		memset(dst, 0, e->yuv_size);
-	copy_plane(dst, e->yuv_stride, frame->data[0], frame->linesize[0], e->yuv_row_bytes, e->yuv_height);
-	copy_plane(dst + e->yuv_u_offset, e->yuv_uv_stride, frame->data[1], frame->linesize[1], e->yuv_uv_row_bytes,
-		   e->yuv_uv_height);
+	const size_t uv_slice_height = e->yuv_slice_height / 2;
+	copy_plane_padded(dst, e->yuv_stride, frame->data[0], frame->linesize[0], e->yuv_row_bytes, e->yuv_height,
+			  e->yuv_slice_height, 0x00);
+	copy_plane_padded(dst + e->yuv_u_offset, e->yuv_uv_stride, frame->data[1], frame->linesize[1],
+			  e->yuv_uv_row_bytes, e->yuv_uv_height, uv_slice_height, 0x80);
 	if (i420)
-		copy_plane(dst + e->yuv_v_offset, e->yuv_uv_stride, frame->data[2], frame->linesize[2],
-			   e->yuv_uv_row_bytes, e->yuv_uv_height);
+		copy_plane_padded(dst + e->yuv_v_offset, e->yuv_uv_stride, frame->data[2], frame->linesize[2],
+				  e->yuv_uv_row_bytes, e->yuv_uv_height, uv_slice_height, 0x80);
 	return AMediaCodec_queueInputBuffer(e->codec, (size_t)index, 0, e->yuv_size, (uint64_t)ns / 1000, 0) == AMEDIA_OK
 		       ? SUBMIT_OK : SUBMIT_FAILED;
 }

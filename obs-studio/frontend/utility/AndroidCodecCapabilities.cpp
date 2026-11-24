@@ -104,7 +104,29 @@ static const char *softwareFallbackEncoderForId(const char *id)
 	return nullptr;
 }
 
-bool OBSAndroidHardwareFullRangeSupported(const char *id, video_colorspace space)
+static void androidColorSpaceParams(video_colorspace space, jint &colorStandard, jint &colorTransfer)
+{
+	switch (space) {
+	case VIDEO_CS_2100_PQ:
+		colorStandard = 6; // COLOR_STANDARD_BT2020
+		colorTransfer = 6; // COLOR_TRANSFER_ST2084
+		break;
+	case VIDEO_CS_2100_HLG:
+		colorStandard = 6; // COLOR_STANDARD_BT2020
+		colorTransfer = 7; // COLOR_TRANSFER_HLG
+		break;
+	case VIDEO_CS_601:
+		colorStandard = 4; // COLOR_STANDARD_BT601_NTSC
+		colorTransfer = 3; // COLOR_TRANSFER_SDR_VIDEO
+		break;
+	default:
+		colorStandard = 1; // COLOR_STANDARD_BT709
+		colorTransfer = 3; // COLOR_TRANSFER_SDR_VIDEO
+		break;
+	}
+}
+
+bool OBSAndroidHardwareFullRangeSupported(const char *id, video_colorspace space, bool cbr)
 {
 	if (!id || strncmp(id, "android_mediacodec_", 19) != 0)
 		return true;
@@ -132,13 +154,17 @@ bool OBSAndroidHardwareFullRangeSupported(const char *id, video_colorspace space
 	} else {
 		return false;
 	}
+	jint colorStandard = 1;
+	jint colorTransfer = 3;
+	androidColorSpaceParams(space, colorStandard, colorTransfer);
 	QJniEnvironment env;
 	if (!env.isValid())
 		return false;
 	const auto jmime = QJniObject::fromString(QString::fromUtf8(mime));
 	const jboolean ok = QJniObject::callStaticMethod<jboolean>(
 		"com/obsproject/studio/ObsCodecCapabilities", "hasHardwareFullRangeSupport",
-		"(Ljava/lang/String;IZ)Z", jmime.object<jstring>(), profile, jboolean(p010));
+		"(Ljava/lang/String;IZIIZ)Z", jmime.object<jstring>(), profile, jboolean(p010), colorStandard,
+		colorTransfer, jboolean(cbr));
 	if (env->ExceptionCheck()) {
 		env->ExceptionClear();
 		return false;
@@ -170,7 +196,7 @@ static const char *resolveAndroidEncoder(const char *id, video_colorspace space,
 		}
 	}
 
-	if (range == VIDEO_RANGE_FULL && !OBSAndroidHardwareFullRangeSupported(resolved, space)) {
+	if (range == VIDEO_RANGE_FULL && !OBSAndroidHardwareFullRangeSupported(resolved, space, cbr)) {
 		const char *sw = softwareFallbackEncoderForId(resolved);
 		if (sw) {
 			if (reasonOut)

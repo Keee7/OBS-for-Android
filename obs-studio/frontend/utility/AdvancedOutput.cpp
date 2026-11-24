@@ -49,6 +49,25 @@ static void ApplyEncoderDefaults(OBSData &settings, const obs_encoder_t *encoder
 
 #define ADV_ARCHIVE_NAME "adv_archive_audio"
 
+#ifdef __ANDROID__
+static void adaptMediaCodecSettingsForSoftwareFallback(obs_data_t *settings, const char *targetEncoder)
+{
+	if (!settings || !targetEncoder || obs_data_has_user_value(settings, "rate_control"))
+		return;
+
+	const char *rateControl = "CBR";
+	if (obs_data_has_user_value(settings, "rate_mode")) {
+		const int64_t mode = obs_data_get_int(settings, "rate_mode");
+		if (mode == 0) {
+			rateControl = (strcmp(targetEncoder, "obs_x264") == 0) ? "CRF" : "CQP";
+		} else if (mode == 1) {
+			rateControl = "VBR";
+		}
+	}
+	obs_data_set_string(settings, "rate_control", rateControl);
+}
+#endif
+
 #ifdef __APPLE__
 static void translate_macvth264_encoder(const char *&encoder)
 {
@@ -84,13 +103,22 @@ AdvancedOutput::AdvancedOutput(OBSBasic *main_) : BasicOutputHandler(main_)
 	ffmpegRecording = ffmpegOutput && config_get_bool(main->Config(), "AdvOut", "FFOutputToFile");
 	useStreamEncoder = astrcmpi(recordEncoder, "none") == 0;
 #ifdef __ANDROID__
-	androidRecordingSoftwareFallback = useStreamEncoder ? androidStreamingSoftwareFallback : recFallback;
-	androidRecordingFallbackReason = useStreamEncoder ? androidStreamingFallbackReason : recReason;
+	androidRecordingSoftwareFallback =
+		ffmpegOutput ? false : (useStreamEncoder ? androidStreamingSoftwareFallback : recFallback);
+	androidRecordingFallbackReason =
+		ffmpegOutput ? OBSAndroidSoftwareFallbackReason::None
+			     : (useStreamEncoder ? androidStreamingFallbackReason : recReason);
 #endif
 	useStreamAudioEncoder = astrcmpi(recAudioEncoder, "none") == 0;
 
 	OBSData streamEncSettings = GetDataFromJsonFile("streamEncoder.json");
 	OBSData recordEncSettings = GetDataFromJsonFile("recordEncoder.json");
+#ifdef __ANDROID__
+	if (androidStreamingSoftwareFallback)
+		adaptMediaCodecSettingsForSoftwareFallback(streamEncSettings, streamEncoder);
+	if (!ffmpegOutput && !useStreamEncoder && recFallback)
+		adaptMediaCodecSettingsForSoftwareFallback(recordEncSettings, recordEncoder);
+#endif
 
 	if (ffmpegOutput) {
 		fileOutput = obs_output_create("ffmpeg_output", "adv_ffmpeg_output", nullptr, nullptr);
@@ -224,6 +252,10 @@ void AdvancedOutput::UpdateStreamSettings()
 
 	OBSData settings = GetDataFromJsonFile("streamEncoder.json");
 	ApplyEncoderDefaults(settings, videoStreaming);
+#ifdef __ANDROID__
+	if (androidStreamingSoftwareFallback)
+		adaptMediaCodecSettingsForSoftwareFallback(settings, obs_encoder_get_id(videoStreaming));
+#endif
 
 	if (applyServiceSettings) {
 		int bitrate = (int)obs_data_get_int(settings, "bitrate");
@@ -283,6 +315,10 @@ void AdvancedOutput::UpdateStreamSettings()
 inline void AdvancedOutput::UpdateRecordingSettings()
 {
 	OBSData settings = GetDataFromJsonFile("recordEncoder.json");
+#ifdef __ANDROID__
+	if (!ffmpegOutput && !useStreamEncoder && androidRecordingSoftwareFallback)
+		adaptMediaCodecSettingsForSoftwareFallback(settings, obs_encoder_get_id(videoRecording));
+#endif
 	obs_encoder_update(videoRecording, settings);
 }
 

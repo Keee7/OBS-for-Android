@@ -211,8 +211,11 @@ void OBSBasicStatusBar::UpdateBandwidth()
 	QString text;
 	text += QString::number(kbitsPerSec, 'f', 0) + QString(" kbps");
 
-	statusWidget->ui->kbps->setText(text);
-	statusWidget->ui->kbps->setMinimumWidth(statusWidget->ui->kbps->width());
+	if (statusWidget->ui->kbps->text() != text)
+		statusWidget->ui->kbps->setText(text);
+	const int w = statusWidget->ui->kbps->width();
+	if (w > statusWidget->ui->kbps->minimumWidth())
+		statusWidget->ui->kbps->setMinimumWidth(w);
 
 	if (!statusWidget->ui->kbps->isVisible()) {
 		statusWidget->ui->kbps->show();
@@ -355,7 +358,8 @@ void OBSBasicStatusBar::UpdateDroppedFrames()
 
 	QString text = QTStr("DroppedFrames");
 	text = text.arg(QString::number(totalDropped), QString::number(percent, 'f', 1));
-	statusWidget->ui->droppedFrames->setText(text);
+	if (statusWidget->ui->droppedFrames->text() != text)
+		statusWidget->ui->droppedFrames->setText(text);
 
 	if (!statusWidget->ui->issuesFrame->isVisible()) {
 		statusWidget->ui->issuesFrame->show();

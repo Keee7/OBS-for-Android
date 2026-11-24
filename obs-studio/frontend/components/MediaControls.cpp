@@ -259,6 +259,71 @@ void MediaControls::SetPausedState()
 	StopMediaTimer();
 }
 
+namespace {
+constexpr char kLastSecProp[] = "_obs_last_sec";
+constexpr char kLastCountDownProp[] = "_obs_last_countdown";
+constexpr char kLastFontKeyProp[] = "_obs_last_font_key";
+
+void resetTimeLabelCache(QLabel *label)
+{
+	label->setProperty(kLastSecProp, QVariant());
+	label->setProperty(kLastCountDownProp, QVariant());
+}
+
+void ensureStableLabelWidth(QLabel *label, const QString &sampleText)
+{
+	const QString fontKey = label->font().key();
+	if (label->property(kLastFontKeyProp).toString() == fontKey) {
+		return;
+	}
+
+	const int minW = QFontMetrics(label->font()).horizontalAdvance(sampleText) + 4;
+	if (label->minimumWidth() < minW) {
+		label->setMinimumWidth(minW);
+	}
+	label->setProperty(kLastFontKeyProp, fontKey);
+}
+
+void updateTimeLabelIfChanged(QLabel *label, int seconds, bool negativePrefix, const QString &formatted)
+{
+	const QVariant prevSec = label->property(kLastSecProp);
+	const QVariant prevNeg = label->property(kLastCountDownProp);
+	if (prevSec.isValid() && prevSec.toInt() == seconds && prevNeg.isValid() && prevNeg.toBool() == negativePrefix) {
+		return;
+	}
+
+	label->setText(negativePrefix ? (QLatin1Char('-') + formatted) : formatted);
+	label->setProperty(kLastSecProp, seconds);
+	label->setProperty(kLastCountDownProp, negativePrefix);
+}
+
+template<typename FormatFn>
+void syncMediaTimeLabels(QLabel *timerLabel, QLabel *durationLabel, bool compact, bool countDownTimer,
+			 int64_t timeMs, int64_t durationMs, FormatFn &&formatFn)
+{
+	ensureStableLabelWidth(timerLabel, QStringLiteral("88:88:88"));
+	const int curSec = (int)(timeMs / 1000);
+	const QVariant prevTimer = timerLabel->property(kLastSecProp);
+	if (!prevTimer.isValid() || prevTimer.toInt() != curSec) {
+		updateTimeLabelIfChanged(timerLabel, curSec, false, formatFn(curSec));
+	}
+
+	if (compact) {
+		return;
+	}
+
+	ensureStableLabelWidth(durationLabel, QStringLiteral("-88:88:88"));
+	const int64_t durMs = countDownTimer ? std::max<int64_t>(0, durationMs - timeMs) : durationMs;
+	const int durSec = (int)(durMs / 1000);
+	const QVariant prevDur = durationLabel->property(kLastSecProp);
+	const QVariant prevNeg = durationLabel->property(kLastCountDownProp);
+	if (!prevDur.isValid() || prevDur.toInt() != durSec || !prevNeg.isValid() ||
+	    prevNeg.toBool() != countDownTimer) {
+		updateTimeLabelIfChanged(durationLabel, durSec, countDownTimer, formatFn(durSec));
+	}
+}
+} // namespace
+
 void MediaControls::SetRestartState()
 {
 	ui->playPauseButton->setProperty("class", "icon-media-restart");
@@ -268,6 +333,8 @@ void MediaControls::SetRestartState()
 
 	ui->slider->setProgressValue(0);
 
+	resetTimeLabelCache(ui->timerLabel);
+	resetTimeLabelCache(ui->durationLabel);
 	if (!isSlideshow) {
 		ui->timerLabel->setText("--:--:--");
 		ui->durationLabel->setText("--:--:--");
@@ -363,65 +430,6 @@ void MediaControls::SetSource(OBSSource source)
 
 	RefreshControls();
 }
-
-namespace {
-constexpr char kLastSecProp[] = "_obs_last_sec";
-constexpr char kLastCountDownProp[] = "_obs_last_countdown";
-constexpr char kLastFontKeyProp[] = "_obs_last_font_key";
-
-void ensureStableLabelWidth(QLabel *label, const QString &sampleText)
-{
-	const QString fontKey = label->font().key();
-	if (label->property(kLastFontKeyProp).toString() == fontKey) {
-		return;
-	}
-
-	const int minW = QFontMetrics(label->font()).horizontalAdvance(sampleText) + 4;
-	if (label->minimumWidth() < minW) {
-		label->setMinimumWidth(minW);
-	}
-	label->setProperty(kLastFontKeyProp, fontKey);
-}
-
-void updateTimeLabelIfChanged(QLabel *label, int seconds, bool negativePrefix, const QString &formatted)
-{
-	const QVariant prevSec = label->property(kLastSecProp);
-	const QVariant prevNeg = label->property(kLastCountDownProp);
-	if (prevSec.isValid() && prevSec.toInt() == seconds && prevNeg.isValid() && prevNeg.toBool() == negativePrefix) {
-		return;
-	}
-
-	label->setText(negativePrefix ? (QLatin1Char('-') + formatted) : formatted);
-	label->setProperty(kLastSecProp, seconds);
-	label->setProperty(kLastCountDownProp, negativePrefix);
-}
-
-template<typename FormatFn>
-void syncMediaTimeLabels(QLabel *timerLabel, QLabel *durationLabel, bool compact, bool countDownTimer,
-			 int64_t timeMs, int64_t durationMs, FormatFn &&formatFn)
-{
-	ensureStableLabelWidth(timerLabel, QStringLiteral("88:88:88"));
-	const int curSec = (int)(timeMs / 1000);
-	const QVariant prevTimer = timerLabel->property(kLastSecProp);
-	if (!prevTimer.isValid() || prevTimer.toInt() != curSec) {
-		updateTimeLabelIfChanged(timerLabel, curSec, false, formatFn(curSec));
-	}
-
-	if (compact) {
-		return;
-	}
-
-	ensureStableLabelWidth(durationLabel, QStringLiteral("-88:88:88"));
-	const int64_t durMs = countDownTimer ? std::max<int64_t>(0, durationMs - timeMs) : durationMs;
-	const int durSec = (int)(durMs / 1000);
-	const QVariant prevDur = durationLabel->property(kLastSecProp);
-	const QVariant prevNeg = durationLabel->property(kLastCountDownProp);
-	if (!prevDur.isValid() || prevDur.toInt() != durSec || !prevNeg.isValid() ||
-	    prevNeg.toBool() != countDownTimer) {
-		updateTimeLabelIfChanged(durationLabel, durSec, countDownTimer, formatFn(durSec));
-	}
-}
-} // namespace
 
 void MediaControls::SetSliderPosition()
 {
@@ -626,6 +634,8 @@ void MediaControls::UpdateSlideCounter()
 	int total = calldata_int(&cd, "total_files");
 	calldata_free(&cd);
 
+	resetTimeLabelCache(ui->timerLabel);
+	resetTimeLabelCache(ui->durationLabel);
 	if (total > 0) {
 		ui->timerLabel->setText(QString::number(slide + 1));
 		ui->durationLabel->setText(QString::number(total));

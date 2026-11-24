@@ -3914,6 +3914,7 @@ void OBSBasicSettings::SaveSettings()
 	bool resetOutputs = outputsChanged;
 #ifdef __ANDROID__
 	const auto oldColorSpace = OBSAndroidVideoColorSpace();
+	const auto oldColorRange = OBSAndroidVideoColorRange();
 #endif
 	if (generalChanged) {
 		SaveGeneralSettings();
@@ -3949,7 +3950,8 @@ void OBSBasicSettings::SaveSettings()
 		 * 上游各调用点都不当错误，这里也不报。 */
 		const int videoRet = main->ResetVideo();
 #ifdef __ANDROID__
-		if (videoRet == OBS_VIDEO_SUCCESS && oldColorSpace != OBSAndroidVideoColorSpace())
+		if (videoRet == OBS_VIDEO_SUCCESS &&
+		    (oldColorSpace != OBSAndroidVideoColorSpace() || oldColorRange != OBSAndroidVideoColorRange()))
 			resetOutputs = true;
 #endif
 		if (videoRet != OBS_VIDEO_SUCCESS && videoRet != OBS_VIDEO_CURRENTLY_ACTIVE) {

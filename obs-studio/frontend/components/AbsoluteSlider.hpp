@@ -19,7 +19,10 @@ public:
 	void setLightweightMode(bool enable);
 	bool isLightweightMode() const { return lightweightMode; }
 	void setProgressValue(int val);
-	int effectiveValue() const { return lightweightMode ? progressValue : value(); }
+	int effectiveValue() const
+	{
+		return (lightweightMode && orientation() == Qt::Horizontal) ? progressValue : value();
+	}
 
 signals:
 	void absoluteSliderHovered(int value);
@@ -31,6 +34,7 @@ protected:
 	virtual bool eventFilter(QObject *obj, QEvent *event) override;
 	virtual void changeEvent(QEvent *event) override;
 	virtual void resizeEvent(QResizeEvent *event) override;
+	virtual void sliderChange(SliderChange change) override;
 
 	int posToRangeValue(QMouseEvent *event);
 
@@ -38,6 +42,7 @@ protected:
 
 private:
 	void ensureLightweightColors();
+	bool lightweightUpsideDown() const;
 	QRect lightweightGrooveRect() const;
 	int lightweightHandleCenterX(int val) const;
 	QRect lightweightDirtyRect(int oldVal, int newVal) const;
@@ -47,6 +52,9 @@ private:
 	bool lightweightMode = false;
 	bool colorsReady = false;
 	int progressValue = 0;
+	int cachedGrooveHeight = 4;
+	int cachedHandleWidth = 20;
+	int cachedHandleHeight = 10;
 
 	QColor tickColor;
 	QColor cachedBgColor;

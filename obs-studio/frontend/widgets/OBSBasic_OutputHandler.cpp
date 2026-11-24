@@ -79,9 +79,10 @@ void OBSBasic::NotifyAndroidSoftwareEncoderFallback(bool forStreaming, bool forR
 	if (reason == OBSAndroidSoftwareFallbackReason::None)
 		return;
 	ShowStatusBarMessage(QTStr(androidFallbackStatusKey(reason)));
-	if (outputHandler->androidSoftwareFallbackNotified)
+	const unsigned bit = 1u << unsigned(reason);
+	if (outputHandler->androidSoftwareFallbackNotifiedMask & bit)
 		return;
-	outputHandler->androidSoftwareFallbackNotified = true;
+	outputHandler->androidSoftwareFallbackNotifiedMask |= bit;
 	const bool fullRange = reason == OBSAndroidSoftwareFallbackReason::FullRangeHardwareUnavailable;
 	OBSMessageBox::warning(this,
 			       QTStr(fullRange ? "Output.AndroidFullRangeSoftwareFallback.Title"

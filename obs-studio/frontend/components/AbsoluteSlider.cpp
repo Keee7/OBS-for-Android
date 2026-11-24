@@ -98,7 +98,7 @@ int AbsoluteSlider::posToRangeValue(QMouseEvent *event)
 	if (lightweightMode && orientation() == Qt::Horizontal) {
 		const QRect groove = lightweightGrooveRect();
 		return style()->sliderValueFromPosition(minimum(), maximum(), event->pos().x() - groove.left(),
-							groove.width(), false);
+							groove.width(), lightweightUpsideDown());
 	}
 
 	QStyleOptionSlider opt;
@@ -159,7 +159,7 @@ void AbsoluteSlider::setLightweightMode(bool enable)
 	colorsReady = false;
 	if (enable) {
 		progressValue = value();
-		setAttribute(Qt::WA_OpaquePaintEvent, true);
+		setAttribute(Qt::WA_OpaquePaintEvent, orientation() == Qt::Horizontal);
 	} else {
 		setAttribute(Qt::WA_OpaquePaintEvent, false);
 		QSlider::setValue(progressValue);
@@ -170,7 +170,7 @@ void AbsoluteSlider::setLightweightMode(bool enable)
 void AbsoluteSlider::setProgressValue(int val)
 {
 	const int clamped = std::clamp(val, minimum(), maximum());
-	if (!lightweightMode) {
+	if (!lightweightMode || orientation() != Qt::Horizontal) {
 		setValue(clamped);
 		return;
 	}
@@ -181,17 +181,52 @@ void AbsoluteSlider::setProgressValue(int val)
 	progressValue = clamped;
 	if (size().isEmpty())
 		return;
+	if (lightweightHandleCenterX(oldVal) == lightweightHandleCenterX(clamped))
+		return;
 
 	const QRect dirty = lightweightDirtyRect(oldVal, clamped);
 	if (!dirty.isEmpty())
 		update(dirty);
 }
 
+void AbsoluteSlider::sliderChange(SliderChange change)
+{
+	if (lightweightMode) {
+		if (change == SliderOrientationChange) {
+			setAttribute(Qt::WA_OpaquePaintEvent, orientation() == Qt::Horizontal);
+			colorsReady = false;
+			update();
+			return;
+		}
+		if (orientation() == Qt::Horizontal) {
+			if (change == SliderValueChange) {
+				const int oldVal = progressValue;
+				const int newVal = std::clamp(value(), minimum(), maximum());
+				progressValue = newVal;
+				if (!size().isEmpty() &&
+				    lightweightHandleCenterX(oldVal) != lightweightHandleCenterX(newVal)) {
+					const QRect dirty = lightweightDirtyRect(oldVal, newVal);
+					if (!dirty.isEmpty())
+						update(dirty);
+				}
+				return;
+			}
+			if (change == SliderRangeChange) {
+				progressValue = std::clamp(progressValue, minimum(), maximum());
+				update();
+				return;
+			}
+		}
+	}
+	SliderIgnoreScroll::sliderChange(change);
+}
+
 void AbsoluteSlider::changeEvent(QEvent *event)
 {
 	if (lightweightMode && event &&
 	    (event->type() == QEvent::StyleChange || event->type() == QEvent::PaletteChange ||
-	     event->type() == QEvent::EnabledChange)) {
+	     event->type() == QEvent::EnabledChange || event->type() == QEvent::ParentChange ||
+	     event->type() == QEvent::LayoutDirectionChange)) {
 		colorsReady = false;
 		update();
 	}
@@ -205,18 +240,25 @@ void AbsoluteSlider::resizeEvent(QResizeEvent *event)
 	SliderIgnoreScroll::resizeEvent(event);
 }
 
+bool AbsoluteSlider::lightweightUpsideDown() const
+{
+	return invertedAppearance() ^ (layoutDirection() == Qt::RightToLeft);
+}
+
 QRect AbsoluteSlider::lightweightGrooveRect() const
 {
-	const int pad = kLightHandleWidth / 2;
-	const int trackW = std::max(1, width() - kLightHandleWidth);
-	const int gy = (height() - kLightGrooveHeight) / 2;
-	return QRect(pad, gy, trackW, kLightGrooveHeight);
+	const int pad = cachedHandleWidth / 2;
+	const int trackW = std::max(1, width() - cachedHandleWidth);
+	const int gy = (height() - cachedGrooveHeight) / 2;
+	return QRect(pad, gy, trackW, cachedGrooveHeight);
 }
 
 int AbsoluteSlider::lightweightHandleCenterX(int val) const
 {
 	const int span = std::max(1, maximum() - minimum());
-	const double frac = std::clamp(double(val - minimum()) / double(span), 0.0, 1.0);
+	double frac = std::clamp(double(val - minimum()) / double(span), 0.0, 1.0);
+	if (lightweightUpsideDown())
+		frac = 1.0 - frac;
 	const QRect groove = lightweightGrooveRect();
 	return groove.left() + int(std::llround(frac * groove.width()));
 }
@@ -225,10 +267,10 @@ QRect AbsoluteSlider::lightweightDirtyRect(int oldVal, int newVal) const
 {
 	const int oldX = lightweightHandleCenterX(oldVal);
 	const int newX = lightweightHandleCenterX(newVal);
-	const int halfW = kLightHandleWidth / 2 + 3;
+	const int halfW = cachedHandleWidth / 2 + 3;
 	const int loX = std::max(0, std::min(oldX, newX) - halfW);
 	const int hiX = std::min(width(), std::max(oldX, newX) + halfW);
-	const int boxH = std::max(kLightHandleHeight, kLightGrooveHeight) + 6;
+	const int boxH = std::max(cachedHandleHeight, cachedGrooveHeight) + 6;
 	const int loY = std::max(0, (height() - boxH) / 2);
 	const int hiY = std::min(height(), loY + boxH);
 	return QRect(loX, loY, std::max(0, hiX - loX), std::max(0, hiY - loY));
@@ -241,17 +283,21 @@ void AbsoluteSlider::ensureLightweightColors()
 
 	QColor bg = palette().color(QPalette::Window);
 	for (QWidget *p = parentWidget(); p; p = p->parentWidget()) {
-		QImage pImg(16, 16, QImage::Format_RGBA8888_Premultiplied);
-		pImg.fill(Qt::transparent);
-		QPainter pp(&pImg);
-		QStyleOption pOpt;
-		pOpt.initFrom(p);
-		p->style()->drawPrimitive(QStyle::PE_Widget, &pOpt, &pp, p);
-		pp.end();
-		const QRgb px = pImg.pixel(8, 8);
-		if (qAlpha(px) == 255) {
-			bg = QColor::fromRgb(px);
-			break;
+		if (!p->size().isEmpty()) {
+			const QPoint centerInParent = mapTo(p, rect().center());
+			QImage pImg(16, 16, QImage::Format_RGBA8888_Premultiplied);
+			pImg.fill(Qt::transparent);
+			QPainter pp(&pImg);
+			pp.translate(8 - centerInParent.x(), 8 - centerInParent.y());
+			QStyleOption pOpt;
+			pOpt.initFrom(p);
+			p->style()->drawPrimitive(QStyle::PE_Widget, &pOpt, &pp, p);
+			pp.end();
+			const QRgb px = pImg.pixel(8, 8);
+			if (qAlpha(px) == 255) {
+				bg = QColor::fromRgb(px);
+				break;
+			}
 		}
 		if (p->autoFillBackground()) {
 			bg = p->palette().color(p->backgroundRole());
@@ -261,7 +307,7 @@ void AbsoluteSlider::ensureLightweightColors()
 
 	const int probeH = std::max(28, height());
 	QImage probe(72, probeH, QImage::Format_RGBA8888_Premultiplied);
-	probe.fill(bg);
+	probe.fill(Qt::transparent);
 	QStyleOptionSlider opt;
 	initStyleOption(&opt);
 	opt.rect = QRect(0, 0, probe.width(), probe.height());
@@ -270,6 +316,8 @@ void AbsoluteSlider::ensureLightweightColors()
 	opt.maximum = 1024;
 	opt.sliderValue = 512;
 	opt.sliderPosition = 512;
+	opt.upsideDown = false;
+	opt.direction = Qt::LeftToRight;
 	opt.state &= ~(QStyle::State_MouseOver | QStyle::State_Sunken);
 	// QStyleSheetStyle only draws ::sub-page and ::add-page when both groove and handle are active.
 	opt.subControls = QStyle::SC_SliderGroove | QStyle::SC_SliderHandle;
@@ -288,16 +336,27 @@ void AbsoluteSlider::ensureLightweightColors()
 	const int rightX = std::clamp((rightSpanStart + grRight) / 2, 0, probe.width() - 1);
 	const int hx = std::clamp(hr.isValid() ? hr.center().x() : probe.width() / 2, 0, probe.width() - 1);
 	const int hy = std::clamp(hr.isValid() ? hr.center().y() : gy, 0, probe.height() - 1);
-	const QRgb leftPx = probe.pixel(leftX, gy);
-	const QRgb rightPx = probe.pixel(rightX, gy);
-	const QRgb handlePx = probe.pixel(hx, hy);
+
+	auto resolveSample = [&](const QColor &sample, const QColor &fallback) -> QColor {
+		const int a = sample.alpha();
+		if (a <= 0)
+			return fallback;
+		if (a >= 255)
+			return QColor(sample.red(), sample.green(), sample.blue());
+		return QColor((sample.red() * a + bg.red() * (255 - a) + 127) / 255,
+			      (sample.green() * a + bg.green() * (255 - a) + 127) / 255,
+			      (sample.blue() * a + bg.blue() * (255 - a) + 127) / 255);
+	};
 
 	cachedBgColor = bg;
-	cachedFillColor = (leftPx != bg.rgb()) ? QColor::fromRgb(leftPx)
-					       : (isEnabled() ? palette().highlight().color() : palette().mid().color());
-	cachedGrooveColor = (rightPx != bg.rgb()) ? QColor::fromRgb(rightPx) : palette().dark().color();
-	cachedHandleColor = (handlePx != bg.rgb()) ? QColor::fromRgb(handlePx)
-						   : (isEnabled() ? palette().buttonText().color() : palette().mid().color());
+	cachedFillColor = resolveSample(probe.pixelColor(leftX, gy),
+					isEnabled() ? palette().highlight().color() : palette().mid().color());
+	cachedGrooveColor = resolveSample(probe.pixelColor(rightX, gy), palette().dark().color());
+	cachedHandleColor = resolveSample(probe.pixelColor(hx, hy),
+					  isEnabled() ? palette().buttonText().color() : palette().mid().color());
+	cachedGrooveHeight = (gr.isValid() && gr.height() > 0) ? std::clamp(gr.height(), 2, 12) : kLightGrooveHeight;
+	cachedHandleWidth = (hr.isValid() && hr.width() > 0) ? std::clamp(hr.width(), 8, 40) : kLightHandleWidth;
+	cachedHandleHeight = (hr.isValid() && hr.height() > 0) ? std::clamp(hr.height(), 6, 32) : kLightHandleHeight;
 	colorsReady = true;
 }
 
@@ -316,16 +375,19 @@ void AbsoluteSlider::paintEvent(QPaintEvent *event)
 		if (!grooveVisible.isEmpty())
 			painter.fillRect(grooveVisible, cachedGrooveColor);
 
-		const int fillWidth = std::max(0, cx - groove.left());
+		const bool upsideDown = lightweightUpsideDown();
+		const int fillLeft = upsideDown ? cx : groove.left();
+		const int fillRight = upsideDown ? (groove.right() + 1) : cx;
+		const int fillWidth = std::max(0, fillRight - fillLeft);
 		if (fillWidth > 0) {
-			const QRect fillRect(groove.left(), groove.top(), fillWidth, groove.height());
+			const QRect fillRect(fillLeft, groove.top(), fillWidth, groove.height());
 			const QRect fillVisible = fillRect & clip;
 			if (!fillVisible.isEmpty())
 				painter.fillRect(fillVisible, cachedFillColor);
 		}
 
-		const QRect handleRect(cx - kLightHandleWidth / 2, (height() - kLightHandleHeight) / 2,
-				       kLightHandleWidth, kLightHandleHeight);
+		const QRect handleRect(cx - cachedHandleWidth / 2, (height() - cachedHandleHeight) / 2,
+				       cachedHandleWidth, cachedHandleHeight);
 		if (handleRect.intersects(clip))
 			painter.fillRect(handleRect & clip, cachedHandleColor);
 		return;

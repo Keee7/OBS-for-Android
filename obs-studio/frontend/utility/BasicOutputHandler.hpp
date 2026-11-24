@@ -75,7 +75,7 @@ struct BasicOutputHandler {
 	bool androidRecordingSoftwareFallback = false;
 	OBSAndroidSoftwareFallbackReason androidStreamingFallbackReason = OBSAndroidSoftwareFallbackReason::None;
 	OBSAndroidSoftwareFallbackReason androidRecordingFallbackReason = OBSAndroidSoftwareFallbackReason::None;
-	bool androidSoftwareFallbackNotified = false;
+	unsigned androidSoftwareFallbackNotifiedMask = 0;
 #endif
 
 	BasicOutputHandler(OBSBasic *main_);

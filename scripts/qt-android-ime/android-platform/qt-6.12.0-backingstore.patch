@@ -38,7 +38,7 @@
  #if QT_CONFIG(egl)
 --- /dev/null
 +++ b/src/plugins/platforms/android/qandroidrhibackingstore.h
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,93 @@
 +// Copyright (C) 2021 The Qt Company Ltd.
 +// SPDX-License-Identifier: LicenseRef-Qt-Commercial OR LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
 +
@@ -46,6 +46,8 @@
 +#define QANDROIDRHIBACKINGSTORE_H
 +
 +#include <QtGui/private/qrhibackingstore_p.h>
++#include <QtGui/qimage.h>
++#include <QtGui/qregion.h>
 +#include <QtCore/qhash.h>
 +#include <QtCore/qobject.h>
 +#include <QtCore/qvarlengtharray.h>
@@ -123,6 +125,8 @@
 +    PerQuadData m_widgetQuadData;
 +    QVarLengthArray<PerQuadData, 8> m_textureQuadData;
 +    QHash<QWindow *, SwapchainData> m_swapchains;
++    QRegion m_pendingDirtyRegion;
++    QImage::Format m_textureSourceFormat = QImage::Format_Invalid;
 +};
 +
 +QT_END_NAMESPACE
@@ -130,7 +134,7 @@
 +#endif // QANDROIDRHIBACKINGSTORE_H
 --- /dev/null
 +++ b/src/plugins/platforms/android/qandroidrhibackingstore.cpp
-@@ -0,0 +1,807 @@
+@@ -0,0 +1,874 @@
 +// Copyright (C) 2021 The Qt Company Ltd.
 +// SPDX-License-Identifier: LicenseRef-Qt-Commercial OR LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
 +
@@ -138,6 +142,7 @@
 +
 +#include <QtCore/qfile.h>
 +#include <QtCore/qlist.h>
++#include <QtCore/qrect.h>
 +#include <QtGui/private/qmath_p.h>
 +#include <QtGui/private/qwindow_p.h>
 +#include <QtGui/qevent.h>
@@ -146,6 +151,7 @@
 +#include <QtGui/qwindow.h>
 +#include <qpa/qplatformgraphicsbuffer.h>
 +
++#include <algorithm>
 +#include <limits>
 +
 +QT_BEGIN_NAMESPACE
@@ -156,9 +162,21 @@
 +
 +constexpr int kUbufSize = 120;
 +constexpr int kMaxPerRectUploadCount = 12;
++constexpr int kAdjacentMergeGap = 8;
++constexpr int kMaxPreCoalesceRawRects = 128;
++constexpr int kMaxPostAdjacentRects = 48;
 +
 +QList<QRect> coalesceDirtyRects(const QRegion &region, const QRect &bounds, int maxRects)
 +{
++    if (region.isEmpty() || bounds.isEmpty() || maxRects <= 0)
++        return {};
++
++    const QRect all = region.boundingRect() & bounds;
++    if (all.isEmpty())
++        return {};
++    if (region.rectCount() > kMaxPreCoalesceRawRects)
++        return { all };
++
 +    QList<QRect> rects;
 +    rects.reserve(region.rectCount());
 +    for (const QRect &r : region) {
@@ -166,26 +184,30 @@
 +        if (!clipped.isEmpty())
 +            rects.append(clipped);
 +    }
-+    if (rects.size() <= maxRects)
++    if (rects.size() <= 1)
 +        return rects;
 +
-+    // Merge overlapping or tightly adjacent fragments (within 8 px) first, so
-+    // adjacent bars do not force distant regions into one full-screen upload.
-+    for (int i = 0; i < rects.size(); ++i) {
-+        for (int j = i + 1; j < rects.size();) {
-+            if (rects[i].adjusted(-8, -8, 8, 8).intersects(rects[j])) {
-+                rects[i] |= rects[j];
-+                rects.removeAt(j);
-+            } else {
-+                ++j;
++    // Merge overlapping or tightly adjacent fragments (pixel gap <= 8 px) to a fixed point,
++    // so transitive chains and adjacent bars coalesce cleanly without forcing distant regions together.
++    const int pad = kAdjacentMergeGap + 1;
++    bool mergedAny = true;
++    while (mergedAny && rects.size() > 1) {
++        mergedAny = false;
++        for (int i = 0; i < rects.size(); ++i) {
++            for (int j = i + 1; j < rects.size();) {
++                if (rects[i].adjusted(-pad, -pad, pad, pad).intersects(rects[j])) {
++                    rects[i] |= rects[j];
++                    rects.removeAt(j);
++                    mergedAny = true;
++                } else {
++                    ++j;
++                }
 +            }
 +        }
 +    }
 +
-+    if (rects.size() > 64) {
-+        const QRect all = region.boundingRect() & bounds;
-+        return all.isEmpty() ? QList<QRect>{} : QList<QRect>{ all };
-+    }
++    if (rects.size() > kMaxPostAdjacentRects)
++        return { all };
 +
 +    while (rects.size() > maxRects) {
 +        int bestI = 0;
@@ -209,6 +231,30 @@
 +        }
 +        rects[bestI] |= rects[bestJ];
 +        rects.removeAt(bestJ);
++        bool absorbed = true;
++        while (absorbed) {
++            absorbed = false;
++            for (int k = 0; k < rects.size();) {
++                if (k != bestI && rects[bestI].intersects(rects[k])) {
++                    rects[bestI] |= rects[k];
++                    rects.removeAt(k);
++                    if (k < bestI)
++                        --bestI;
++                    absorbed = true;
++                } else {
++                    ++k;
++                }
++            }
++        }
++    }
++
++    if (rects.size() > 1) {
++        qint64 sliceAreaSum = 0;
++        for (const QRect &r : rects)
++            sliceAreaSum += qint64(r.width()) * r.height();
++        const qint64 allArea = qint64(all.width()) * all.height();
++        if (sliceAreaSum * 100 >= allArea * 85)
++            return { all };
 +    }
 +    return rects;
 +}
@@ -225,12 +271,22 @@
 +
 +QRegion scaledDirtyRegion(const QRegion &region, qreal factor, const QPoint &offset)
 +{
-+    if (offset.isNull() && factor <= 1)
++    if (region.isEmpty())
++        return QRegion();
++    if (offset.isNull() && qFuzzyCompare(factor, qreal(1.0)))
 +        return region;
 +
-+    QTransform xf = QTransform::fromScale(factor, factor);
-+    xf.translate(offset.x(), offset.y());
-+    return xf.map(region);
++    QRegion scaled;
++    for (const QRect &r : region) {
++        const QRectF rf((r.x() + offset.x()) * factor,
++                        (r.y() + offset.y()) * factor,
++                        r.width() * factor,
++                        r.height() * factor);
++        const QRect aligned = rf.toAlignedRect();
++        if (!aligned.isEmpty())
++            scaled += aligned;
++    }
++    return scaled;
 +}
 +
 +QMatrix4x4 targetTransform(const QRectF &target, const QRect &viewport, bool invertY)
@@ -473,6 +529,8 @@
 +        it.value().reset();
 +    m_swapchains.clear();
 +
++    m_pendingDirtyRegion = QRegion();
++    m_textureSourceFormat = QImage::Format_Invalid;
 +    m_rhi = nullptr;
 +    m_psNoBlend.reset();
 +    m_psBlend.reset();
@@ -567,27 +625,32 @@
 +    }
 +
 +    const bool resized = !m_texture || m_texture->pixelSize() != sourceImage.size();
-+    if (dirtyRegion.isEmpty() && !resized) {
++    const bool formatChanged = m_texture && m_textureSourceFormat != sourceImage.format();
++    if (dirtyRegion.isEmpty() && !resized && !formatChanged) {
 +        if (unlockedNeeded)
 +            gb->unlock();
 +        return m_texture.get();
 +    }
 +
-+    if (resized) {
-+        if (!m_texture)
-+            m_texture.reset(rhi->newTexture(QRhiTexture::RGBA8, sourceImage.size()));
-+        else
-+            m_texture->setPixelSize(sourceImage.size());
-+        if (!m_texture->create()) {
-+            m_texture.reset();
-+            if (unlockedNeeded)
-+                gb->unlock();
-+            return nullptr;
++    if (resized || formatChanged) {
++        if (resized) {
++            if (!m_texture)
++                m_texture.reset(rhi->newTexture(QRhiTexture::RGBA8, sourceImage.size()));
++            else
++                m_texture->setPixelSize(sourceImage.size());
++            if (!m_texture->create()) {
++                m_texture.reset();
++                m_textureSourceFormat = QImage::Format_Invalid;
++                if (unlockedNeeded)
++                    gb->unlock();
++                return nullptr;
++            }
 +        }
 +        QImage fullUpload = needsConversion
 +                ? sourceImage.convertToFormat(QImage::Format_RGBA8888)
 +                : sourceImage.copy();
 +        resourceUpdates->uploadTexture(m_texture.get(), fullUpload);
++        m_textureSourceFormat = sourceImage.format();
 +    } else {
 +        // Copy and upload only the modified sub-rectangles instead of detaching the entire backing store.
 +        const QRect imageRect = sourceImage.rect();
@@ -614,6 +677,7 @@
 +            uploadDesc.setEntries(entries.cbegin(), entries.cend());
 +            resourceUpdates->uploadTexture(m_texture.get(), uploadDesc);
 +        }
++        m_textureSourceFormat = sourceImage.format();
 +    }
 +
 +    if (unlockedNeeded)
@@ -764,6 +828,8 @@
 +        m_rhi = currentRhi;
 +    }
 +
++    m_pendingDirtyRegion += scaledDirtyRegion(region, sourceTransformFactor, offset);
++
 +    if (!qt_window_private(window)->receivedExpose)
 +        return FlushSuccess;
 +
@@ -803,8 +869,9 @@
 +
 +    QRhiResourceUpdateBatch *resourceUpdates = currentRhi->nextResourceUpdateBatch();
 +    TextureFlags flags;
-+    const QRegion dirtyRegion = scaledDirtyRegion(region, sourceTransformFactor, offset);
-+    updateBackingStoreTexture(currentRhi, resourceUpdates, dirtyRegion, &flags);
++    const QRegion uploadDirty = m_pendingDirtyRegion;
++    if (updateBackingStoreTexture(currentRhi, resourceUpdates, uploadDirty, &flags))
++        m_pendingDirtyRegion = QRegion();
 +    if (m_texture)
 +        ensureResources(resourceUpdates, swapchain->renderPassDescriptor());
 +
@@ -934,7 +1001,11 @@
 +        resetCompositor();
 +        return FlushFailedDueToLostDevice;
 +    }
-+    return (endResult == QRhi::FrameOpSuccess) ? FlushSuccess : FlushFailed;
++    if (endResult != QRhi::FrameOpSuccess) {
++        m_pendingDirtyRegion += uploadDirty;
++        return FlushFailed;
++    }
++    return FlushSuccess;
 +}
 +
 +QT_END_NAMESPACE

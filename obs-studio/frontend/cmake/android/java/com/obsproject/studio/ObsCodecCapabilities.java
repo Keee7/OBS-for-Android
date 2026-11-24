@@ -35,6 +35,9 @@ public final class ObsCodecCapabilities {
     private static final LinkedHashMap<String, Boolean> fullRangeCache = new LinkedHashMap<>();
     private static MediaCodecInfo[] codecs;
     private static final int COLOR_FORMAT_YUV_P010 = 54;
+    private static final int PROBE_REJECTED = 0;
+    private static final int PROBE_ACCEPTED = 1;
+    private static final int PROBE_TRANSIENT = 2;
 
     private static int encoderProfile(String mime) {
         switch (mime) {
@@ -165,8 +168,14 @@ public final class ObsCodecCapabilities {
         return v;
     }
 
-    private static boolean probeCodecFullRangeFormat(String name, String mime, MediaCodecInfo.CodecCapabilities caps,
-            int profile, boolean p010, int colorFormat) {
+    private static boolean colorStandardMatches(int expected, int reported) {
+        return reported == expected
+            || (expected == MediaFormat.COLOR_STANDARD_BT601_NTSC
+                && reported == MediaFormat.COLOR_STANDARD_BT601_PAL);
+    }
+
+    private static int probeCodecFullRangeFormat(String name, String mime, MediaCodecInfo.CodecCapabilities caps,
+            int profile, boolean p010, int colorFormat, int colorStandard, int colorTransfer, boolean requireCbr) {
         MediaCodecInfo.VideoCapabilities video = caps.getVideoCapabilities();
         MediaCodecInfo.EncoderCapabilities enc = caps.getEncoderCapabilities();
         int w = alignProbeDimension(640, video.getSupportedWidths(), video.getWidthAlignment());
@@ -178,24 +187,24 @@ public final class ObsCodecCapabilities {
         if (profile > 0)
             f.setInteger(MediaFormat.KEY_PROFILE, profile);
         int bitrateMode = -1;
-        if (enc.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR))
+        if (requireCbr) {
+            if (!enc.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR))
+                return PROBE_REJECTED;
             bitrateMode = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR;
-        else if (enc.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR))
+        } else if (enc.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)) {
+            bitrateMode = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR;
+        } else if (enc.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)) {
             bitrateMode = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR;
-        else if (enc.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ))
+        } else if (enc.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ)) {
             bitrateMode = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ;
+        }
         if (bitrateMode >= 0) {
             f.setInteger(MediaFormat.KEY_BITRATE_MODE, bitrateMode);
             if (bitrateMode != MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ)
                 f.setInteger(MediaFormat.KEY_BIT_RATE, video.getBitrateRange().clamp(2000000));
         }
-        int transfer = (p010 && profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10)
-            ? MediaFormat.COLOR_TRANSFER_ST2084
-            : MediaFormat.COLOR_TRANSFER_SDR_VIDEO;
-        f.setInteger(MediaFormat.KEY_COLOR_STANDARD,
-            p010 && transfer != MediaFormat.COLOR_TRANSFER_SDR_VIDEO ? MediaFormat.COLOR_STANDARD_BT2020
-                                                                     : MediaFormat.COLOR_STANDARD_BT709);
-        f.setInteger(MediaFormat.KEY_COLOR_TRANSFER, transfer);
+        f.setInteger(MediaFormat.KEY_COLOR_STANDARD, colorStandard);
+        f.setInteger(MediaFormat.KEY_COLOR_TRANSFER, colorTransfer);
         f.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_FULL);
         MediaCodec codec = null;
         try {
@@ -204,12 +213,28 @@ public final class ObsCodecCapabilities {
             MediaFormat input = codec.getInputFormat();
             boolean accepted = input != null && input.containsKey(MediaFormat.KEY_COLOR_RANGE)
                 && input.getInteger(MediaFormat.KEY_COLOR_RANGE) == MediaFormat.COLOR_RANGE_FULL;
+            if (accepted && p010) {
+                if ((input.containsKey(MediaFormat.KEY_COLOR_STANDARD)
+                        && !colorStandardMatches(colorStandard, input.getInteger(MediaFormat.KEY_COLOR_STANDARD)))
+                    || (input.containsKey(MediaFormat.KEY_COLOR_TRANSFER)
+                        && input.getInteger(MediaFormat.KEY_COLOR_TRANSFER) != colorTransfer)) {
+                    accepted = false;
+                }
+            }
             Log.i(TAG, "Full-range probe " + name + " cf=0x" + Integer.toHexString(colorFormat)
-                + " profile=" + profile + " accepted=" + accepted);
-            return accepted;
+                + " profile=" + profile + " std=" + colorStandard + " tr=" + colorTransfer
+                + " cbr=" + requireCbr + " accepted=" + accepted);
+            return accepted ? PROBE_ACCEPTED : PROBE_REJECTED;
+        } catch (MediaCodec.CodecException e) {
+            boolean transientErr = e.isTransient() || e.isRecoverable()
+                || e.getErrorCode() == MediaCodec.CodecException.ERROR_INSUFFICIENT_RESOURCE
+                || e.getErrorCode() == MediaCodec.CodecException.ERROR_RECLAIMED;
+            Log.w(TAG, "Full-range probe CodecException " + name + " cf=0x" + Integer.toHexString(colorFormat)
+                + " transient=" + transientErr, e);
+            return transientErr ? PROBE_TRANSIENT : PROBE_REJECTED;
         } catch (IOException | IllegalArgumentException | IllegalStateException | SecurityException e) {
             Log.w(TAG, "Full-range probe rejected " + name + " cf=0x" + Integer.toHexString(colorFormat), e);
-            return false;
+            return PROBE_REJECTED;
         } finally {
             if (codec != null) {
                 try {
@@ -221,16 +246,28 @@ public final class ObsCodecCapabilities {
     }
 
     public static synchronized boolean hasHardwareFullRangeSupport(String mime, int requestedProfile, boolean p010) {
+        int transfer = (p010 && requestedProfile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10)
+            ? MediaFormat.COLOR_TRANSFER_ST2084
+            : MediaFormat.COLOR_TRANSFER_SDR_VIDEO;
+        int standard = (p010 && transfer != MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+            ? MediaFormat.COLOR_STANDARD_BT2020
+            : MediaFormat.COLOR_STANDARD_BT709;
+        return hasHardwareFullRangeSupport(mime, requestedProfile, p010, standard, transfer, false);
+    }
+
+    public static synchronized boolean hasHardwareFullRangeSupport(String mime, int requestedProfile, boolean p010,
+            int colorStandard, int colorTransfer, boolean requireCbr) {
         int profile = requestedProfile > 0 ? requestedProfile : encoderProfile(mime);
         if (Build.VERSION.SDK_INT < 29 || profile < 0 || (p010 && Build.VERSION.SDK_INT < 33))
             return false;
-        String key = mime + ":" + profile + ":" + p010;
+        String key = mime + ":" + profile + ":" + p010 + ":" + colorStandard + ":" + colorTransfer + ":" + requireCbr;
         Boolean cached = fullRangeCache.get(key);
         if (cached != null)
             return cached;
         if (codecs == null)
             codecs = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
         boolean supported = false;
+        boolean sawTransient = false;
         for (MediaCodecInfo info : codecs) {
             if (!info.isEncoder() || !info.isHardwareAccelerated() || info.isSoftwareOnly() || info.isAlias())
                 continue;
@@ -241,18 +278,38 @@ public final class ObsCodecCapabilities {
                     MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(type);
                     if (!supportsEncoderProfile(caps, profile, p010, !p010))
                         continue;
-                    int[] formats = p010
-                        ? new int[] { COLOR_FORMAT_YUV_P010 }
-                        : new int[] {
+                    if (requireCbr && !caps.getEncoderCapabilities().isBitrateModeSupported(
+                            MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR))
+                        continue;
+                    int[] formats;
+                    if (p010) {
+                        formats = new int[] { COLOR_FORMAT_YUV_P010 };
+                    } else {
+                        int[] candidateFormats = new int[] {
                             MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface,
                             MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar,
                             MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
                         };
+                        ArrayList<Integer> supportedFormats = new ArrayList<>(3);
+                        for (int cf : candidateFormats) {
+                            if (hasColorFormat(caps, cf))
+                                supportedFormats.add(cf);
+                        }
+                        if (supportedFormats.isEmpty())
+                            continue;
+                        formats = new int[supportedFormats.size()];
+                        for (int i = 0; i < supportedFormats.size(); ++i)
+                            formats[i] = supportedFormats.get(i);
+                    }
                     for (int cf : formats) {
-                        if (probeCodecFullRangeFormat(info.getName(), mime, caps, profile, p010, cf)) {
+                        int res = probeCodecFullRangeFormat(info.getName(), mime, caps, profile, p010, cf,
+                            colorStandard, colorTransfer, requireCbr);
+                        if (res == PROBE_ACCEPTED) {
                             supported = true;
                             break;
                         }
+                        if (res == PROBE_TRANSIENT)
+                            sawTransient = true;
                     }
                     if (supported)
                         break;
@@ -263,9 +320,11 @@ public final class ObsCodecCapabilities {
             if (supported)
                 break;
         }
-        if (fullRangeCache.size() >= 32)
-            fullRangeCache.remove(fullRangeCache.keySet().iterator().next());
-        fullRangeCache.put(key, supported);
+        if (supported || !sawTransient) {
+            if (fullRangeCache.size() >= 32)
+                fullRangeCache.remove(fullRangeCache.keySet().iterator().next());
+            fullRangeCache.put(key, supported);
+        }
         return supported;
     }
     /** Returns mode support and the advertised complexity and CQ quality ranges. */

@@ -744,6 +744,7 @@ static inline bool obs_encoder_initialize_internal(obs_encoder_t *encoder)
 	const bool rgb_gpu_missing = (encoder->orig_info.caps & OBS_ENCODER_CAP_PASS_TEXTURE_RGB) &&
 				     !gpu_encode_available(encoder);
 	if (rgb_gpu_missing && !encoder->orig_info.encode) {
+		maybe_clear_encoder_core_video_mix(encoder);
 		obs_encoder_set_last_error(encoder, "Cannot create the required RGB GPU encoding mix");
 		return false;
 	}
@@ -754,6 +755,7 @@ static inline bool obs_encoder_initialize_internal(obs_encoder_t *encoder)
 		encoder->info.encode_texture2 = NULL;
 		encoder->info.encode_texture_flush = NULL;
 		maybe_clear_encoder_core_video_mix(encoder);
+		maybe_set_up_gpu_rescale(encoder);
 	}
 
 	if (encoder->orig_info.create) {
@@ -761,8 +763,11 @@ static inline bool obs_encoder_initialize_internal(obs_encoder_t *encoder)
 		encoder->context.data = encoder->orig_info.create(encoder->context.settings, encoder);
 		can_reroute = false;
 	}
-	if (!encoder->context.data)
+	if (!encoder->context.data) {
+		maybe_clear_encoder_core_video_mix(encoder);
+		encoder->info = encoder->orig_info;
 		return false;
+	}
 
 	if (encoder->orig_info.type == OBS_ENCODER_AUDIO)
 		intitialize_audio_encoder(encoder);

@@ -2591,7 +2591,8 @@ static inline void signal_reconnect_success(struct obs_output *output)
 
 static inline void copy_encoder_last_error(struct obs_output *output)
 {
-	if (output->stop_code != OBS_OUTPUT_ENCODE_ERROR || obs_output_get_last_error(output))
+	const char *existing = obs_output_get_last_error(output);
+	if (output->stop_code != OBS_OUTPUT_ENCODE_ERROR || (existing && *existing))
 		return;
 
 	for (size_t i = 0; i < MAX_OUTPUT_VIDEO_ENCODERS; i++) {

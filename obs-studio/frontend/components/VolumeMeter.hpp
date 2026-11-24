@@ -143,6 +143,8 @@ private:
 		QSize widgetSize;
 		int channels = 0;
 		int meterLength = 0;
+		int warningPos = 0;
+		int errorPos = 0;
 		std::array<int, MAX_AUDIO_CHANNELS> peakPos{};
 		std::array<int, MAX_AUDIO_CHANNELS> holdPos{};
 		std::array<int, MAX_AUDIO_CHANNELS> magPos{};

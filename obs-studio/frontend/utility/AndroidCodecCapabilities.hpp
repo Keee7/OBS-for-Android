@@ -12,7 +12,7 @@ enum class OBSAndroidSoftwareFallbackReason {
 bool OBSAndroidAvcAvailable(uint32_t width, uint32_t height, uint32_t fps_num, uint32_t fps_den);
 bool OBSAndroidCbrEncoderAvailable(const char *id);
 bool OBSAndroidHevcMain10Available(bool pq, bool cbr);
-bool OBSAndroidHardwareFullRangeSupported(const char *id, video_colorspace space = VIDEO_CS_709);
+bool OBSAndroidHardwareFullRangeSupported(const char *id, video_colorspace space = VIDEO_CS_709, bool cbr = false);
 OBSAndroidSoftwareFallbackReason OBSAndroidSoftwareFallbackForVideo(const char *id, video_colorspace space,
 								    video_range_type range, bool cbr);
 bool OBSAndroidEncoderUsesSoftwareFallback(const char *id, video_colorspace space, bool cbr);
