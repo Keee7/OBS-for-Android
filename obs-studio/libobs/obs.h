@@ -2493,6 +2493,7 @@ EXPORT void obs_encoder_packet_ref(struct encoder_packet *dst, struct encoder_pa
 EXPORT void obs_encoder_packet_release(struct encoder_packet *packet);
 
 EXPORT void *obs_encoder_create_rerouted(obs_encoder_t *encoder, const char *reroute_id);
+EXPORT void obs_encoder_fallback_to_raw(obs_encoder_t *encoder);
 
 /** Returns whether encoder is paused */
 EXPORT bool obs_encoder_paused(const obs_encoder_t *output);

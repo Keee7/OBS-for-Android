@@ -249,7 +249,11 @@ void OBSBasic::StreamingStart()
 	ui->statusbar->StreamStarted(output);
 #ifdef __ANDROID__
 	if (outputHandler && outputHandler->androidStreamingSoftwareFallback)
-		ShowStatusBarMessage(QTStr("Output.AndroidHevcSoftwareFallback.Status"));
+		ShowStatusBarMessage(QTStr(
+			outputHandler->androidStreamingFallbackReason ==
+					OBSAndroidSoftwareFallbackReason::FullRangeHardwareUnavailable
+				? "Output.AndroidFullRangeSoftwareFallback.Status"
+				: "Output.AndroidHevcSoftwareFallback.Status"));
 #endif
 
 	if (sysTrayStream) {

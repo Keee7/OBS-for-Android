@@ -2589,9 +2589,34 @@ static inline void signal_reconnect_success(struct obs_output *output)
 	do_output_signal(output, "reconnect_success");
 }
 
+static inline void copy_encoder_last_error(struct obs_output *output)
+{
+	if (output->stop_code != OBS_OUTPUT_ENCODE_ERROR || obs_output_get_last_error(output))
+		return;
+
+	for (size_t i = 0; i < MAX_OUTPUT_VIDEO_ENCODERS; i++) {
+		obs_encoder_t *video = output->video_encoders[i];
+		const char *err = video ? obs_encoder_get_last_error(video) : NULL;
+		if (err && *err) {
+			obs_output_set_last_error(output, err);
+			return;
+		}
+	}
+	for (size_t i = 0; i < MAX_OUTPUT_AUDIO_ENCODERS; i++) {
+		obs_encoder_t *audio = output->audio_encoders[i];
+		const char *err = audio ? obs_encoder_get_last_error(audio) : NULL;
+		if (err && *err) {
+			obs_output_set_last_error(output, err);
+			return;
+		}
+	}
+}
+
 static inline void signal_stop(struct obs_output *output)
 {
 	struct calldata params;
+
+	copy_encoder_last_error(output);
 
 	calldata_init(&params);
 	calldata_set_string(&params, "last_error", obs_output_get_last_error(output));

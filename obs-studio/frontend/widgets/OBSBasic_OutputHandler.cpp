@@ -30,24 +30,37 @@
 #ifdef __ANDROID__
 extern const char *get_simple_output_encoder(const char *encoder);
 
+static const char *androidFallbackStatusKey(OBSAndroidSoftwareFallbackReason reason)
+{
+	return reason == OBSAndroidSoftwareFallbackReason::FullRangeHardwareUnavailable
+		       ? "Output.AndroidFullRangeSoftwareFallback.Status"
+		       : "Output.AndroidHevcSoftwareFallback.Status";
+}
+
 void OBSBasic::NotifyAndroidSoftwareEncoderFallback(bool forStreaming, bool forRecording, bool configOnly)
 {
 	if (!outputHandler)
 		return;
-	bool activeFallback = (!configOnly && ((forStreaming && outputHandler->androidStreamingSoftwareFallback) ||
-					       (forRecording && outputHandler->androidRecordingSoftwareFallback)));
-	if (configOnly) {
+	auto reason = OBSAndroidSoftwareFallbackReason::None;
+	if (!configOnly) {
+		if (forStreaming && outputHandler->androidStreamingSoftwareFallback)
+			reason = outputHandler->androidStreamingFallbackReason;
+		else if (forRecording && outputHandler->androidRecordingSoftwareFallback)
+			reason = outputHandler->androidRecordingFallbackReason;
+	} else {
 		const auto space = OBSAndroidVideoColorSpace();
+		const auto range = OBSAndroidVideoColorRange();
 		const bool advanced = strcmp(config_get_string(activeConfiguration, "Output", "Mode"), "Advanced") == 0;
 		if (advanced) {
 			const char *streamEnc = config_get_string(activeConfiguration, "AdvOut", "Encoder");
 			const char *recEnc = config_get_string(activeConfiguration, "AdvOut", "RecEncoder");
 			const bool useStream = strcmp(recEnc, "none") == 0;
 			const bool custom = strcmp(config_get_string(activeConfiguration, "AdvOut", "RecType"), "FFmpeg") == 0;
-			activeFallback =
-				(forStreaming && OBSAndroidEncoderUsesSoftwareFallback(streamEnc, space, false)) ||
-				(forRecording && !custom &&
-				 OBSAndroidEncoderUsesSoftwareFallback(useStream ? streamEnc : recEnc, space, false));
+			if (forStreaming)
+				reason = OBSAndroidSoftwareFallbackForVideo(streamEnc, space, range, false);
+			if (reason == OBSAndroidSoftwareFallbackReason::None && forRecording && !custom)
+				reason = OBSAndroidSoftwareFallbackForVideo(useStream ? streamEnc : recEnc, space, range,
+									    false);
 		} else {
 			const char *streamEnc =
 				get_simple_output_encoder(config_get_string(activeConfiguration, "SimpleOutput", "StreamEncoder"));
@@ -56,20 +69,25 @@ void OBSBasic::NotifyAndroidSoftwareEncoderFallback(bool forStreaming, bool forR
 			const bool lossless = strcmp(recQuality, "Lossless") == 0;
 			const char *recEnc =
 				get_simple_output_encoder(config_get_string(activeConfiguration, "SimpleOutput", "RecEncoder"));
-			activeFallback =
-				(forStreaming && OBSAndroidEncoderUsesSoftwareFallback(streamEnc, space, true)) ||
-				(forRecording && !lossless &&
-				 OBSAndroidEncoderUsesSoftwareFallback(recUsesStream ? streamEnc : recEnc, space, true));
+			if (forStreaming)
+				reason = OBSAndroidSoftwareFallbackForVideo(streamEnc, space, range, true);
+			if (reason == OBSAndroidSoftwareFallbackReason::None && forRecording && !lossless)
+				reason = OBSAndroidSoftwareFallbackForVideo(recUsesStream ? streamEnc : recEnc, space,
+									    range, true);
 		}
 	}
-	if (!activeFallback)
+	if (reason == OBSAndroidSoftwareFallbackReason::None)
 		return;
-	ShowStatusBarMessage(QTStr("Output.AndroidHevcSoftwareFallback.Status"));
+	ShowStatusBarMessage(QTStr(androidFallbackStatusKey(reason)));
 	if (outputHandler->androidSoftwareFallbackNotified)
 		return;
 	outputHandler->androidSoftwareFallbackNotified = true;
-	OBSMessageBox::warning(this, QTStr("Output.AndroidHevcSoftwareFallback.Title"),
-			       QTStr("Output.AndroidHevcSoftwareFallback.Text"));
+	const bool fullRange = reason == OBSAndroidSoftwareFallbackReason::FullRangeHardwareUnavailable;
+	OBSMessageBox::warning(this,
+			       QTStr(fullRange ? "Output.AndroidFullRangeSoftwareFallback.Title"
+					       : "Output.AndroidHevcSoftwareFallback.Title"),
+			       QTStr(fullRange ? "Output.AndroidFullRangeSoftwareFallback.Text"
+					       : "Output.AndroidHevcSoftwareFallback.Text"));
 }
 #endif
 

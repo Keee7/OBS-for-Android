@@ -720,6 +720,7 @@ static void intitialize_audio_encoder(struct obs_encoder *encoder)
 }
 
 static THREAD_LOCAL bool can_reroute = false;
+static void maybe_clear_encoder_core_video_mix(obs_encoder_t *encoder);
 
 static inline bool obs_encoder_initialize_internal(obs_encoder_t *encoder)
 {
@@ -738,15 +739,25 @@ static inline bool obs_encoder_initialize_internal(obs_encoder_t *encoder)
 
 	obs_encoder_shutdown(encoder);
 
+	encoder->info = encoder->orig_info;
 	maybe_set_up_gpu_rescale(encoder);
-	if ((encoder->orig_info.caps & OBS_ENCODER_CAP_PASS_TEXTURE_RGB) && !gpu_encode_available(encoder)) {
+	const bool rgb_gpu_missing = (encoder->orig_info.caps & OBS_ENCODER_CAP_PASS_TEXTURE_RGB) &&
+				     !gpu_encode_available(encoder);
+	if (rgb_gpu_missing && !encoder->orig_info.encode) {
 		obs_encoder_set_last_error(encoder, "Cannot create the required RGB GPU encoding mix");
 		return false;
+	}
+	if (rgb_gpu_missing) {
+		blog(LOG_WARNING, "Encoder '%s': RGB GPU encoding mix unavailable; falling back to raw video input",
+		     encoder->context.name);
+		encoder->info.caps &= ~(OBS_ENCODER_CAP_PASS_TEXTURE | OBS_ENCODER_CAP_PASS_TEXTURE_RGB);
+		encoder->info.encode_texture2 = NULL;
+		encoder->info.encode_texture_flush = NULL;
+		maybe_clear_encoder_core_video_mix(encoder);
 	}
 
 	if (encoder->orig_info.create) {
 		can_reroute = true;
-		encoder->info = encoder->orig_info;
 		encoder->context.data = encoder->orig_info.create(encoder->context.settings, encoder);
 		can_reroute = false;
 	}
@@ -818,6 +829,20 @@ static void maybe_clear_encoder_core_video_mix(obs_encoder_t *encoder)
 		}
 	}
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
+}
+
+void obs_encoder_fallback_to_raw(obs_encoder_t *encoder)
+{
+	if (!obs_ptr_valid(encoder, "obs_encoder_fallback_to_raw"))
+		return;
+	if (!can_reroute)
+		return;
+
+	encoder->info.caps &= ~(OBS_ENCODER_CAP_PASS_TEXTURE | OBS_ENCODER_CAP_PASS_TEXTURE_RGB);
+	encoder->info.encode_texture2 = NULL;
+	encoder->info.encode_texture_flush = NULL;
+	maybe_clear_encoder_core_video_mix(encoder);
+	maybe_set_up_gpu_rescale(encoder);
 }
 
 void obs_encoder_shutdown(obs_encoder_t *encoder)

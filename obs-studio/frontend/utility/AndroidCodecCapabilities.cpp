@@ -7,7 +7,8 @@
 #include <QByteArray>
 
 static QByteArray findCodec(const char *mime, uint32_t width, uint32_t height, uint32_t num, uint32_t den,
-			   uint32_t index = 0, uint32_t bitrate = 0, int mode = 2, int profile = 0, bool p010 = false)
+			   uint32_t index = 0, uint32_t bitrate = 0, int mode = 2, int profile = 0, bool p010 = false,
+			   bool allowByteBuffer = false)
 {
 	if (!width || !height || !num || !den)
 		return {};
@@ -16,9 +17,10 @@ static QByteArray findCodec(const char *mime, uint32_t width, uint32_t height, u
 		return {};
 	auto type = QJniObject::fromString(QString::fromUtf8(mime));
 	const QJniObject list = QJniObject::callStaticObjectMethod(
-		"com/obsproject/studio/ObsCodecCapabilities", "findEncodersProfile", "(Ljava/lang/String;IIDIIIZ)[Ljava/lang/String;",
-		type.object<jstring>(), jint(width), jint(height), jdouble(num) / double(den), jint(bitrate), jint(mode),
-		jint(profile), jboolean(p010));
+		"com/obsproject/studio/ObsCodecCapabilities", "findEncodersProfile",
+		"(Ljava/lang/String;IIDIIIZZ)[Ljava/lang/String;", type.object<jstring>(), jint(width), jint(height),
+		jdouble(num) / double(den), jint(bitrate), jint(mode), jint(profile), jboolean(p010),
+		jboolean(allowByteBuffer));
 	if (env->ExceptionCheck()) {
 		env->ExceptionDescribe();
 		env->ExceptionClear();
@@ -83,34 +85,136 @@ video_colorspace OBSAndroidVideoColorSpace()
 	return obs_get_video_info(&video) ? video.colorspace : VIDEO_CS_DEFAULT;
 }
 
-bool OBSAndroidEncoderUsesSoftwareFallback(const char *id, video_colorspace space, bool cbr)
+video_range_type OBSAndroidVideoColorRange()
 {
-	if (!id || (strcmp(id, "android_mediacodec_hevc") != 0 && strcmp(id, "android_mediacodec_hevc_main10") != 0))
-		return false;
-	const bool pq = space == VIDEO_CS_2100_PQ;
-	const bool hlg = space == VIDEO_CS_2100_HLG;
-	return (pq || hlg) && !OBSAndroidHevcMain10Available(pq, cbr) && obs_get_encoder_codec("ffmpeg_x265") != nullptr;
+	obs_video_info video;
+	return obs_get_video_info(&video) ? video.range : VIDEO_RANGE_PARTIAL;
 }
 
-const char *OBSAndroidEncoderForVideo(const char *id, bool cbr, bool *fellBackToSoftware)
+static const char *softwareFallbackEncoderForId(const char *id)
 {
-	if (fellBackToSoftware)
-		*fellBackToSoftware = false;
-	constexpr auto hevcMain10 = "android_mediacodec_hevc_main10";
-	if (!id || (strcmp(id, "android_mediacodec_hevc") != 0 && strcmp(id, hevcMain10) != 0))
-		return id;
-	const auto space = OBSAndroidVideoColorSpace();
-	const bool pq = space == VIDEO_CS_2100_PQ;
-	if ((pq || space == VIDEO_CS_2100_HLG) && OBSAndroidHevcMain10Available(pq, cbr))
-		return hevcMain10;
-	if (OBSAndroidEncoderUsesSoftwareFallback(id, space, cbr)) {
-		blog(LOG_WARNING,
-		     "MediaCodec HEVC Main10 unavailable for the active HDR color space. Using software HEVC (x265).");
-		if (fellBackToSoftware)
-			*fellBackToSoftware = true;
-		return "ffmpeg_x265";
+	if (!id)
+		return nullptr;
+	if (strcmp(id, "android_mediacodec_h264") == 0)
+		return obs_get_encoder_codec("obs_x264") ? "obs_x264" : nullptr;
+	if (strcmp(id, "android_mediacodec_hevc") == 0 || strcmp(id, "android_mediacodec_hevc_main10") == 0)
+		return obs_get_encoder_codec("ffmpeg_x265") ? "ffmpeg_x265" : nullptr;
+	if (strcmp(id, "android_mediacodec_av1") == 0)
+		return obs_get_encoder_codec("ffmpeg_aom_av1") ? "ffmpeg_aom_av1" : nullptr;
+	return nullptr;
+}
+
+bool OBSAndroidHardwareFullRangeSupported(const char *id, video_colorspace space)
+{
+	if (!id || strncmp(id, "android_mediacodec_", 19) != 0)
+		return true;
+	const char *codec = obs_get_encoder_codec(id);
+	if (!codec)
+		return false;
+	const char *mime = nullptr;
+	jint profile = 0;
+	bool p010 = false;
+	if (strcmp(codec, "h264") == 0) {
+		mime = "video/avc";
+	} else if (strcmp(id, "android_mediacodec_hevc_main10") == 0) {
+		mime = "video/hevc";
+		p010 = true;
+		profile = obs_android_hevc_main10_profile(space == VIDEO_CS_2100_PQ);
+	} else if (strcmp(codec, "hevc") == 0) {
+		mime = "video/hevc";
+		profile = 1;
+	} else if (strcmp(codec, "av1") == 0) {
+		mime = "video/av01";
+		profile = 1;
+	} else if (strcmp(codec, "vp9") == 0) {
+		mime = "video/x-vnd.on2.vp9";
+		profile = 1;
+	} else {
+		return false;
 	}
-	return id;
+	QJniEnvironment env;
+	if (!env.isValid())
+		return false;
+	const auto jmime = QJniObject::fromString(QString::fromUtf8(mime));
+	const jboolean ok = QJniObject::callStaticMethod<jboolean>(
+		"com/obsproject/studio/ObsCodecCapabilities", "hasHardwareFullRangeSupport",
+		"(Ljava/lang/String;IZ)Z", jmime.object<jstring>(), profile, jboolean(p010));
+	if (env->ExceptionCheck()) {
+		env->ExceptionClear();
+		return false;
+	}
+	return ok;
+}
+
+static const char *resolveAndroidEncoder(const char *id, video_colorspace space, video_range_type range, bool cbr,
+					     OBSAndroidSoftwareFallbackReason *reasonOut)
+{
+	if (reasonOut)
+		*reasonOut = OBSAndroidSoftwareFallbackReason::None;
+	if (!id || strncmp(id, "android_mediacodec_", 19) != 0)
+		return id;
+
+	const char *resolved = id;
+	constexpr auto hevcMain10 = "android_mediacodec_hevc_main10";
+	const bool pq = space == VIDEO_CS_2100_PQ;
+	const bool hlg = space == VIDEO_CS_2100_HLG;
+	if (strcmp(id, "android_mediacodec_hevc") == 0 || strcmp(id, hevcMain10) == 0) {
+		if (pq || hlg) {
+			if (OBSAndroidHevcMain10Available(pq, cbr)) {
+				resolved = hevcMain10;
+			} else if (obs_get_encoder_codec("ffmpeg_x265")) {
+				if (reasonOut)
+					*reasonOut = OBSAndroidSoftwareFallbackReason::HdrMain10Unavailable;
+				return "ffmpeg_x265";
+			}
+		}
+	}
+
+	if (range == VIDEO_RANGE_FULL && !OBSAndroidHardwareFullRangeSupported(resolved, space)) {
+		const char *sw = softwareFallbackEncoderForId(resolved);
+		if (sw) {
+			if (reasonOut)
+				*reasonOut = OBSAndroidSoftwareFallbackReason::FullRangeHardwareUnavailable;
+			return sw;
+		}
+	}
+	return resolved;
+}
+
+OBSAndroidSoftwareFallbackReason OBSAndroidSoftwareFallbackForVideo(const char *id, video_colorspace space,
+								    video_range_type range, bool cbr)
+{
+	OBSAndroidSoftwareFallbackReason reason = OBSAndroidSoftwareFallbackReason::None;
+	resolveAndroidEncoder(id, space, range, cbr, &reason);
+	return reason;
+}
+
+bool OBSAndroidEncoderUsesSoftwareFallback(const char *id, video_colorspace space, bool cbr)
+{
+	return OBSAndroidSoftwareFallbackForVideo(id, space, OBSAndroidVideoColorRange(), cbr) !=
+	       OBSAndroidSoftwareFallbackReason::None;
+}
+
+const char *OBSAndroidEncoderForVideo(const char *id, bool cbr, bool *fellBackToSoftware,
+				      OBSAndroidSoftwareFallbackReason *reasonOut)
+{
+	OBSAndroidSoftwareFallbackReason reason = OBSAndroidSoftwareFallbackReason::None;
+	const auto space = OBSAndroidVideoColorSpace();
+	const auto range = OBSAndroidVideoColorRange();
+	const char *resolved = resolveAndroidEncoder(id, space, range, cbr, &reason);
+	if (reason == OBSAndroidSoftwareFallbackReason::HdrMain10Unavailable) {
+		blog(LOG_WARNING,
+		     "MediaCodec HEVC Main10 unavailable for the active HDR color space. Using %s.", resolved);
+	} else if (reason == OBSAndroidSoftwareFallbackReason::FullRangeHardwareUnavailable) {
+		blog(LOG_WARNING,
+		     "MediaCodec hardware encoder %s does not support Full color range; falling back to %s.",
+		     id ? id : "(null)", resolved);
+	}
+	if (fellBackToSoftware)
+		*fellBackToSoftware = reason != OBSAndroidSoftwareFallbackReason::None;
+	if (reasonOut)
+		*reasonOut = reason;
+	return resolved;
 }
 
 static void queryEncoderAvailability(void *, calldata_t *cd)
@@ -119,7 +223,7 @@ static void queryEncoderAvailability(void *, calldata_t *cd)
 							     jint(calldata_int(cd, "profile")), calldata_bool(cd, "p010")));
 }
 
-static void queryCodec(void *, calldata_t *cd)
+static void queryCodecInternal(calldata_t *cd, bool allowByteBuffer)
 {
 	const auto width = calldata_int(cd, "width");
 	const auto height = calldata_int(cd, "height");
@@ -137,11 +241,21 @@ static void queryCodec(void *, calldata_t *cd)
 	    index >= 0 && index <= INT32_MAX && bitrate >= 0 && bitrate <= INT32_MAX &&
 	    profile >= 0 && profile <= INT32_MAX && mode >= 0 && mode <= 2 && mime)
 		name = findCodec(mime, uint32_t(width), uint32_t(height), uint32_t(num), uint32_t(den), uint32_t(index),
-				 uint32_t(bitrate), int(mode), int(profile), p010);
+				 uint32_t(bitrate), int(mode), int(profile), p010, allowByteBuffer);
 	calldata_set_string(cd, "name", name.constData());
-	blog(LOG_INFO, "MediaCodec %s %lldx%lld %lld/%lld bitrate=%lld index=%lld: %s",
-	     mime ? mime : "unknown", width, height, num, den, bitrate, index,
+	blog(LOG_INFO, "MediaCodec %s %lldx%lld %lld/%lld bitrate=%lld index=%lld raw=%d: %s",
+	     mime ? mime : "unknown", width, height, num, den, bitrate, index, allowByteBuffer ? 1 : 0,
 	     name.isEmpty() ? "end of compatible hardware candidates" : name.constData());
+}
+
+static void queryCodec(void *, calldata_t *cd)
+{
+	queryCodecInternal(cd, false);
+}
+
+static void queryRawCodec(void *, calldata_t *cd)
+{
+	queryCodecInternal(cd, true);
 }
 
 static void queryControls(void *, calldata_t *cd)
@@ -187,4 +301,7 @@ void OBSAndroidRegisterCodecQuery()
 	proc_handler_add(obs_get_proc_handler(),
 		"void android_mediacodec_query_component(string mime, int width, int height, int fps_num, int fps_den, int bitrate, int mode, int index, int profile, bool p010, out string name)",
 		queryCodec, nullptr);
+	proc_handler_add(obs_get_proc_handler(),
+		"void android_mediacodec_query_raw_component(string mime, int width, int height, int fps_num, int fps_den, int bitrate, int mode, int index, int profile, bool p010, out string name)",
+		queryRawCodec, nullptr);
 }

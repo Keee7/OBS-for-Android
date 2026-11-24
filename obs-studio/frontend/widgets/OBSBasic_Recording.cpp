@@ -198,7 +198,11 @@ void OBSBasic::RecordingStart()
 	ui->statusbar->RecordingStarted(outputHandler->fileOutput);
 #ifdef __ANDROID__
 	if (outputHandler && outputHandler->androidRecordingSoftwareFallback)
-		ShowStatusBarMessage(QTStr("Output.AndroidHevcSoftwareFallback.Status"));
+		ShowStatusBarMessage(QTStr(
+			outputHandler->androidRecordingFallbackReason ==
+					OBSAndroidSoftwareFallbackReason::FullRangeHardwareUnavailable
+				? "Output.AndroidFullRangeSoftwareFallback.Status"
+				: "Output.AndroidHevcSoftwareFallback.Status"));
 #endif
 	emit RecordingStarted(isRecordingPausable);
 

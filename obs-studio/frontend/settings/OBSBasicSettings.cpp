@@ -4366,6 +4366,16 @@ void OBSBasicSettings::on_colorSpace_currentIndexChanged(int)
 	UpdateColorFormatSpaceWarning();
 }
 
+void OBSBasicSettings::on_colorRange_currentIndexChanged(int)
+{
+#ifdef __ANDROID__
+	if (!loading) {
+		AdvOutRecCheckWarnings();
+		SimpleRecordingEncoderChanged();
+	}
+#endif
+}
+
 #ifdef __ANDROID__
 static video_colorspace SelectedSettingsColorSpace(const QComboBox *colorSpace)
 {
@@ -4375,6 +4385,27 @@ static video_colorspace SelectedSettingsColorSpace(const QComboBox *colorSpace)
 	if (space == "2100HLG")
 		return VIDEO_CS_2100_HLG;
 	return VIDEO_CS_709;
+}
+
+static video_range_type SelectedSettingsColorRange(const QComboBox *colorRange)
+{
+	return colorRange->currentData().toString() == "Full" ? VIDEO_RANGE_FULL : VIDEO_RANGE_PARTIAL;
+}
+
+static void AppendAndroidFallbackWarning(QString &msg, const QString &separator,
+					 OBSAndroidSoftwareFallbackReason reason)
+{
+	if (reason == OBSAndroidSoftwareFallbackReason::None)
+		return;
+	const char *key = reason == OBSAndroidSoftwareFallbackReason::FullRangeHardwareUnavailable
+				  ? "OutputWarnings.AndroidFullRangeSoftwareFallback"
+				  : "OutputWarnings.AndroidHevcSoftwareFallback";
+	const QString text = QTStr(key);
+	if (!msg.contains(text)) {
+		if (!msg.isEmpty())
+			msg += separator;
+		msg += text;
+	}
 }
 
 void OBSBasicSettings::UpdateAndroidHevcMain10Options()
@@ -5054,14 +5085,16 @@ void OBSBasicSettings::AdvOutRecCheckWarnings()
 
 #ifdef __ANDROID__
 	const auto activeSpace = SelectedSettingsColorSpace(ui->colorSpace);
+	const auto activeRange = SelectedSettingsColorRange(ui->colorRange);
 	const QString streamEnc = ui->advOutEncoder->currentData().toString();
 	const QString recEnc = ui->advOutRecEncoder->currentData().toString();
-	if (OBSAndroidEncoderUsesSoftwareFallback(QT_TO_UTF8(streamEnc), activeSpace, false) ||
-	    (!useStreamEncoder && OBSAndroidEncoderUsesSoftwareFallback(QT_TO_UTF8(recEnc), activeSpace, false))) {
-		if (!warningMsg.isEmpty())
-			warningMsg += "\n\n";
-		warningMsg += QTStr("OutputWarnings.AndroidHevcSoftwareFallback");
-	}
+	AppendAndroidFallbackWarning(
+		warningMsg, "\n\n",
+		OBSAndroidSoftwareFallbackForVideo(QT_TO_UTF8(streamEnc), activeSpace, activeRange, false));
+	if (!useStreamEncoder)
+		AppendAndroidFallbackWarning(
+			warningMsg, "\n\n",
+			OBSAndroidSoftwareFallbackForVideo(QT_TO_UTF8(recEnc), activeSpace, activeRange, false));
 #endif
 
 	delete advOutRecWarning;
@@ -5875,19 +5908,15 @@ void OBSBasicSettings::SimpleRecordingEncoderChanged()
 
 #ifdef __ANDROID__
 	const auto activeSpace = SelectedSettingsColorSpace(ui->colorSpace);
+	const auto activeRange = SelectedSettingsColorRange(ui->colorRange);
 	const QString streamEnc = ui->simpleOutStrEncoder->currentData().toString();
 	const char *streamEncId = streamEnc.isEmpty() ? nullptr : get_simple_output_encoder(QT_TO_UTF8(streamEnc));
 	const char *recEncId = recEncoder.isEmpty() ? nullptr : get_simple_output_encoder(QT_TO_UTF8(recEncoder));
-	const bool streamFallback = OBSAndroidEncoderUsesSoftwareFallback(streamEncId, activeSpace, true);
-	const bool recFallback =
-		(qual == "Stream") ? streamFallback
-		: (qual != "Lossless") ? OBSAndroidEncoderUsesSoftwareFallback(recEncId, activeSpace, true)
-				       : false;
-	if (streamFallback || recFallback) {
-		if (!warning.isEmpty())
-			warning += "\n\n";
-		warning += QTStr("OutputWarnings.AndroidHevcSoftwareFallback");
-	}
+	AppendAndroidFallbackWarning(
+		warning, "\n\n", OBSAndroidSoftwareFallbackForVideo(streamEncId, activeSpace, activeRange, true));
+	if (qual != "Stream" && qual != "Lossless")
+		AppendAndroidFallbackWarning(
+			warning, "\n\n", OBSAndroidSoftwareFallbackForVideo(recEncId, activeSpace, activeRange, true));
 #endif
 
 	if (warning.isEmpty()) {

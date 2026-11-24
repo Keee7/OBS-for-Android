@@ -2,6 +2,9 @@
 
 #include <utility/MultitrackVideoOutput.hpp>
 #include <utility/WHIPSimulcastEncoders.hpp>
+#ifdef __ANDROID__
+#include <utility/AndroidCodecCapabilities.hpp>
+#endif
 
 #include <obs.hpp>
 #include <util/dstr.hpp>
@@ -70,6 +73,8 @@ struct BasicOutputHandler {
 	OBSSignal replayBufferSaveFailed;
 	bool androidStreamingSoftwareFallback = false;
 	bool androidRecordingSoftwareFallback = false;
+	OBSAndroidSoftwareFallbackReason androidStreamingFallbackReason = OBSAndroidSoftwareFallbackReason::None;
+	OBSAndroidSoftwareFallbackReason androidRecordingFallbackReason = OBSAndroidSoftwareFallbackReason::None;
 	bool androidSoftwareFallbackNotified = false;
 #endif
 
