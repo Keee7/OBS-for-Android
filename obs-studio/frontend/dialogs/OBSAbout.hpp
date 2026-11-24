@@ -16,4 +16,9 @@ private slots:
 	void ShowAbout();
 	void ShowAuthors();
 	void ShowLicense();
+
+private:
+#ifdef __ANDROID__
+	void SetAndroidActiveTab(int index);
+#endif
 };

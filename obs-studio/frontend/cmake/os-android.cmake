@@ -137,6 +137,14 @@ qt_add_resources(
   BASE "${_frontend_data}"
   FILES ${_frontend_data_files})
 
+if(EXISTS "${CMAKE_SOURCE_DIR}/AUTHORS")
+  qt_add_resources(
+    obs-studio "obsauthors"
+    PREFIX "/obsfrontenddata/authors"
+    BASE "${CMAKE_SOURCE_DIR}"
+    FILES "${CMAKE_SOURCE_DIR}/AUTHORS")
+endif()
+
 # :/obsplugindata/<模块> -> $OBS_ROOT_PATH/share/obs/obs-plugins/<模块>
 #
 # 插件数据（.effect / locale / luma_wipes…）没法跟着 .so 一起进 nativeLibraryDir：
