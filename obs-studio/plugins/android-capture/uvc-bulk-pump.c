@@ -15,6 +15,8 @@
 #define BUFFER_MAX (XFER_COUNT + READY_MAX)
 #define ERROR_LIMIT 20U
 #define BAD_SECONDS_LIMIT 5U
+#define DRAIN_EVENT_ERROR_LIMIT 5U
+#define DRAIN_TIMEOUT_NS 2000000000ULL
 
 _Static_assert(XFER_COUNT <= 32, "retry bitmap requires at most 32 slots");
 
@@ -36,7 +38,7 @@ struct uvc_bulk_pump {
 	pthread_t thread;
 	pthread_mutex_t mutex;
 	pthread_cond_t cond;
-	bool thread_started, init_done, stopping, monotonic_cond;
+	bool thread_started, init_done, stopping, monotonic_cond, abandoned, owner_held;
 	int fatal;
 	unsigned active, waiters;
 	uint32_t retry_pending, retry_stalled;
@@ -88,6 +90,28 @@ static void LIBUSB_CALL on_transfer(struct libusb_transfer *x)
 	pthread_mutex_lock(&p->mutex);
 	slot->active = false;
 	p->active--;
+	if (p->abandoned) {
+		struct libusb_transfer *tx = slot->x;
+		slot->x = NULL;
+		uint8_t *buf = NULL;
+		if (slot->buffer_id < p->buffer_count) {
+			buf = p->buffers[slot->buffer_id];
+			p->buffers[slot->buffer_id] = NULL;
+		}
+		const bool destroy_self = (p->active == 0 && !p->owner_held);
+		if (p->active == 0)
+			pthread_cond_broadcast(&p->cond);
+		pthread_mutex_unlock(&p->mutex);
+		if (tx)
+			libusb_free_transfer(tx);
+		free(buf);
+		if (destroy_self) {
+			pthread_cond_destroy(&p->cond);
+			pthread_mutex_destroy(&p->mutex);
+			free(p);
+		}
+		return;
+	}
 	if (p->stopping || p->fatal) {
 		pthread_mutex_unlock(&p->mutex);
 		return;
@@ -213,23 +237,37 @@ static void *pump_thread(void *arg)
 		r = libusb_handle_events_timeout(p->ctx, &tv);
 	}
 	/* Only the event thread cancels and drains; callbacks own active accounting.
-  * Never free a submitted transfer until its completion/cancellation callback runs. */
+	 * Never free a submitted transfer until its completion/cancellation callback runs. */
+	struct libusb_transfer *to_cancel[XFER_COUNT];
+	unsigned n_cancel = 0;
 	pthread_mutex_lock(&p->mutex);
+	p->stopping = true;
 	for (unsigned i = 0; i < XFER_COUNT; i++)
 		if (p->slots[i].active)
-			libusb_cancel_transfer(p->slots[i].x);
+			to_cancel[n_cancel++] = p->slots[i].x;
 	pthread_mutex_unlock(&p->mutex);
+	for (unsigned i = 0; i < n_cancel; i++)
+		libusb_cancel_transfer(to_cancel[i]);
+	const uint64_t drain_start = now_ns();
+	unsigned drain_errors = 0;
 	for (;;) {
 		pthread_mutex_lock(&p->mutex);
-		unsigned active = p->active;
+		const unsigned active = p->active;
 		pthread_mutex_unlock(&p->mutex);
 		if (!active)
 			break;
+		if (now_ns() - drain_start >= DRAIN_TIMEOUT_NS)
+			break;
 		struct timeval tv = {0, 10000};
-		libusb_handle_events_timeout(p->ctx, &tv);
+		const int er = libusb_handle_events_timeout(p->ctx, &tv);
+		if (er == 0 || er == LIBUSB_ERROR_INTERRUPTED) {
+			drain_errors = 0;
+		} else if (++drain_errors >= DRAIN_EVENT_ERROR_LIMIT) {
+			break;
+		}
 	}
 	/* Synchronize with callbacks that may have been dispatched by another
-  * libusb event-handling thread but have not yet returned. */
+	 * libusb event-handling thread but have not yet returned. */
 	libusb_lock_events(p->ctx);
 	libusb_unlock_events(p->ctx);
 	pthread_mutex_lock(&p->mutex);
@@ -237,20 +275,81 @@ static void *pump_thread(void *arg)
 	pthread_mutex_unlock(&p->mutex);
 	return NULL;
 }
-static void destroy_pump(struct uvc_bulk_pump *p)
+static void free_pump_storage(struct uvc_bulk_pump *p)
 {
-	for (unsigned i = 0; i < XFER_COUNT; i++)
-		if (p->slots[i].x)
+	for (unsigned i = 0; i < XFER_COUNT; i++) {
+		if (p->slots[i].x) {
 			libusb_free_transfer(p->slots[i].x);
-	for (unsigned i = 0; i < p->buffer_count; i++)
-		free(p->buffers[i]);
+			p->slots[i].x = NULL;
+		}
+	}
+	for (unsigned i = 0; i < p->buffer_count; i++) {
+		if (p->buffers[i]) {
+			free(p->buffers[i]);
+			p->buffers[i] = NULL;
+		}
+	}
 	pthread_cond_destroy(&p->cond);
 	pthread_mutex_destroy(&p->mutex);
 	free(p);
 }
-static struct uvc_bulk_pump *pump_start_sized(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
-					      unsigned transfer_size, int *error_out)
+
+static int finish_pump_teardown(struct uvc_bulk_pump *p, struct uvc_bulk_pump **retained_out)
 {
+	if (retained_out)
+		*retained_out = NULL;
+	pthread_mutex_lock(&p->mutex);
+	if (p->active > 0) {
+		/* Abandoned drain: in-flight URBs never completed. Mark abandoned
+		 * and only free inactive transfers + unpinned buffers now; active
+		 * transfers/buffers are reclaimed by late callbacks or after close. */
+		p->stopping = true;
+		p->abandoned = true;
+		p->owner_held = (retained_out != NULL);
+
+		struct libusb_transfer *free_xfers[XFER_COUNT] = {0};
+		unsigned n_xfers = 0;
+		uint8_t *free_bufs[BUFFER_MAX] = {0};
+		unsigned n_bufs = 0;
+		bool pinned[BUFFER_MAX] = {0};
+
+		for (unsigned i = 0; i < XFER_COUNT; i++) {
+			if (p->slots[i].active) {
+				if (p->slots[i].buffer_id < p->buffer_count)
+					pinned[p->slots[i].buffer_id] = true;
+			} else if (p->slots[i].x) {
+				free_xfers[n_xfers++] = p->slots[i].x;
+				p->slots[i].x = NULL;
+			}
+		}
+		for (unsigned i = 0; i < p->buffer_count; i++) {
+			if (!pinned[i] && p->buffers[i]) {
+				free_bufs[n_bufs++] = p->buffers[i];
+				p->buffers[i] = NULL;
+			}
+		}
+		if (retained_out)
+			*retained_out = p;
+		pthread_mutex_unlock(&p->mutex);
+
+		for (unsigned i = 0; i < n_xfers; i++)
+			libusb_free_transfer(free_xfers[i]);
+		for (unsigned i = 0; i < n_bufs; i++)
+			free(free_bufs[i]);
+		return UVC_PUMP_ERR_CANCEL_TIMEOUT;
+	}
+	pthread_mutex_unlock(&p->mutex);
+
+	free_pump_storage(p);
+	return 0;
+}
+
+static struct uvc_bulk_pump *pump_start_sized_ex(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
+						 unsigned transfer_size, int *error_out,
+						 struct uvc_bulk_pump **retained_out)
+{
+	if (retained_out)
+		*retained_out = NULL;
 	int err = LIBUSB_ERROR_NO_MEM;
 	if (!transfer_size) {
 		if (error_out)
@@ -318,43 +417,61 @@ static struct uvc_bulk_pump *pump_start_sized(libusb_context *ctx, libusb_device
 	pthread_mutex_unlock(&p->mutex);
 	if (err) {
 		pthread_join(p->thread, NULL);
-		goto fail;
+		if (finish_pump_teardown(p, retained_out) == UVC_PUMP_ERR_CANCEL_TIMEOUT)
+			err = UVC_PUMP_ERR_CANCEL_TIMEOUT;
+		goto fail_null;
 	}
 	if (error_out)
 		*error_out = 0;
 	return p;
 fail:
-	destroy_pump(p);
+	finish_pump_teardown(p, NULL);
 fail_null:
 	if (error_out)
 		*error_out = err;
 	return NULL;
 }
-struct uvc_bulk_pump *uvc_bulk_pump_start_sized(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
-						unsigned transfer_size, int *error_out)
+struct uvc_bulk_pump *uvc_bulk_pump_start_sized_ex(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
+						   unsigned transfer_size, int *error_out,
+						   struct uvc_bulk_pump **retained_out)
 {
+	if (retained_out)
+		*retained_out = NULL;
 	if (!transfer_size || transfer_size > UVC_BULK_CHUNK_SIZE) {
 		if (error_out)
 			*error_out = LIBUSB_ERROR_INVALID_PARAM;
 		return NULL;
 	}
-	return pump_start_sized(ctx, handle, endpoint, transfer_size, error_out);
+	return pump_start_sized_ex(ctx, handle, endpoint, transfer_size, error_out, retained_out);
 }
-struct uvc_bulk_pump *uvc_bulk_pump_start_payload(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
-						  unsigned payload_size, int *error_out)
+struct uvc_bulk_pump *uvc_bulk_pump_start_sized(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
+						unsigned transfer_size, int *error_out)
 {
+	return uvc_bulk_pump_start_sized_ex(ctx, handle, endpoint, transfer_size, error_out, NULL);
+}
+struct uvc_bulk_pump *uvc_bulk_pump_start_payload_ex(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
+						     unsigned payload_size, int *error_out,
+						     struct uvc_bulk_pump **retained_out)
+{
+	if (retained_out)
+		*retained_out = NULL;
 	const unsigned transfer_size = uvc_bulk_payload_transfer_size(payload_size);
 	if (!transfer_size) {
 		if (error_out)
 			*error_out = LIBUSB_ERROR_INVALID_PARAM;
 		return NULL;
 	}
-	return pump_start_sized(ctx, handle, endpoint, transfer_size, error_out);
+	return pump_start_sized_ex(ctx, handle, endpoint, transfer_size, error_out, retained_out);
+}
+struct uvc_bulk_pump *uvc_bulk_pump_start_payload(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
+						  unsigned payload_size, int *error_out)
+{
+	return uvc_bulk_pump_start_payload_ex(ctx, handle, endpoint, payload_size, error_out, NULL);
 }
 struct uvc_bulk_pump *uvc_bulk_pump_start(libusb_context *ctx, libusb_device_handle *handle, uint8_t endpoint,
 					  int *error_out)
 {
-	return uvc_bulk_pump_start_sized(ctx, handle, endpoint, UVC_BULK_CHUNK_SIZE, error_out);
+	return uvc_bulk_pump_start_sized_ex(ctx, handle, endpoint, UVC_BULK_CHUNK_SIZE, error_out, NULL);
 }
 int uvc_bulk_pump_acquire(struct uvc_bulk_pump *p, struct uvc_bulk_block *block, unsigned timeout_ms)
 {
@@ -414,10 +531,12 @@ void uvc_bulk_pump_snapshot(struct uvc_bulk_pump *p, struct uvc_bulk_stats *stat
 	*stats = p->stats;
 	pthread_mutex_unlock(&p->mutex);
 }
-void uvc_bulk_pump_stop(struct uvc_bulk_pump *p)
+int uvc_bulk_pump_stop_ex(struct uvc_bulk_pump *p, struct uvc_bulk_pump **retained_out)
 {
+	if (retained_out)
+		*retained_out = NULL;
 	if (!p)
-		return;
+		return 0;
 	pthread_mutex_lock(&p->mutex);
 	p->stopping = true;
 	pthread_cond_broadcast(&p->cond);
@@ -426,5 +545,39 @@ void uvc_bulk_pump_stop(struct uvc_bulk_pump *p)
 	pthread_mutex_unlock(&p->mutex);
 	if (p->thread_started)
 		pthread_join(p->thread, NULL);
-	destroy_pump(p);
+	return finish_pump_teardown(p, retained_out);
+}
+int uvc_bulk_pump_stop(struct uvc_bulk_pump *p)
+{
+	return uvc_bulk_pump_stop_ex(p, NULL);
+}
+bool uvc_bulk_pump_try_drain(struct uvc_bulk_pump *p, unsigned timeout_ms)
+{
+	if (!p)
+		return true;
+	const uint64_t start = now_ns();
+	const uint64_t limit = (uint64_t)timeout_ms * 1000000ULL;
+	unsigned drain_errors = 0;
+	for (;;) {
+		pthread_mutex_lock(&p->mutex);
+		const unsigned active = p->active;
+		pthread_mutex_unlock(&p->mutex);
+		if (!active)
+			return true;
+		if (now_ns() - start >= limit)
+			return false;
+		struct timeval tv = {0, 10000};
+		const int er = libusb_handle_events_timeout(p->ctx, &tv);
+		if (er == 0 || er == LIBUSB_ERROR_INTERRUPTED) {
+			drain_errors = 0;
+		} else if (++drain_errors >= DRAIN_EVENT_ERROR_LIMIT) {
+			return false;
+		}
+	}
+}
+void uvc_bulk_pump_reclaim_after_close(struct uvc_bulk_pump *p)
+{
+	if (!p)
+		return;
+	free_pump_storage(p);
 }

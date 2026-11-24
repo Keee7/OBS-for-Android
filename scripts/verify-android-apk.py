@@ -157,6 +157,8 @@ def main():
                     errors.append('UVC transport recovery diagnostics missing from APK')
                 if short == 'android-capture.so' and b'yuv_unbuffered' not in payload:
                     errors.append('UVC independent cadence/buffering control missing from APK')
+                if short == 'android-capture.so' and b'transport=iso' not in payload:
+                    errors.append('UVC Isochronous support missing from APK')
                 if short == 'android-capture.so' and any(marker not in payload for marker in
                         (b'event=cadence_input', b'event=cadence_pts', b'event=probe_clock')):
                     errors.append('UVC input cadence diagnostics missing from APK')
