@@ -117,6 +117,7 @@ Look for `event=started hardware=true software=false input=Surface`, `event=firs
 
 ## Documentation & License
 
+* **User Guide**: [docs/tutorial/en/README.md](docs/tutorial/en/README.md) ([中文教程](docs/tutorial/README.md)) — Step-by-step setup, capture sources, streaming/recording, HDR/NDI, and troubleshooting
 * **Build Guide**: [BUILDING.md](BUILDING.md) — GitHub Actions, Linux/WSL, and Windows build instructions
 * **Architecture**: [IMPLEMENTATION_ANDROID.md](IMPLEMENTATION_ANDROID.md) — EGL/MediaCodec, MediaProjection, UVC, SAF storage, and Qt UI layers
 * **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md) — Issue reporting and pull request guidelines

@@ -4,7 +4,8 @@ build-fe-*/
 aqtinstall.log
 
 # 不上传的内容
-docs/
+docs/*
+!docs/tutorial/
 releases/
 prebuilt/
 scripts/setup-env.ps1

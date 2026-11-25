@@ -1,0 +1,17 @@
+{
+  "name": "obs-for-android-docs",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OBS for Android 使用教程（VitePress 文档站）",
+  "scripts": {
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "mermaid": "^11.12.0",
+    "vitepress": "^1.6.4",
+    "vitepress-plugin-mermaid": "^2.0.17"
+  }
+}

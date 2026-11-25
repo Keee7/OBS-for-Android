@@ -117,6 +117,7 @@ adb logcat -v threadtime -d -s 'OBS-MediaCodec:*'
 
 ## 文档与开源许可
 
+* **使用教程**：[docs/tutorial/README.md](docs/tutorial/README.md) — 安装权限、界面导览、音视频来源、推流录制、HDR/NDI 进阶与排查指南
 * **构建指南**：[BUILDING.md](BUILDING.md) — GitHub Actions、Linux/WSL 与 Windows 构建说明
 * **架构实现**：[IMPLEMENTATION_ANDROID.md](IMPLEMENTATION_ANDROID.md) — EGL/MediaCodec、MediaProjection、UVC、SAF 存储与 Qt 界面架构细节
 * **参与贡献**：[CONTRIBUTING.md](CONTRIBUTING.md) — 问题反馈与贡献规范
