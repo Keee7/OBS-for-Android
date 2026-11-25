@@ -34,6 +34,7 @@
 #include "OBSAndroidKeepAlive.hpp"
 #include "OBSAndroidPermissions.hpp"
 #include "OBSAndroidUsb.hpp" // USB host 总线注册（logcat tag OBS-usb）
+#include "OBSAndroidNdi.hpp" // NDI mDNS/NsdManager 发现桥（logcat tag OBS-ndi）
 #include <QDir>
 #include <QListView> // 3-4 命中区：列表行高
 #include <QStandardPaths>
@@ -221,12 +222,16 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 	auto applyKeepAlive = [this, keepAliveWatchdog](const char *why) {
 		const bool streaming = StreamingActive();
 		const bool recording = RecordingActive();
+		const bool replayBuffer = ReplayBufferActive();
+		const bool keepScreenOnEnabled =
+			config_get_bool(App()->GetUserConfig(), "BasicWindow", "KeepScreenOnDuringCapture");
 		const char *state = (streaming && recording) ? "streaming+recording"
 			      : streaming                     ? "streaming"
 			      : recording                     ? "recording"
 			                                      : "idle";
 		QString detail;
 		obsAndroidKeepAliveSetRunning(streaming || recording, state, &detail);
+		obsAndroidKeepAliveSetScreenOn(keepScreenOnEnabled, streaming || recording || replayBuffer);
 		/* 看门狗每秒复核一次，只在状态真的变了时才占日志。本 lambda 只在 GUI 线程跑，static 不用加锁。 */
 		static QString lastState;
 		const QString now = QString::fromUtf8(state);
@@ -268,6 +273,8 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 	 * 只是把"枚举/授权/open_fd/close_fd"插进 libobs，等 android-capture 的 UVC 源来问；
 	 * Java 那边对应 ObsUsbHost。USB 授权框是后来属性页按需弹的（异步），不在这里弹。 */
 	obsAndroidUsbRegisterBus();
+	obsAndroidNdiRegisterBus();
+	obsAndroidNdiInitOutputMenu(this, ui->menuTools);
 
 	/* 3-5 第 3 项：运行时权限批量申请（RECORD_AUDIO + POST_NOTIFICATIONS + CAMERA，第三项是 P-17
 	 * 加进来的）。已在 Java 侧做过"缺了才弹"，每次都调这一句是安全的。 */
@@ -1905,6 +1912,10 @@ void OBSBasic::closeEvent(QCloseEvent *event)
 
 		return;
 	}
+
+#ifdef __ANDROID__
+	obsAndroidNdiShutdownOutput();
+#endif
 
 	QWidget::closeEvent(event);
 	if (!event->isAccepted()) {

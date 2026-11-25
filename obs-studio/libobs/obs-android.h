@@ -397,6 +397,30 @@ EXPORT void obs_android_set_screen_gpu_host(const struct obs_android_screen_gpu_
 EXPORT void *obs_android_screen_gpu_create(uint32_t texture, uint32_t width, uint32_t height, uint32_t dpi);
 EXPORT int obs_android_screen_gpu_update(void *handle, float transform[16]);
 EXPORT void obs_android_screen_gpu_destroy(void *handle);
+
+/* Android NDI® discovery host (WifiManager.MulticastLock + NsdManager _ndi._tcp.). */
+#define OBS_ANDROID_NDI_NAME_LEN 160
+#define OBS_ANDROID_NDI_ADDR_LEN 96
+
+struct obs_android_ndi_peer {
+	char name[OBS_ANDROID_NDI_NAME_LEN];
+	char address[OBS_ANDROID_NDI_ADDR_LEN];
+};
+
+struct obs_android_ndi_host {
+	void *param;
+	bool (*acquire_discovery)(void *param);
+	void (*release_discovery)(void *param);
+	int (*get_peers)(void *param, struct obs_android_ndi_peer *out, int max);
+	bool (*get_native_lib_dir)(void *param, char *out, size_t size);
+};
+
+EXPORT void obs_android_set_ndi_host(const struct obs_android_ndi_host *host);
+EXPORT bool obs_android_ndi_ready(void);
+EXPORT bool obs_android_ndi_acquire_discovery(void);
+EXPORT void obs_android_ndi_release_discovery(void);
+EXPORT int obs_android_ndi_enum_peers(struct obs_android_ndi_peer *out, int max);
+EXPORT bool obs_android_ndi_native_lib_dir(char *out, size_t size);
 #ifdef __cplusplus
 }
 #endif

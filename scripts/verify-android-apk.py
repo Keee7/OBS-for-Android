@@ -176,9 +176,9 @@ def main():
                 if not check_elf_header(payload):
                     errors.append(path + ' is not little-endian AArch64 ELF64')
                 if args.native_dir:
-                    # Qt/runtime binaries come from the SDK. Project binaries
-                    # must match a fresh compiler output, never a packaging cache.
-                    external = short.startswith(('libQt', 'libplugins_')) or short == 'libc++_shared.so'
+                    # Qt/runtime binaries and optional prebuilt libndi.so come from SDKs.
+                    # Project binaries must match a fresh compiler output, never a packaging cache.
+                    external = short.startswith(('libQt', 'libplugins_')) or short in ('libc++_shared.so', 'libndi.so')
                     if not external:
                         candidates = [p for p in args.native_dir.rglob(short) if p.is_file()
                                       and not any(part in ('android-build', 'android-package-source', 'rundir')

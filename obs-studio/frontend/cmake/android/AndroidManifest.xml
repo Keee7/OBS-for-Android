@@ -54,6 +54,9 @@
     android:versionCode="34"
     android:versionName="0.2.7">
     <uses-permission android:name="android.permission.INTERNET"  />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"  />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"  />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"  />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"  />
     <uses-permission android:name="android.permission.RECORD_AUDIO"  />
     <!-- P-17：内置摄像头采集源（Camera2 NDK）。不申请这一条，ACameraManager_openCamera

@@ -32,6 +32,7 @@ target_sources(
     # 自 android-shell/obs_audio_host.cpp 移植）。AAudio 采集源据此列出 USB 声卡等输入。
     widgets/OBSAndroidAudio.cpp
     widgets/OBSAndroidUsb.cpp
+    widgets/OBSAndroidNdi.cpp
     # 3-4：桌面 "openUrl(本地路径)" 的 Android 替代（显示路径 + 复制剪贴板）。
     widgets/OBSAndroidPath.cpp
 )
@@ -202,6 +203,21 @@ if(TARGET OBS::libobs-opengl)
   message(STATUS "3-2 打包：渲染后端进 APK = ${_gs_backend}")
 else()
   message(WARNING "3-2 打包：没有 OBS::libobs-opengl 目标 —— APK 里没有渲染后端，obs_reset_video 会失败")
+endif()
+
+# Optional verification-build hook: bundle official arm64-v8a libndi.so when
+# -DOBS_ANDROID_NDI_SDK_DIR=<path> is explicitly passed. Default CI leaves it unset.
+if(DEFINED OBS_ANDROID_NDI_SDK_DIR AND NOT OBS_ANDROID_NDI_SDK_DIR STREQUAL "")
+  foreach(_ndi_cand
+          "${OBS_ANDROID_NDI_SDK_DIR}/lib/arm64-v8a/libndi.so"
+          "${OBS_ANDROID_NDI_SDK_DIR}/lib/aarch64-linux-android/libndi.so"
+          "${OBS_ANDROID_NDI_SDK_DIR}/libndi.so")
+    if(EXISTS "${_ndi_cand}")
+      list(APPEND _extra_libs "${_ndi_cand}")
+      message(STATUS "android-ndi: bundling verification runtime ${_ndi_cand}")
+      break()
+    endif()
+  endforeach()
 endif()
 
 # 插件 .so 不进 EXTRA_LIBS（名字不以 lib 开头，androiddeployqt 会要求改名），而是由

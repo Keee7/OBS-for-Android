@@ -47,6 +47,11 @@ QString GetAndroidAboutVersionName()
 	return version;
 }
 
+QString GetAndroidObsBaselineVersion()
+{
+	return QStringLiteral("33.0");
+}
+
 void OpenAndroidExternalUrl(const QString &url)
 {
 	const QString target = url.trimmed();
@@ -100,7 +105,7 @@ OBSAbout::OBSAbout(QWidget *parent) : QDialog(parent), ui(new Ui::OBSAbout)
 	setMinimumSize(0, 0);
 
 	const QString appVersion = GetAndroidAboutVersionName();
-	const QString obsVer = QT_UTF8(obs_get_version_string());
+	const QString obsVer = GetAndroidObsBaselineVersion();
 	const QString abi = AndroidAbiLabel();
 
 	ui->name->setText(QStringLiteral("OBS for Android"));
@@ -283,7 +288,7 @@ void OBSAbout::ShowAbout()
 	SetAndroidActiveTab(0);
 
 	const QString appVer = GetAndroidAboutVersionName().toHtmlEscaped();
-	const QString obsVer = QT_UTF8(obs_get_version_string()).toHtmlEscaped();
+	const QString obsVer = GetAndroidObsBaselineVersion().toHtmlEscaped();
 	const QString qtRuntime = QString::fromUtf8(qVersion()).toHtmlEscaped();
 	const QString qtCompiled = QStringLiteral(QT_VERSION_STR).toHtmlEscaped();
 	const QString qtText = (qtRuntime == qtCompiled)
@@ -449,7 +454,13 @@ void OBSAbout::ShowLicense()
 	}
 
 #ifdef __ANDROID__
-	ui->textBrowser->setPlainText(QTStr("About.Android.LicenseSummary") + QStringLiteral("\n") + QT_UTF8(text));
+	const QString ndiNotice = QStringLiteral(
+		"\nNDI® is a registered trademark of Vizrt NDI AB. "
+		"OBS for Android is not affiliated with or sponsored by Vizrt. "
+		"The public APK does not bundle the proprietary NDI runtime (libndi.so); "
+		"users may optionally import the official NDI SDK for Android runtime under its license.\n");
+	ui->textBrowser->setPlainText(QTStr("About.Android.LicenseSummary") + ndiNotice + QStringLiteral("\n") +
+				      QT_UTF8(text));
 	if (ui->textBrowser->verticalScrollBar())
 		ui->textBrowser->verticalScrollBar()->setValue(0);
 #else

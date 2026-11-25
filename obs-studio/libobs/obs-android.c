@@ -741,3 +741,43 @@ void obs_android_screen_gpu_destroy(void *handle)
  const struct obs_android_screen_gpu_host *h = screen_gpu_host;
  if (h && h->destroy) h->destroy(handle);
 }
+
+static const struct obs_android_ndi_host *ndi_host;
+void obs_android_set_ndi_host(const struct obs_android_ndi_host *host)
+{
+	ndi_host = host;
+}
+bool obs_android_ndi_ready(void)
+{
+	return ndi_host != NULL;
+}
+bool obs_android_ndi_acquire_discovery(void)
+{
+	const struct obs_android_ndi_host *h = ndi_host;
+	return h && h->acquire_discovery ? h->acquire_discovery(h->param) : false;
+}
+void obs_android_ndi_release_discovery(void)
+{
+	const struct obs_android_ndi_host *h = ndi_host;
+	if (h && h->release_discovery)
+		h->release_discovery(h->param);
+}
+int obs_android_ndi_enum_peers(struct obs_android_ndi_peer *out, int max)
+{
+	const struct obs_android_ndi_host *h = ndi_host;
+	if (!h || !h->get_peers || !out || max <= 0)
+		return 0;
+	return h->get_peers(h->param, out, max);
+}
+bool obs_android_ndi_native_lib_dir(char *out, size_t size)
+{
+	if (!out || !size)
+		return false;
+	out[0] = '\0';
+	const struct obs_android_ndi_host *h = ndi_host;
+	if (!h || !h->get_native_lib_dir)
+		return false;
+	const bool ok = h->get_native_lib_dir(h->param, out, size);
+	out[size - 1] = '\0';
+	return ok && out[0] != '\0';
+}

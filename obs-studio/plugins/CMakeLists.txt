@@ -88,6 +88,7 @@ if(OS_ANDROID)
   #                       同一档：静态链 deps 的 libusb-1.0.a + libturbojpeg.a，不链 libandroid，
   #                       APK 里不多一枚 .so；本行同时进构建、白名单与核心装载清单。
   add_subdirectory(nikon-source)
+  add_subdirectory(android-ndi)
   add_subdirectory(obs-transitions)
   add_subdirectory(obs-filters)
   add_subdirectory(text-freetype2)
