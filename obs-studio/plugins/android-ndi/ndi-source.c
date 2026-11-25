@@ -274,13 +274,7 @@ static void *ndi_recv_thread(void *arg)
 	while (!os_atomic_load_long(&s->stopping)) {
 		const struct ndi_api *api = ndi_runtime_acquire();
 		if (!api) {
-			char dropin[256] = {0};
-			char err[256] = {0};
-			ndi_runtime_default_dropin_path(dropin, sizeof(dropin));
-			ndi_runtime_get_info(NULL, 0, NULL, 0, err, sizeof(err));
-			char msg[320];
-			snprintf(msg, sizeof(msg), "%s (%s)", obs_module_text("Ndi.Status.RuntimeMissing"), dropin);
-			set_status(s, msg);
+			set_status(s, obs_module_text("Ndi.Status.RuntimeMissing"));
 			sleep_interruptible(s, 2000);
 			continue;
 		}
@@ -633,10 +627,8 @@ static obs_properties_t *ndi_source_properties(void *data)
 			ndi_runtime_get_info(ver, sizeof(ver), NULL, 0, NULL, 0);
 			snprintf(status_text, sizeof(status_text), "%s (%s)", obs_module_text("Ndi.Status.Ready"), ver);
 		} else {
-			char dropin[256] = {0};
-			ndi_runtime_default_dropin_path(dropin, sizeof(dropin));
-			snprintf(status_text, sizeof(status_text), "%s (%s)",
-				 obs_module_text("Ndi.Status.RuntimeMissing"), dropin);
+			snprintf(status_text, sizeof(status_text), "%s",
+				 obs_module_text("Ndi.Status.RuntimeMissing"));
 		}
 	}
 	obs_properties_add_text(props, "ndi_status", status_text, OBS_TEXT_INFO);
