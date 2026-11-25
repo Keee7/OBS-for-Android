@@ -299,6 +299,8 @@ struct uvc_stream_handle {
   uint8_t have_fid;
   uint8_t monotonic_cond;
   uint8_t stop_timed_out;
+  int active_transfers;
+  int fatal_error;
   uint64_t err_packets;
   uint64_t bad_packets;
 

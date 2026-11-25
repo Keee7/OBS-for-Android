@@ -48,6 +48,7 @@ struct uvc_bulk_payload_assembler {
 	bool in_payload;
 	bool payload_eof;
 	bool payload_skip;
+	bool payload_err;
 	size_t payload_bytes;
 
 	/* Current Video Frame state */
@@ -101,6 +102,7 @@ static inline void uvc_bulk_payload_on_gap(struct uvc_bulk_payload_assembler *st
 	st->in_payload = false;
 	st->payload_eof = false;
 	st->payload_skip = false;
+	st->payload_err = false;
 	st->payload_bytes = 0;
 }
 
@@ -166,11 +168,14 @@ static inline bool uvc_bulk_payload_push(struct uvc_bulk_payload_assembler *st, 
 	/* Zero-Length Packet (ZLP): terminates an exact-multiple payload transfer. */
 	if (size == 0) {
 		const bool was_eof = st->in_payload && !st->payload_skip && st->payload_eof;
+		const bool raw_complete = st->in_payload && !st->payload_skip && st->frame_total > 0 &&
+					  st->frame_len == st->frame_total;
 		st->in_payload = false;
 		st->payload_eof = false;
 		st->payload_skip = false;
+		st->payload_err = false;
 		st->payload_bytes = 0;
-		if (was_eof && st->assembling) {
+		if ((was_eof || raw_complete) && st->assembling) {
 			const bool emit = !st->corrupt && st->frame_len > 0;
 			if (emit && out)
 				*out = (struct uvc_bulk_frame){st->frame_len, st->have_pts, st->pts};
@@ -209,6 +214,7 @@ static inline bool uvc_bulk_payload_push(struct uvc_bulk_payload_assembler *st, 
 			if (!short_pkt && !hit_max) {
 				st->in_payload = true;
 				st->payload_skip = true;
+				st->payload_err = false;
 				st->payload_eof = false;
 				st->payload_bytes = size;
 			}
@@ -229,6 +235,7 @@ static inline bool uvc_bulk_payload_push(struct uvc_bulk_payload_assembler *st, 
 		st->payload_bytes = size;
 		st->payload_eof = eof;
 		st->payload_skip = false;
+		st->payload_err = err;
 
 		if (err) {
 			if (had_bmh_err)
@@ -287,7 +294,7 @@ static inline bool uvc_bulk_payload_push(struct uvc_bulk_payload_assembler *st, 
 		}
 	} else {
 		st->payload_bytes += size;
-		if (!st->payload_skip)
+		if (!st->payload_err)
 			st->non_err_bytes_since_good += size;
 	}
 
@@ -314,12 +321,15 @@ static inline bool uvc_bulk_payload_push(struct uvc_bulk_payload_assembler *st, 
 	const bool hit_max = st->max_payload > 0 && st->payload_bytes >= st->max_payload;
 	if (short_pkt || hit_max) {
 		const bool was_eof = !st->payload_skip && st->payload_eof;
+		const bool raw_complete =
+			!st->payload_skip && st->frame_total > 0 && st->frame_len == st->frame_total;
 		st->in_payload = false;
 		st->payload_eof = false;
 		st->payload_skip = false;
+		st->payload_err = false;
 		st->payload_bytes = 0;
 
-		if (was_eof && st->assembling) {
+		if ((was_eof || raw_complete) && st->assembling) {
 			const bool emit = !st->corrupt && st->frame_len > 0;
 			if (emit && out)
 				*out = (struct uvc_bulk_frame){st->frame_len, st->have_pts, st->pts};
@@ -344,8 +354,10 @@ static inline bool uvc_bulk_payload_should_fallback(const struct uvc_bulk_payloa
 	const uint32_t invalid_limit = established ? 12U : 8U;
 	if (st->consec_invalid_headers >= invalid_limit)
 		return true;
-	uint64_t byte_limit = 8ULL * 1024ULL * 1024ULL;
-	if (st->max_payload > 0) {
+	/* Cap the byte fallback threshold so an oversized declared max_payload
+	 * (e.g. 20 MiB) on a non-compliant stream still falls back promptly. */
+	uint64_t byte_limit = established ? (16ULL * 1024ULL * 1024ULL) : (8ULL * 1024ULL * 1024ULL);
+	if (st->max_payload > 0 && st->max_payload <= 2U * 1024U * 1024U) {
 		const uint64_t scaled = (uint64_t)st->max_payload * (established ? 8ULL : 6ULL);
 		if (scaled > byte_limit)
 			byte_limit = scaled;

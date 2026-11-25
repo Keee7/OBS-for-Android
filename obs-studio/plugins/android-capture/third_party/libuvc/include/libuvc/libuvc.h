@@ -795,6 +795,7 @@ void uvc_print_stream_ctrl(uvc_stream_ctrl_t *ctrl, FILE *stream);
 
 uvc_error_t uvc_stream_stop_timeout(uvc_stream_handle_t *strmh, unsigned timeout_ms);
 int uvc_stream_stop_timed_out(const uvc_stream_handle_t *strmh);
+int uvc_stream_try_drain(uvc_stream_handle_t *strmh, unsigned timeout_ms);
 void uvc_stream_get_stats(const uvc_stream_handle_t *strmh, uint64_t *err_packets, uint64_t *bad_packets);
 
 uvc_frame_t *uvc_allocate_frame(size_t data_bytes);

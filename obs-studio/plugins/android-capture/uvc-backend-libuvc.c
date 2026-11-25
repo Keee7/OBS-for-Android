@@ -63,7 +63,7 @@ static void stop_event_thread(struct uvc_libuvc_session *sess)
 	sess->ev_started = false;
 }
 
-static bool map_libuvc_guid(const uvc_format_desc_t *fdesc, enum uvc_libuvc_fmt *out)
+static bool map_libuvc_guid(const uvc_format_desc_t *fdesc, bool allow_p010, enum uvc_libuvc_fmt *out)
 {
 	if (!fdesc || !out)
 		return false;
@@ -92,6 +92,8 @@ static bool map_libuvc_guid(const uvc_format_desc_t *fdesc, enum uvc_libuvc_fmt 
 		return true;
 	}
 	if (memcmp(fdesc->guidFormat, "P010", 4) == 0) {
+		if (!allow_p010)
+			return false;
 		*out = UVC_LIBUVC_FMT_P010;
 		return true;
 	}
@@ -157,7 +159,7 @@ static bool from_libuvc_frame_format(enum uvc_frame_format cf, enum uvc_libuvc_f
 	}
 }
 
-static int collect_modes(uvc_device_handle_t *devh, struct uvc_libuvc_mode *modes, int max_modes)
+static int collect_modes(uvc_device_handle_t *devh, bool allow_p010, struct uvc_libuvc_mode *modes, int max_modes)
 {
 	if (!devh || !modes || max_modes <= 0)
 		return 0;
@@ -165,11 +167,15 @@ static int collect_modes(uvc_device_handle_t *devh, struct uvc_libuvc_mode *mode
 	const uvc_format_desc_t *fdesc = uvc_get_format_descs(devh);
 	for (; fdesc && count < max_modes; fdesc = fdesc->next) {
 		enum uvc_libuvc_fmt fmt;
-		if (!map_libuvc_guid(fdesc, &fmt))
+		if (!map_libuvc_guid(fdesc, allow_p010, &fmt))
 			continue;
 		const uvc_frame_desc_t *frame = fdesc->frame_descs;
 		for (; frame && count < max_modes; frame = frame->next) {
 			if (frame->wWidth < 16 || frame->wWidth > 7680 || frame->wHeight < 16 || frame->wHeight > 4320)
+				continue;
+			if (((fmt == UVC_LIBUVC_FMT_YUYV || fmt == UVC_LIBUVC_FMT_UYVY) && (frame->wWidth & 1)) ||
+			    ((fmt == UVC_LIBUVC_FMT_NV12 || fmt == UVC_LIBUVC_FMT_P010) &&
+			     ((frame->wWidth | frame->wHeight) & 1)))
 				continue;
 			struct uvc_libuvc_mode *m = &modes[count++];
 			memset(m, 0, sizeof(*m));
@@ -192,8 +198,32 @@ static int collect_modes(uvc_device_handle_t *devh, struct uvc_libuvc_mode *mode
 	return count;
 }
 
-int uvc_libuvc_open(int fd, struct uvc_libuvc_session **out, struct uvc_libuvc_mode *modes, int max_modes,
-		    int *n_modes_out, int *usb_speed_out, char *err_buf, size_t err_cap)
+static void destroy_session_storage(struct uvc_libuvc_session *sess)
+{
+	if (!sess)
+		return;
+	if (sess->strmh) {
+		uvc_stream_close(sess->strmh);
+		sess->strmh = NULL;
+	}
+	if (sess->devh) {
+		uvc_close(sess->devh);
+		sess->devh = NULL;
+	}
+	stop_event_thread(sess);
+	if (sess->uvc_ctx) {
+		uvc_exit(sess->uvc_ctx);
+		sess->uvc_ctx = NULL;
+	}
+	if (sess->usb_ctx) {
+		libusb_exit(sess->usb_ctx);
+		sess->usb_ctx = NULL;
+	}
+	free(sess);
+}
+
+int uvc_libuvc_open(int fd, bool allow_p010, struct uvc_libuvc_session **out, struct uvc_libuvc_mode *modes,
+		    int max_modes, int *n_modes_out, int *usb_speed_out, char *err_buf, size_t err_cap)
 {
 	if (out)
 		*out = NULL;
@@ -254,7 +284,7 @@ int uvc_libuvc_open(int fd, struct uvc_libuvc_session **out, struct uvc_libuvc_m
 	}
 	sess->ev_started = true;
 
-	const int count = collect_modes(sess->devh, modes, max_modes);
+	const int count = collect_modes(sess->devh, allow_p010, modes, max_modes);
 	if (n_modes_out)
 		*n_modes_out = count;
 
@@ -268,7 +298,7 @@ int uvc_libuvc_start(struct uvc_libuvc_session *sess, const struct uvc_libuvc_mo
 {
 	if (err_buf && err_cap)
 		err_buf[0] = '\0';
-	if (!sess || !sess->devh || !mode)
+	if (!sess || !sess->devh || !mode || sess->strmh)
 		return UVC_ERROR_INVALID_PARAM;
 
 	const enum uvc_frame_format cf = to_libuvc_frame_format(mode->fmt);
@@ -308,6 +338,18 @@ int uvc_libuvc_start(struct uvc_libuvc_session *sess, const struct uvc_libuvc_mo
 		*neg_payload_out = ctrl.dwMaxPayloadTransferSize;
 	if (neg_maxframe_out)
 		*neg_maxframe_out = ctrl.dwMaxVideoFrameSize;
+	return UVC_SUCCESS;
+}
+
+int uvc_libuvc_stop_stream(struct uvc_libuvc_session *sess, unsigned timeout_ms)
+{
+	if (!sess || !sess->strmh)
+		return UVC_SUCCESS;
+	uvc_stream_stop_timeout(sess->strmh, timeout_ms);
+	if (uvc_stream_stop_timed_out(sess->strmh))
+		return UVC_ERROR_TIMEOUT;
+	uvc_stream_close(sess->strmh);
+	sess->strmh = NULL;
 	return UVC_SUCCESS;
 }
 
@@ -360,48 +402,46 @@ void uvc_libuvc_stats(const struct uvc_libuvc_session *sess, uint64_t *err_packe
 	uvc_stream_get_stats(sess->strmh, err_packets, bad_packets);
 }
 
-void uvc_libuvc_close(struct uvc_libuvc_session *sess)
+bool uvc_libuvc_close_or_keep_for_retire(struct uvc_libuvc_session *sess, unsigned timeout_ms)
+{
+	if (!sess)
+		return true;
+	if (sess->strmh) {
+		uvc_stream_stop_timeout(sess->strmh, timeout_ms);
+		if (uvc_stream_stop_timed_out(sess->strmh)) {
+			/* Keep ev_thread running so background retirement can finish
+			 * draining URBs before closing devh, usb_ctx, and Android fd. */
+			return false;
+		}
+	}
+	destroy_session_storage(sess);
+	return true;
+}
+
+bool uvc_libuvc_try_drain(struct uvc_libuvc_session *sess, unsigned timeout_ms)
+{
+	if (!sess || !sess->strmh)
+		return true;
+	return uvc_stream_try_drain(sess->strmh, timeout_ms) != 0;
+}
+
+void uvc_libuvc_finish_retire(struct uvc_libuvc_session *sess)
 {
 	if (!sess)
 		return;
-
-	bool timed_out = false;
-	if (sess->strmh) {
-		uvc_stream_stop_timeout(sess->strmh, 2000);
-		timed_out = uvc_stream_stop_timed_out(sess->strmh) != 0;
-		if (timed_out) {
-			/* Stop the event pump first so no late transfer callback can
-			 * touch strmh/devh after teardown. */
-			stop_event_thread(sess);
-		}
-		uvc_stream_close(sess->strmh);
-		sess->strmh = NULL;
-	}
-
-	if (sess->devh) {
-		uvc_close(sess->devh);
-		sess->devh = NULL;
-	}
-
-	stop_event_thread(sess);
-
-	if (sess->uvc_ctx) {
-		uvc_exit(sess->uvc_ctx);
-		sess->uvc_ctx = NULL;
-	}
-	if (sess->usb_ctx) {
-		libusb_exit(sess->usb_ctx);
-		sess->usb_ctx = NULL;
-	}
-	free(sess);
+	/* Stop the event thread before closing devh/usb_ctx if transfers are still
+	 * abandoned after background drain budget expired. */
+	if (sess->strmh && uvc_stream_stop_timed_out(sess->strmh))
+		stop_event_thread(sess);
+	destroy_session_storage(sess);
 }
 
-int uvc_libuvc_probe_modes(int fd, struct uvc_libuvc_mode *modes, int max_modes)
+int uvc_libuvc_probe_modes(int fd, bool allow_p010, struct uvc_libuvc_mode *modes, int max_modes)
 {
 	struct uvc_libuvc_session *sess = NULL;
 	int count = 0;
-	if (uvc_libuvc_open(fd, &sess, modes, max_modes, &count, NULL, NULL, 0) != UVC_SUCCESS || !sess)
+	if (uvc_libuvc_open(fd, allow_p010, &sess, modes, max_modes, &count, NULL, NULL, 0) != UVC_SUCCESS || !sess)
 		return 0;
-	uvc_libuvc_close(sess);
+	uvc_libuvc_close_or_keep_for_retire(sess, 1000);
 	return count;
 }

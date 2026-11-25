@@ -135,6 +135,7 @@
 
 /* 未压缩 format GUID 的前 4 字节就是 FourCC（小端 ASCII，UVC 规范附录 A） */
 #define FOURCC_YUY2 0x32595559 /* "YUY2" */
+#define FOURCC_UYVY 0x59565955 /* "UYVY" */
 #define FOURCC_NV12 0x3231564E /* "NV12" */
 #define FOURCC_P010 0x30313050 /* "P010" */
 #define FOURCC_RGB3 0x33424752 /* "RGB3" */
@@ -207,6 +208,7 @@ struct uvc_source {
 	struct uvc_mode device_modes[MAX_MODES];
 	int device_mode_count;
 	char mode_device[OBS_ANDROID_USB_NAME_LEN];
+	enum uvc_backend_kind mode_backend;
 	bool negotiated_valid;
 	enum uvc_mode_kind negotiated_kind;
 	uint16_t negotiated_w;
@@ -575,7 +577,7 @@ static bool add_mode(struct uvc_dev *d, enum uvc_mode_kind kind, uint8_t fmt_ind
 
 	if (m->w == 0 || m->h == 0)
 		return true; /* 非法 frame 不致命，跳过但不记 */
-	if ((kind == MODE_YUYV && (m->w & 1)) ||
+	if (((kind == MODE_YUYV || kind == MODE_UYVY) && (m->w & 1)) ||
 	    ((kind == MODE_NV12 || kind == MODE_P010) && ((m->w | m->h) & 1)))
 		return true;
 	d->n_modes++;
@@ -587,6 +589,8 @@ static int uncompressed_kind(const uint8_t *guid, uint8_t bpp)
 	const uint32_t fourcc = get_u32le(guid);
 	if (fourcc == FOURCC_YUY2)
 		return MODE_YUYV;
+	if (fourcc == FOURCC_UYVY)
+		return MODE_UYVY;
 	if (fourcc == FOURCC_NV12)
 		return MODE_NV12;
 	static const uint8_t fourcc_suffix[] = {0x00, 0x00, 0x10, 0x00, 0x80, 0x00,
@@ -3222,10 +3226,68 @@ static void convert_libuvc_modes(const struct uvc_libuvc_mode *src, int count, s
 	}
 }
 
+struct uvc_libuvc_retire_job {
+	struct uvc_retire_gate *gate;
+	struct uvc_libuvc_session *sess;
+	int bridge_fd;
+};
+
+static void *uvc_libuvc_retire_worker(void *arg)
+{
+	struct uvc_libuvc_retire_job *job = arg;
+	const bool drained = uvc_libuvc_try_drain(job->sess, 5000);
+	blog(drained ? LOG_INFO : LOG_WARNING,
+	     "uvc[libuvc]: 后台收尾%s，正在释放 libuvc 会话并归还 USB fd=%d",
+	     drained ? "已完成全部传输排干" : "排干超时（5s），停止事件线程并回收句柄", job->bridge_fd);
+	uvc_libuvc_finish_retire(job->sess);
+	if (job->bridge_fd >= 0)
+		obs_android_usb_close(job->bridge_fd);
+	if (job->gate) {
+		pthread_mutex_lock(&job->gate->mtx);
+		if (job->gate->active_jobs > 0)
+			job->gate->active_jobs--;
+		pthread_cond_broadcast(&job->gate->cond);
+		pthread_mutex_unlock(&job->gate->mtx);
+		uvc_retire_gate_release(job->gate);
+	}
+	free(job);
+	return NULL;
+}
+
+static void uvc_retire_libuvc_async(struct uvc_source *s, struct uvc_libuvc_session *sess, int bridge_fd)
+{
+	struct uvc_libuvc_retire_job *job = calloc(1, sizeof(*job));
+	if (!job) {
+		uvc_libuvc_finish_retire(sess);
+		if (bridge_fd >= 0)
+			obs_android_usb_close(bridge_fd);
+		return;
+	}
+	job->sess = sess;
+	job->bridge_fd = bridge_fd;
+	job->gate = uvc_source_retain_retire_gate(s, true);
+	if (job->gate) {
+		pthread_mutex_lock(&job->gate->mtx);
+		job->gate->active_jobs++;
+		pthread_mutex_unlock(&job->gate->mtx);
+	}
+	pthread_t tid;
+	pthread_attr_t attr;
+	bool detached_ok = false;
+	if (pthread_attr_init(&attr) == 0) {
+		if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) == 0 &&
+		    pthread_create(&tid, &attr, uvc_libuvc_retire_worker, job) == 0)
+			detached_ok = true;
+		pthread_attr_destroy(&attr);
+	}
+	if (!detached_ok)
+		uvc_libuvc_retire_worker(job);
+}
+
 /* Complete UVC capture session powered by the Android-hardened vendored libuvc
  * backend. Reuses the shared mode selection, TurboJPEG decode, OBS video/audio
  * output, and status reporting pipeline. Takes ownership of fd and always
- * returns it via obs_android_usb_close(fd). */
+ * returns it via obs_android_usb_close(fd) (synchronously or via async retire). */
 static bool uvc_run_once_libuvc(struct uvc_source *s, const char *open_name, int fd)
 {
 	struct uvc_dev d = {.bridge_fd = fd, .chosen = -1};
@@ -3241,7 +3303,8 @@ static bool uvc_run_once_libuvc(struct uvc_source *s, const char *open_name, int
 
 	int n_lmodes = 0;
 	int usb_speed = LIBUSB_SPEED_UNKNOWN;
-	int r = uvc_libuvc_open(fd, &sess, lmodes, MAX_MODES, &n_lmodes, &usb_speed, err_buf, sizeof(err_buf));
+	int r = uvc_libuvc_open(fd, p010_available, &sess, lmodes, MAX_MODES, &n_lmodes, &usb_speed, err_buf,
+				sizeof(err_buf));
 	if (r != 0 || !sess) {
 		blog(LOG_ERROR, "uvc[libuvc]: 打开设备失败：%s", err_buf[0] ? err_buf : "unknown");
 		set_status_int(s, "Status.WrapFdFailed", r);
@@ -3268,13 +3331,14 @@ static bool uvc_run_once_libuvc(struct uvc_source *s, const char *open_name, int
 		struct uvc_mode scanned[MAX_MODES] = {0};
 		const int scanned_count = copy_usable_modes(scanned, &d);
 		pthread_mutex_lock(&s->mtx);
-		if (strcmp(s->mode_device, open_name) != 0 ||
+		if (strcmp(s->mode_device, open_name) != 0 || s->mode_backend != UVC_BACKEND_LIBUVC ||
 		    !uvc_modes_equal(s->device_modes, s->device_mode_count, scanned, scanned_count))
 			modes_changed = true;
 		s->device_mode_count = scanned_count;
 		if (scanned_count > 0)
 			memcpy(s->device_modes, scanned, (size_t)scanned_count * sizeof(scanned[0]));
 		snprintf(s->mode_device, sizeof(s->mode_device), "%s", open_name);
+		s->mode_backend = UVC_BACKEND_LIBUVC;
 		pthread_mutex_unlock(&s->mtx);
 	}
 	d.chosen = choose_mode(&d, s);
@@ -3395,10 +3459,50 @@ static bool uvc_run_once_libuvc(struct uvc_source *s, const char *open_name, int
 			if (flen <= st.frame_cap) {
 				memcpy(st.frame_buf, fdata, flen);
 				const uint64_t out_before = s->frames_out;
-				deliver_assembled_frame(&fctx, (uint32_t)flen, received_ns);
+				const enum uvc_deliver_result dres =
+					deliver_assembled_frame(&fctx, (uint32_t)flen, received_ns);
 				if (s->frames_out > out_before) {
 					last_good_ns = now_ns;
 					progress = true;
+				}
+				if (dres == UVC_DELIVER_YUYV_FALLBACK && fctx.yuyv_mode_idx >= 0 &&
+				    fctx.yuyv_mode_idx < d.n_modes) {
+					if (uvc_stopping(s))
+						break;
+					if (uvc_libuvc_stop_stream(sess, 2000) != 0) {
+						blog(LOG_WARNING,
+						     "uvc[libuvc]: 黑屏切 YUYV 停流超时，移交后台收尾");
+						break;
+					}
+					d.chosen = fctx.yuyv_mode_idx;
+					mode = &d.modes[d.chosen];
+					fctx.mode = mode;
+					st.frame_total = raw_frame_bytes(mode);
+					if (st.frame_total > st.frame_cap) {
+						uint8_t *grown = brealloc(st.frame_buf, st.frame_total);
+						if (!grown) {
+							set_status_key(s, "Status.OutOfMemoryBuffer", NULL, 0);
+							break;
+						}
+						st.frame_buf = grown;
+						st.frame_cap = st.frame_total;
+					}
+					const uint32_t yuv_iv = pick_interval(mode, d.eff_fps);
+					uint32_t y_iv = 0, y_pay = 0, y_max = 0;
+					r = uvc_libuvc_start(sess, &lmodes[d.chosen], yuv_iv, &y_iv, &y_pay, &y_max,
+							     err_buf, sizeof(err_buf));
+					if (r != 0) {
+						blog(LOG_ERROR, "uvc[libuvc]: 黑屏切 YUYV 重新协商失败：%s",
+						     err_buf[0] ? err_buf : "unknown");
+						break;
+					}
+					d.frame_interval = y_iv ? y_iv : yuv_iv;
+					d.payload_size = y_pay;
+					d.frame_buf_size = y_max;
+					if (uvc_set_negotiated_mode(s, open_name, mode, d.frame_interval))
+						uvc_notify_properties_updated(s);
+					last_good_ns = os_gettime_ns();
+					continue;
 				}
 			} else {
 				s->frames_dropped++;
@@ -3426,8 +3530,17 @@ static bool uvc_run_once_libuvc(struct uvc_source *s, const char *open_name, int
 
 out:
 	uvc_audio_worker_stop(&audio_worker);
-	if (sess)
-		uvc_libuvc_close(sess);
+	if (sess) {
+		if (!uvc_libuvc_close_or_keep_for_retire(sess, 2000)) {
+			blog(LOG_WARNING,
+			     "uvc[libuvc]: 停止传输取消超时，移交后台收尾排干并延迟归还 USB fd=%d", fd);
+			uvc_retire_libuvc_async(s, sess, fd);
+			sess = NULL;
+			fd = -1;
+		} else {
+			sess = NULL;
+		}
+	}
 	if (tj)
 		tjDestroy(tj);
 	if (fd >= 0)
@@ -3606,13 +3719,14 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		struct uvc_mode scanned[MAX_MODES] = {0};
 		const int scanned_count = copy_usable_modes(scanned, &d);
 		pthread_mutex_lock(&s->mtx);
-		if (strcmp(s->mode_device, open_name) != 0 ||
+		if (strcmp(s->mode_device, open_name) != 0 || s->mode_backend != UVC_BACKEND_NATIVE ||
 		    !uvc_modes_equal(s->device_modes, s->device_mode_count, scanned, scanned_count))
 			modes_changed = true;
 		s->device_mode_count = scanned_count;
 		if (scanned_count > 0)
 			memcpy(s->device_modes, scanned, (size_t)scanned_count * sizeof(scanned[0]));
 		snprintf(s->mode_device, sizeof(s->mode_device), "%s", open_name);
+		s->mode_backend = UVC_BACKEND_NATIVE;
 		pthread_mutex_unlock(&s->mtx);
 	}
 	d.chosen = choose_mode(&d, s);
@@ -4959,7 +5073,8 @@ static bool resolve_usb_device_path(struct uvc_source *s, const char *path, char
 }
 
 /* The USB host rejects descriptor leases while another source owns the device. */
-static int read_device_modes(struct uvc_source *s, const char *name, struct uvc_mode modes[MAX_MODES])
+static int read_device_modes(struct uvc_source *s, const char *name, enum uvc_backend_kind backend,
+			     struct uvc_mode modes[MAX_MODES])
 {
 	char resolved[OBS_ANDROID_USB_NAME_LEN];
 	if (!resolve_usb_device_path(s, name, resolved))
@@ -4967,7 +5082,8 @@ static int read_device_modes(struct uvc_source *s, const char *name, struct uvc_
 
 	if (s) {
 		pthread_mutex_lock(&s->mtx);
-		const int count = strcmp(resolved, s->mode_device) == 0 ? s->device_mode_count : 0;
+		const int count =
+			(strcmp(resolved, s->mode_device) == 0 && s->mode_backend == backend) ? s->device_mode_count : 0;
 		if (count)
 			memcpy(modes, s->device_modes, (size_t)count * sizeof(*modes));
 		pthread_mutex_unlock(&s->mtx);
@@ -4982,9 +5098,9 @@ static int read_device_modes(struct uvc_source *s, const char *name, struct uvc_
 	if (fd < 0)
 		return 0;
 	int count = 0;
-	if (s && s->backend == UVC_BACKEND_LIBUVC) {
+	if (backend == UVC_BACKEND_LIBUVC) {
 		struct uvc_libuvc_mode lmodes[MAX_MODES];
-		const int lc = uvc_libuvc_probe_modes(fd, lmodes, MAX_MODES);
+		const int lc = uvc_libuvc_probe_modes(fd, p010_available, lmodes, MAX_MODES);
 		if (lc > 0) {
 			convert_libuvc_modes(lmodes, lc, modes);
 			count = lc;
@@ -5142,7 +5258,9 @@ static bool on_usb_device_change(void *data, obs_properties_t *props, obs_proper
 	}
 	if (*effective) {
 		struct uvc_mode modes[MAX_MODES];
-		const int count = read_device_modes(s, effective, modes);
+		const enum uvc_backend_kind sel_backend =
+			backend_string_to_kind(obs_data_get_string(settings, "uvc_backend"));
+		const int count = read_device_modes(s, effective, sel_backend, modes);
 		for (int i = 0; i < count; ++i) {
 			const struct uvc_mode *mode = &modes[i];
 			for (int j = 0; j < mode->n_intervals; ++j)
@@ -5205,6 +5323,7 @@ static obs_properties_t *uvc_properties(void *data)
 	obs_property_list_add_string(backend, obs_module_text("Backend.Native"), "native");
 	obs_property_list_add_string(backend, obs_module_text("Backend.Libuvc"), "libuvc");
 	obs_property_set_long_description(backend, obs_module_text("Backend.Description"));
+	obs_property_set_modified_callback2(backend, on_usb_device_change, s);
 
 	obs_property_t *mode = obs_properties_add_list(props, "device_mode", obs_module_text("DeviceMode"),
 						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
