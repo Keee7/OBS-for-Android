@@ -3,7 +3,19 @@ cmake_minimum_required(VERSION 3.28...3.30)
 add_library(android-capture MODULE)
 add_library(OBS::android-capture ALIAS android-capture)
 
-target_sources(android-capture PRIVATE uvc-input.c uvc-bulk-pump.c uvc-iso-pump.c)
+set(_libuvc_sources
+  third_party/libuvc/src/device.c
+  third_party/libuvc/src/diag.c
+  third_party/libuvc/src/init.c
+  third_party/libuvc/src/misc.c
+  third_party/libuvc/src/stream.c
+)
+set_source_files_properties(${_libuvc_sources} PROPERTIES
+  COMPILE_OPTIONS "-Wno-unused-parameter;-Wno-sign-compare;-Wno-unused-variable;-Wno-deprecated-declarations;-Wno-shorten-64-to-32"
+)
+
+target_sources(android-capture PRIVATE uvc-input.c uvc-bulk-pump.c uvc-iso-pump.c uvc-backend-libuvc.c ${_libuvc_sources})
+target_include_directories(android-capture PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libuvc/include")
 target_link_libraries(android-capture PRIVATE OBS::libobs $<$<PLATFORM_ID:Android>:log>)
 
 if(OS_ANDROID)

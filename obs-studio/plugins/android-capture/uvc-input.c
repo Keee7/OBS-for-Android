@@ -66,6 +66,8 @@
 #include "uvc-iso-assembler.h"
 #include "uvc-iso-pump.h"
 #include "uvc-raw-payload.h"
+#include "uvc-bulk-payload.h"
+#include "uvc-backend-libuvc.h"
 #include "uvc-cadence-stats.h"
 #include "uvc-recovery.h"
 
@@ -145,6 +147,12 @@ enum uvc_mode_kind {
 	MODE_RGB24,
 	MODE_BGR24,
 	MODE_P010,
+	MODE_UYVY,
+};
+
+enum uvc_backend_kind {
+	UVC_BACKEND_NATIVE = 0,
+	UVC_BACKEND_LIBUVC = 1,
 };
 
 enum {
@@ -211,7 +219,9 @@ struct uvc_source {
 	struct uvc_reset_limit reset_limit; /* persists across sessions for this source */
 	struct uvc_retire_gate *retire_gate;
 	bool bulk_raw_fallback;
+	bool bulk_payload_fallback;
 	bool waiting_permission;
+	enum uvc_backend_kind backend;
 	char fmt_setting[16]; /* video_format 设置的原始字符串，打日志消歧义用 */
 	char usb_id[16];      /* 首台匹配设备的 "vid:pid"（label 前缀），拔插换号后按它认设备 */
 
@@ -244,6 +254,7 @@ struct uvc_dev {
 	uint8_t ep_in;
 	bool is_iso;
 	bool bulk_raw_fallback;
+	bool bulk_payload_fallback;
 	struct uvc_iso_alt iso_alts[UVC_ISO_MAX_ALTS];
 	int n_iso_alts;
 	uint32_t iso_packet_size;
@@ -340,6 +351,8 @@ static const char *mode_kind_name(enum uvc_mode_kind k)
 		return "NV12";
 	case MODE_P010:
 		return "P010";
+	case MODE_UYVY:
+		return "UYVY";
 	case MODE_RGB24:
 		return "RGB24";
 	case MODE_BGR24:
@@ -366,7 +379,7 @@ static uint32_t raw_frame_bytes(const struct uvc_mode *m)
 {
 	uint64_t bytes;
 
-	if (m->kind == MODE_YUYV)
+	if (m->kind == MODE_YUYV || m->kind == MODE_UYVY)
 		bytes = (uint64_t)m->w * (uint64_t)m->h * 2;
 	else if (m->kind == MODE_NV12)
 		bytes = (uint64_t)m->w * (uint64_t)m->h * 3 / 2;
@@ -959,7 +972,7 @@ static int copy_usable_modes(struct uvc_mode *out, const struct uvc_dev *device)
 
 static bool is_yuv_mode_kind(int kind)
 {
-	return kind == MODE_YUYV || kind == MODE_NV12 || kind == MODE_P010;
+	return kind == MODE_YUYV || kind == MODE_UYVY || kind == MODE_NV12 || kind == MODE_P010;
 }
 
 static bool raw_low_latency(const struct uvc_source *s)
@@ -1932,6 +1945,9 @@ static bool push_frame_raw(struct uvc_source *s, const struct uvc_mode *m, struc
 	case MODE_YUYV:
 		format = VIDEO_FORMAT_YUY2;
 		break;
+	case MODE_UYVY:
+		format = VIDEO_FORMAT_UYVY;
+		break;
 	case MODE_NV12:
 		format = VIDEO_FORMAT_NV12;
 		break;
@@ -1980,7 +1996,7 @@ static bool push_frame_raw(struct uvc_source *s, const struct uvc_mode *m, struc
 			out->data[1] = st->frame_buf + (size_t)out->linesize[0] * m->h;
 			out->linesize[1] = out->linesize[0];
 		}
-		if (m->kind != MODE_P010)
+		if (m->kind != MODE_P010 && m->kind != MODE_UYVY)
 			uvc_cadence_observe(&s->cadence, st->frame_buf, m->w, m->h, m->kind == MODE_YUYV, received_ns);
 	}
 	out->timestamp = frame_timestamp(s, received_ns);
@@ -2157,6 +2173,20 @@ static bool use_raw_packets(const struct uvc_dev *d, const struct uvc_source *s)
 		return false;
 	return raw_frame_bytes(&d->modes[d->chosen]) > 0 && !(d->quirks & QUIRK_PREFER_YUYV) &&
 	       d->payload_size >= 2 && d->payload_size <= UVC_BULK_CHUNK_SIZE;
+}
+
+/* Standard UVC Bulk Payload Transfer framing for devices whose negotiated
+ * dwMaxPayloadTransferSize exceeds one 64 KiB host URB (e.g. Sony A7M4/ZV-E10
+ * sending each MJPEG frame as one 1.38 MB bulk payload terminated by a short
+ * packet or ZLP). Small-payload capture cards (e.g. MS2130) stay on the
+ * byte-stream scanner or fixed raw-payload fast path. */
+static bool use_bulk_payload_assembler(const struct uvc_dev *d, const struct uvc_source *s)
+{
+	if (d->is_iso || d->bulk_payload_fallback || d->chosen < 0 || d->chosen >= d->n_modes)
+		return false;
+	if (use_raw_packets(d, s))
+		return false;
+	return d->payload_size > UVC_BULK_CHUNK_SIZE;
 }
 
 struct uvc_active_pump {
@@ -3149,14 +3179,279 @@ static enum uvc_deliver_result deliver_assembled_frame(struct uvc_frame_delivery
 	return UVC_DELIVER_CONTINUE;
 }
 
+static enum uvc_mode_kind libuvc_fmt_to_mode_kind(enum uvc_libuvc_fmt fmt)
+{
+	switch (fmt) {
+	case UVC_LIBUVC_FMT_MJPEG:
+		return MODE_MJPEG;
+	case UVC_LIBUVC_FMT_YUYV:
+		return MODE_YUYV;
+	case UVC_LIBUVC_FMT_UYVY:
+		return MODE_UYVY;
+	case UVC_LIBUVC_FMT_NV12:
+		return MODE_NV12;
+	case UVC_LIBUVC_FMT_P010:
+		return MODE_P010;
+	case UVC_LIBUVC_FMT_RGB24:
+		return MODE_RGB24;
+	case UVC_LIBUVC_FMT_BGR24:
+		return MODE_BGR24;
+	default:
+		return MODE_MJPEG;
+	}
+}
+
+static void convert_libuvc_modes(const struct uvc_libuvc_mode *src, int count, struct uvc_mode *dst)
+{
+	for (int i = 0; i < count; ++i) {
+		memset(&dst[i], 0, sizeof(dst[i]));
+		dst[i].kind = libuvc_fmt_to_mode_kind(src[i].fmt);
+		dst[i].fmt_index = src[i].fmt_index;
+		dst[i].frame_index = src[i].frame_index;
+		dst[i].w = src[i].w;
+		dst[i].h = src[i].h;
+		dst[i].max_frame_size = src[i].max_frame_size;
+		dst[i].def_interval = src[i].def_interval;
+		dst[i].min_iv = src[i].min_iv;
+		dst[i].max_iv = src[i].max_iv;
+		dst[i].step_iv = src[i].step_iv;
+		dst[i].n_intervals = src[i].n_intervals;
+		if (src[i].n_intervals > 0)
+			memcpy(dst[i].intervals, src[i].intervals,
+			       (size_t)src[i].n_intervals * sizeof(dst[i].intervals[0]));
+	}
+}
+
+/* Complete UVC capture session powered by the Android-hardened vendored libuvc
+ * backend. Reuses the shared mode selection, TurboJPEG decode, OBS video/audio
+ * output, and status reporting pipeline. Takes ownership of fd and always
+ * returns it via obs_android_usb_close(fd). */
+static bool uvc_run_once_libuvc(struct uvc_source *s, const char *open_name, int fd)
+{
+	struct uvc_dev d = {.bridge_fd = fd, .chosen = -1};
+	struct uvc_stream st = {0};
+	struct uvc_frame_delivery_ctx fctx = {.yuyv_mode_idx = -1};
+	struct uvc_audio_worker audio_worker = {0};
+	struct uvc_libuvc_mode lmodes[MAX_MODES];
+	struct uvc_libuvc_session *sess = NULL;
+	tjhandle tj = NULL;
+	bool modes_changed = false;
+	bool progress = false;
+	char err_buf[160] = {0};
+
+	int n_lmodes = 0;
+	int usb_speed = LIBUSB_SPEED_UNKNOWN;
+	int r = uvc_libuvc_open(fd, &sess, lmodes, MAX_MODES, &n_lmodes, &usb_speed, err_buf, sizeof(err_buf));
+	if (r != 0 || !sess) {
+		blog(LOG_ERROR, "uvc[libuvc]: 打开设备失败：%s", err_buf[0] ? err_buf : "unknown");
+		set_status_int(s, "Status.WrapFdFailed", r);
+		goto out;
+	}
+	d.usb_speed = usb_speed;
+	blog(LOG_INFO, "uvc[libuvc]: uvc_wrap 成功（speed=%d，发现 %d 个模式）", usb_speed, n_lmodes);
+
+	if (n_lmodes <= 0) {
+		blog(LOG_WARNING, "uvc[libuvc]: 未解析到任何可用视频模式");
+		set_status_key(s, "Status.NoModes", NULL, 0);
+		goto out;
+	}
+	if (n_lmodes > MAX_MODES)
+		n_lmodes = MAX_MODES;
+	convert_libuvc_modes(lmodes, n_lmodes, d.modes);
+	d.n_modes = n_lmodes;
+	d.eff_fmt = s->prefer_fmt;
+	d.eff_w = s->width;
+	d.eff_h = s->height;
+	d.eff_fps = s->fps;
+
+	{
+		struct uvc_mode scanned[MAX_MODES] = {0};
+		const int scanned_count = copy_usable_modes(scanned, &d);
+		pthread_mutex_lock(&s->mtx);
+		if (strcmp(s->mode_device, open_name) != 0 ||
+		    !uvc_modes_equal(s->device_modes, s->device_mode_count, scanned, scanned_count))
+			modes_changed = true;
+		s->device_mode_count = scanned_count;
+		if (scanned_count > 0)
+			memcpy(s->device_modes, scanned, (size_t)scanned_count * sizeof(scanned[0]));
+		snprintf(s->mode_device, sizeof(s->mode_device), "%s", open_name);
+		pthread_mutex_unlock(&s->mtx);
+	}
+	d.chosen = choose_mode(&d, s);
+	if (d.chosen < 0 || d.chosen >= d.n_modes) {
+		if (raw_low_latency(s))
+			set_status_key(s, "Status.UnsupportedYuvMode", NULL, 0);
+		else
+			set_status_key(s, "Status.NoModes", NULL, 0);
+		goto out;
+	}
+
+	const struct uvc_mode *mode = &d.modes[d.chosen];
+	const uint32_t req_interval =
+		s->requested_interval ? s->requested_interval : pick_interval(mode, d.eff_fps);
+	blog(LOG_INFO, "uvc[libuvc]: 选中模式 %s %ux%u interval=%u（fmt=%u frame=%u）",
+	     mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h, (unsigned)req_interval,
+	     (unsigned)mode->fmt_index, (unsigned)mode->frame_index);
+
+	uint32_t neg_iv = 0, neg_payload = 0, neg_maxframe = 0;
+	r = uvc_libuvc_start(sess, &lmodes[d.chosen], req_interval, &neg_iv, &neg_payload, &neg_maxframe, err_buf,
+			     sizeof(err_buf));
+	if (r != 0) {
+		blog(LOG_ERROR, "uvc[libuvc]: 协商/启流失败：%s", err_buf[0] ? err_buf : "unknown");
+		set_status_int(s, "Status.NegotiateFailed", r);
+		goto out;
+	}
+	d.frame_interval = neg_iv ? neg_iv : req_interval;
+	d.payload_size = neg_payload;
+	d.frame_buf_size = neg_maxframe;
+
+	size_t frame_cap = raw_frame_bytes(mode);
+	if (!frame_cap) {
+		const size_t min_mjpeg = (size_t)mode->w * (size_t)mode->h * 2;
+		frame_cap = neg_maxframe;
+		if (frame_cap < mode->max_frame_size)
+			frame_cap = mode->max_frame_size;
+		if (frame_cap < min_mjpeg)
+			frame_cap = min_mjpeg;
+		if (frame_cap < 512U * 1024U)
+			frame_cap = 512U * 1024U;
+		if (frame_cap > MAX_FRAME_BYTES)
+			frame_cap = MAX_FRAME_BYTES;
+	}
+	st.frame_cap = frame_cap;
+	st.frame_total = raw_frame_bytes(mode);
+	st.frame_buf = bmalloc(st.frame_cap);
+	if (mode->kind == MODE_RGB24)
+		st.rgba_buf = bmalloc((size_t)mode->w * (size_t)mode->h * 4);
+	if (!st.frame_buf || (mode->kind == MODE_RGB24 && !st.rgba_buf)) {
+		set_status_key(s, "Status.OutOfMemoryBuffer", NULL, 0);
+		goto out;
+	}
+
+	if (mode->kind == MODE_MJPEG) {
+		tj = tjInitDecompress();
+		if (!tj) {
+			blog(LOG_ERROR, "uvc[libuvc]: tjInitDecompress 失败：%s", tjGetErrorStr());
+			set_status_key(s, "Status.JpegInitFailed", NULL, 0);
+			goto out;
+		}
+	}
+
+	blog(LOG_INFO,
+	     "uvc: event=started backend=libuvc format=%s width=%u height=%u negotiated_fps=%.3f usb_speed=%d payload=%u maxframe=%u",
+	     mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h,
+	     d.frame_interval ? 10000000.0 / d.frame_interval : 0.0, d.usb_speed, (unsigned)d.payload_size,
+	     (unsigned)d.frame_buf_size);
+
+	uvc_audio_worker_start(&audio_worker, s, open_name);
+	set_capture_status(s, "Status.Capturing", mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h, 0);
+	{
+		const bool neg_changed = uvc_set_negotiated_mode(s, open_name, mode, d.frame_interval);
+		if (modes_changed || neg_changed) {
+			modes_changed = false;
+			uvc_notify_properties_updated(s);
+		}
+	}
+
+	struct uvc_recovery recovery;
+	const uint64_t start_ns = os_gettime_ns();
+	uvc_recovery_start(&recovery, start_ns);
+	fctx.s = s;
+	fctx.d = &d;
+	fctx.mode = mode;
+	fctx.st = &st;
+	fctx.tj = tj;
+	fctx.recovery = &recovery;
+	fctx.fps_window_start = start_ns;
+
+	uint64_t stats_start_ns = start_ns;
+	uint64_t stats_frames = s->frames_out;
+	uint64_t last_good_ns = start_ns;
+
+	while (!os_atomic_load_long(&s->shutting_down)) {
+		const uint8_t *fdata = NULL;
+		size_t flen = 0;
+		uint32_t fw = 0, fh = 0;
+		enum uvc_libuvc_fmt ffmt = UVC_LIBUVC_FMT_MJPEG;
+		uint64_t received_ns = 0;
+
+		const int gr = uvc_libuvc_get_frame(sess, &fdata, &flen, &fw, &fh, &ffmt, &received_ns, 200);
+		if (gr < 0) {
+			blog(LOG_ERROR, "uvc[libuvc]: 采帧失败 (%d)，退出本轮会话", gr);
+			set_status_int(s, "Status.PumpError", gr);
+			break;
+		}
+		const uint64_t now_ns = os_gettime_ns();
+		if (gr == 1 && fdata && flen > 0) {
+			if (flen > st.frame_cap) {
+				if (flen <= MAX_FRAME_BYTES) {
+					uint8_t *grown = brealloc(st.frame_buf, flen);
+					if (grown) {
+						st.frame_buf = grown;
+						st.frame_cap = flen;
+					}
+				}
+			}
+			if (flen <= st.frame_cap) {
+				memcpy(st.frame_buf, fdata, flen);
+				const uint64_t out_before = s->frames_out;
+				deliver_assembled_frame(&fctx, (uint32_t)flen, received_ns);
+				if (s->frames_out > out_before) {
+					last_good_ns = now_ns;
+					progress = true;
+				}
+			} else {
+				s->frames_dropped++;
+			}
+		} else if (now_ns - last_good_ns >= 8000000000ULL) {
+			blog(LOG_WARNING, "uvc[libuvc]: 连续 8 秒未收到有效帧，退出会话准备重连");
+			break;
+		}
+
+		if (now_ns - stats_start_ns >= 5000000000ULL) {
+			uint64_t err_pkts = 0, bad_pkts = 0;
+			uvc_libuvc_stats(sess, &err_pkts, &bad_pkts);
+			blog(LOG_INFO,
+			     "uvc: event=progress backend=libuvc format=%s width=%u height=%u fps=%.2f "
+			     "frames=%llu bad_frames=%llu err_pkts=%llu bad_pkts=%llu",
+			     mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h,
+			     (double)(s->frames_out - stats_frames) * 1000000000.0 /
+				     (double)(now_ns - stats_start_ns),
+			     (unsigned long long)s->frames_out, (unsigned long long)s->frames_dropped,
+			     (unsigned long long)err_pkts, (unsigned long long)bad_pkts);
+			stats_start_ns = now_ns;
+			stats_frames = s->frames_out;
+		}
+	}
+
+out:
+	uvc_audio_worker_stop(&audio_worker);
+	if (sess)
+		uvc_libuvc_close(sess);
+	if (tj)
+		tjDestroy(tj);
+	if (fd >= 0)
+		obs_android_usb_close(fd);
+	bfree(st.rgba_buf);
+	bfree(st.frame_buf);
+	bfree(fctx.bgra);
+	if (modes_changed)
+		uvc_notify_properties_updated(s);
+	blog(LOG_INFO, "uvc[libuvc]: 本轮采集结束（送出 %llu 帧，丢弃 %llu 帧）",
+	     (unsigned long long)s->frames_out, (unsigned long long)s->frames_dropped);
+	return progress;
+}
+
 static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 {
 	struct uvc_dev d = {.bridge_fd = -1};
 	struct uvc_stream st = {0};
 	struct uvc_raw_payload_state raw = {0};
+	struct uvc_bulk_payload_assembler bulk_asm = {0};
 	struct uvc_iso_assembler iso_asm = {0};
 	struct uvc_frame_delivery_ctx fctx = {.yuyv_mode_idx = -1};
 	bool raw_packets = false;
+	bool bulk_payload_mode = false;
 	unsigned capture_epoch = 1;
 	struct obs_android_usb_device devs[8];
 	tjhandle tj = NULL;
@@ -3177,6 +3472,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	s->waiting_permission = false;
 	d.chosen = -1;
 	d.bulk_raw_fallback = s->bulk_raw_fallback;
+	d.bulk_payload_fallback = s->bulk_payload_fallback;
 
 	/* ---- 1. 总线清单里找选中的设备 / 授权 ---- */
 	if (!s->usb_device[0]) {
@@ -3193,6 +3489,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	const int sel = find_usb_device(devs, ndev, s->usb_device, s->usb_id);
 	if (sel < 0) {
 		s->bulk_raw_fallback = false;
+		s->bulk_payload_fallback = false;
 		uvc_clear_negotiated_mode(s);
 		const char *args[] = {s->usb_device};
 		set_status_key(s, "Status.DeviceMissing", args, 1);
@@ -3243,6 +3540,9 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		return false;
 	}
 	set_status_key(s, "Status.Initializing", NULL, 0);
+
+	if (s->backend == UVC_BACKEND_LIBUVC)
+		return uvc_run_once_libuvc(s, open_name, d.bridge_fd);
 
 	/* 必须关设备发现：默认初始化要建 NETLINK_KOBJECT_UEVENT socket，Android 的 SELinux
 	 * 不让应用建，libusb_init 直接 -1（真机实测，旧 libuvc 实现就死在这） */
@@ -3452,16 +3752,18 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		goto out;
 	}
 	raw_packets = use_raw_packets(&d, s);
+	bulk_payload_mode = use_bulk_payload_assembler(&d, s);
 	st.frame_cap = frame_cap;
 	st.frame_total = raw_frame_bytes(mode); /* MJPEG = 0 */
 	st.frame_buf = bmalloc(st.frame_cap);
 	if (mode->kind == MODE_RGB24)
 		st.rgba_buf = bmalloc((size_t)mode->w * mode->h * 4);
 
-	if (!d.is_iso && !raw_packets)
+	if (!d.is_iso && !raw_packets && !bulk_payload_mode)
 		ensure_bulk_stream_buffer(&st);
 
-	if (!st.frame_buf || (!d.is_iso && !raw_packets && !st.input.data) || (mode->kind == MODE_RGB24 && !st.rgba_buf)) {
+	if (!st.frame_buf || (!d.is_iso && !raw_packets && !bulk_payload_mode && !st.input.data) ||
+	    (mode->kind == MODE_RGB24 && !st.rgba_buf)) {
 		blog(LOG_ERROR, "uvc: 缓冲分配失败（帧 %zu / 流 %zu 字节）", st.frame_cap, st.input.capacity);
 		set_status_key(s, "Status.OutOfMemoryBuffer", NULL, 0);
 		goto out;
@@ -3488,6 +3790,8 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		}
 	}
 	uvc_raw_payload_init(&raw, st.frame_buf, st.frame_total);
+	uvc_bulk_payload_init(&bulk_asm, st.frame_buf, st.frame_cap, st.frame_total, mode->kind == MODE_MJPEG,
+			      d.payload_size, BULK_CHUNK_SIZE);
 	uvc_iso_assembler_init(&iso_asm, st.frame_buf, st.frame_cap, st.frame_total, mode->kind == MODE_MJPEG);
 	memset(&s->cadence, 0, sizeof(s->cadence));
 	stats_start_ns = os_gettime_ns();
@@ -3499,10 +3803,10 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		     pump.iso_pkts_per_xfer, d.usb_speed, d.payload_size);
 	} else {
 		blog(LOG_INFO,
-		     "uvc: event=started format=%s width=%u height=%u negotiated_fps=%.3f raw_packets=%d low_latency=%d usb_speed=%d payload=%u unbuffered=%d",
+		     "uvc: event=started format=%s width=%u height=%u negotiated_fps=%.3f raw_packets=%d bulk_payload=%d low_latency=%d usb_speed=%d payload=%u unbuffered=%d",
 		     mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h,
-		     d.frame_interval ? 10000000.0 / d.frame_interval : 0.0, raw_packets, raw_low_latency(s),
-		     d.usb_speed, d.payload_size, obs_source_async_unbuffered(s->source));
+		     d.frame_interval ? 10000000.0 / d.frame_interval : 0.0, raw_packets, bulk_payload_mode,
+		     raw_low_latency(s), d.usb_speed, d.payload_size, obs_source_async_unbuffered(s->source));
 	}
 
 	streaming = true;
@@ -3584,6 +3888,17 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 						     (unsigned long long)raw.non_err_bytes_since_good);
 						d.bulk_raw_fallback = true;
 						s->bulk_raw_fallback = true;
+					} else if (bulk_payload_mode &&
+						   (bulk_asm.consec_invalid_headers > 0 ||
+						    bulk_asm.non_err_bytes_since_good > 0) &&
+						   bulk_asm.good_frames == 0) {
+						blog(LOG_WARNING,
+						     "uvc: 看门狗重启时 Bulk 载荷重组路径未出帧（连续无效头=%u 非ERR字节=%llu），"
+						     "锁定回退字节流扫描",
+						     bulk_asm.consec_invalid_headers,
+						     (unsigned long long)bulk_asm.non_err_bytes_since_good);
+						d.bulk_payload_fallback = true;
+						s->bulk_payload_fallback = true;
 					}
 					blog(LOG_WARNING, "uvc: 无有效帧，清除端点并重新协商");
 					nr = libusb_clear_halt(d.h, d.ep_in);
@@ -3598,10 +3913,14 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 					}
 					stream_reset_parse(&st);
 					uvc_raw_payload_init(&raw, st.frame_buf, st.frame_total);
+					uvc_bulk_payload_init(&bulk_asm, st.frame_buf, st.frame_cap, st.frame_total,
+							      mode->kind == MODE_MJPEG, d.payload_size, BULK_CHUNK_SIZE);
 					uvc_iso_assembler_init(&iso_asm, st.frame_buf, st.frame_cap, st.frame_total,
 							       mode->kind == MODE_MJPEG);
 					raw_packets = use_raw_packets(&d, s);
-					if (!d.is_iso && !raw_packets && !ensure_bulk_stream_buffer(&st)) {
+					bulk_payload_mode = use_bulk_payload_assembler(&d, s);
+					if (!d.is_iso && !raw_packets && !bulk_payload_mode &&
+					    !ensure_bulk_stream_buffer(&st)) {
 						set_status_key(s, "Status.OutOfMemoryBuffer", NULL, 0);
 						break;
 					}
@@ -3794,6 +4113,10 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 					const uint64_t before = raw.bad_frames;
 					uvc_raw_payload_reset(&raw);
 					s->frames_dropped += raw.bad_frames - before;
+				} else if (bulk_payload_mode) {
+					const uint64_t before = bulk_asm.bad_frames;
+					uvc_bulk_payload_on_gap(&bulk_asm);
+					s->frames_dropped += bulk_asm.bad_frames - before;
 				} else if (st.assembling) {
 					s->frames_dropped++;
 				}
@@ -3867,7 +4190,76 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 					uvc_bulk_pump_release(pump.bulk, &block);
 				}
 			}
-			if (!raw_packets && !need_yuyv_fallback) {
+			if (!raw_packets && bulk_payload_mode && !need_yuyv_fallback) {
+				const uint64_t bad_before = bulk_asm.bad_frames;
+				const uint64_t ovf_before = bulk_asm.overflow_frames;
+				struct uvc_bulk_frame ready_frame = {0};
+				if (uvc_bulk_payload_check_flush(&bulk_asm, block.data, block.size, &ready_frame)) {
+					st.err_first_ns = 0;
+					st.has_pts = ready_frame.have_pts;
+					st.frame_pts = ready_frame.pts;
+					const uint64_t out_before = s->frames_out;
+					if (deliver_assembled_frame(&fctx, (uint32_t)ready_frame.len, received_ns) ==
+					    UVC_DELIVER_YUYV_FALLBACK)
+						need_yuyv_fallback = true;
+					if (s->frames_out > out_before)
+						uvc_bulk_payload_note_delivered(&bulk_asm);
+				}
+				bool had_bmh_err = false;
+				if (!need_yuyv_fallback) {
+					if (uvc_bulk_payload_push(&bulk_asm, block.data, block.size, &ready_frame,
+								  &had_bmh_err)) {
+						st.err_first_ns = 0;
+						st.has_pts = ready_frame.have_pts;
+						st.frame_pts = ready_frame.pts;
+						const uint64_t out_before = s->frames_out;
+						if (deliver_assembled_frame(&fctx, (uint32_t)ready_frame.len,
+									    received_ns) ==
+						    UVC_DELIVER_YUYV_FALLBACK)
+							need_yuyv_fallback = true;
+						if (s->frames_out > out_before)
+							uvc_bulk_payload_note_delivered(&bulk_asm);
+					} else if (bulk_asm.overflow_frames > ovf_before) {
+						if (log_allow(&st.ll_overflow))
+							blog(LOG_WARNING,
+							     "uvc: Bulk 帧超过缓冲（上限 %zu 字节），丢弃本帧",
+							     st.frame_cap);
+					} else if (had_bmh_err) {
+						if (handle_err_header(s, &st))
+							abort_stream = true;
+					} else if (bulk_asm.consec_invalid_headers == 0) {
+						st.err_first_ns = 0;
+					}
+				}
+				s->frames_dropped += bulk_asm.bad_frames - bad_before;
+				submit_count = fctx.submit_count;
+				submit_total_ns = fctx.submit_total_ns;
+				submit_max_ns = fctx.submit_max_ns;
+				if (!need_yuyv_fallback && !abort_stream &&
+				    uvc_bulk_payload_should_fallback(&bulk_asm)) {
+					blog(LOG_WARNING,
+					     "uvc: Bulk 载荷重组(%uB)未匹配设备协议"
+					     "（好帧=%llu 连续无效头=%u 累计无效头=%llu 非ERR未成帧=%lluB 已喂入=%lluB），"
+					     "自动回退字节流扫描",
+					     (unsigned)d.payload_size, (unsigned long long)bulk_asm.good_frames,
+					     bulk_asm.consec_invalid_headers,
+					     (unsigned long long)bulk_asm.invalid_headers,
+					     (unsigned long long)bulk_asm.non_err_bytes_since_good,
+					     (unsigned long long)bulk_asm.fed_bytes);
+					d.bulk_payload_fallback = true;
+					s->bulk_payload_fallback = true;
+					bulk_payload_mode = false;
+					if (!ensure_bulk_stream_buffer(&st)) {
+						uvc_bulk_pump_release(pump.bulk, &block);
+						set_status_key(s, "Status.OutOfMemoryBuffer", NULL, 0);
+						break;
+					}
+					stream_reset_parse(&st);
+				} else {
+					uvc_bulk_pump_release(pump.bulk, &block);
+				}
+			}
+			if (!raw_packets && !bulk_payload_mode && !need_yuyv_fallback && !abort_stream) {
 				if (!uvc_stream_buffer_append(&st.input, block.data, block.size)) {
 					parser_gaps++;
 					if (st.assembling)
@@ -4058,8 +4450,11 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			blog(LOG_WARNING, "uvc: 黑场自降级的重新协商结果 %d，解析状态已重置", nr);
 			stream_reset_parse(&st);
 			uvc_raw_payload_init(&raw, st.frame_buf, st.frame_total);
+			uvc_bulk_payload_init(&bulk_asm, st.frame_buf, st.frame_cap, st.frame_total, false,
+					      d.payload_size, BULK_CHUNK_SIZE);
 			uvc_iso_assembler_init(&iso_asm, st.frame_buf, st.frame_cap, st.frame_total, false);
 			raw_packets = use_raw_packets(&d, s);
+			bulk_payload_mode = use_bulk_payload_assembler(&d, s);
 			have_sequence = false;
 			stats_bytes = 0;
 			stats_urbs = 0;
@@ -4078,7 +4473,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				if (uvc_set_negotiated_mode(s, open_name, cur_mode, neg_iv))
 					uvc_notify_properties_updated(s);
 			}
-			if (!d.is_iso && !raw_packets && !ensure_bulk_stream_buffer(&st)) {
+			if (!d.is_iso && !raw_packets && !bulk_payload_mode && !ensure_bulk_stream_buffer(&st)) {
 				blog(LOG_ERROR, "uvc: 切 YUYV 分配流缓冲失败");
 				set_status_key(s, "Status.OutOfMemoryBuffer", NULL, 0);
 				abort_stream = true;
@@ -4289,6 +4684,7 @@ static const char *uvc_getname(void *unused)
 
 static void uvc_get_defaults(obs_data_t *settings)
 {
+	obs_data_set_default_string(settings, "uvc_backend", "native");
 	obs_data_set_default_string(settings, "device_mode", "");
 	obs_data_set_default_int(settings, "yuv_colorspace", VIDEO_CS_709);
 	obs_data_set_default_int(settings, "color_range", VIDEO_RANGE_DEFAULT);
@@ -4302,12 +4698,21 @@ static void uvc_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "yuv_unbuffered", false);
 }
 
+static enum uvc_backend_kind backend_string_to_kind(const char *name)
+{
+	if (name && strcmp(name, "libuvc") == 0)
+		return UVC_BACKEND_LIBUVC;
+	return UVC_BACKEND_NATIVE;
+}
+
 static int fmt_string_to_kind(const char *fmt)
 {
 	if (fmt && strcmp(fmt, "mjpeg") == 0)
 		return MODE_MJPEG;
 	if (fmt && strcmp(fmt, "yuyv") == 0)
 		return MODE_YUYV;
+	if (fmt && strcmp(fmt, "uyvy") == 0)
+		return MODE_UYVY;
 	if (fmt && strcmp(fmt, "nv12") == 0)
 		return MODE_NV12;
 	if (fmt && strcmp(fmt, "p010") == 0)
@@ -4328,6 +4733,8 @@ static void uvc_settings_apply(struct uvc_source *s, obs_data_t *settings)
 	snprintf(s->usb_device, sizeof(s->usb_device), "%s", dev);
 	pthread_mutex_unlock(&s->mtx);
 	s->bulk_raw_fallback = false;
+	s->bulk_payload_fallback = false;
+	s->backend = backend_string_to_kind(obs_data_get_string(settings, "uvc_backend"));
 
 	s->width = (int)obs_data_get_int(settings, "width");
 	s->height = (int)obs_data_get_int(settings, "height");
@@ -4343,7 +4750,7 @@ static void uvc_settings_apply(struct uvc_source *s, obs_data_t *settings)
 	char extra;
 	s->requested_interval = 0;
 	if (sscanf(s->mode_setting, "%d:%d:%d:%u%c", &kind, &width, &height, &interval, &extra) == 4 &&
-	    kind >= MODE_MJPEG && kind <= MODE_P010 && width >= 16 && width <= 7680 && height >= 16 &&
+	    kind >= MODE_MJPEG && kind <= MODE_UYVY && width >= 16 && width <= 7680 && height >= 16 &&
 	    height <= 4320 && interval >= 41666 && interval <= 10000000) {
 		s->prefer_fmt = kind;
 		s->width = width;
@@ -4431,7 +4838,7 @@ static int settings_effective_fmt_kind(obs_data_t *settings)
 		unsigned interval = 0;
 		char extra = 0;
 		if (sscanf(mode, "%d:%d:%d:%u%c", &kind, &width, &height, &interval, &extra) == 4 &&
-		    kind >= MODE_MJPEG && kind <= MODE_P010 && width >= 16 && width <= 7680 && height >= 16 &&
+		    kind >= MODE_MJPEG && kind <= MODE_UYVY && width >= 16 && width <= 7680 && height >= 16 &&
 		    height <= 4320 && interval >= 41666 && interval <= 10000000)
 			return kind;
 	}
@@ -4458,11 +4865,13 @@ static void uvc_update(void *data, obs_data_t *settings)
 		path_synced = s->mode_device[0] && strcmp(dev, s->mode_device) == 0 && s->usb_id[0];
 		pthread_mutex_unlock(&s->mtx);
 	}
+	const enum uvc_backend_kind new_backend = backend_string_to_kind(obs_data_get_string(settings, "uvc_backend"));
+	const bool backend_changed = new_backend != s->backend;
 	const bool unbuffered = obs_data_get_bool(settings, "yuv_unbuffered");
 	const bool new_yuv_low_latency = obs_data_get_bool(settings, "yuv_low_latency");
 	const bool new_raw_ll = new_yuv_low_latency && is_yuv_mode_kind(settings_effective_fmt_kind(settings));
 	const bool raw_ll_changed = new_raw_ll != raw_low_latency(s);
-	bool changed = (dev_changed && !path_synced) || manual_change ||
+	bool changed = (dev_changed && !path_synced) || backend_changed || manual_change ||
 		       strcmp(obs_data_get_string(settings, "device_mode"), s->mode_setting) != 0 ||
 		       raw_ll_changed ||
 		       obs_data_get_int(settings, "yuv_colorspace") != s->colorspace ||
@@ -4470,7 +4879,7 @@ static void uvc_update(void *data, obs_data_t *settings)
 	if (changed) {
 		uvc_stop_thread(s);
 		uvc_clear_negotiated_mode(s);
-		if (dev_changed && !path_synced) {
+		if ((dev_changed && !path_synced) || backend_changed) {
 			pthread_mutex_lock(&s->mtx);
 			s->device_mode_count = 0;
 			s->mode_device[0] = '\0';
@@ -4494,6 +4903,8 @@ static void uvc_update(void *data, obs_data_t *settings)
 		uvc_start_thread(s);
 }
 
+static bool resolve_usb_device_path(struct uvc_source *s, const char *path, char resolved[OBS_ANDROID_USB_NAME_LEN]);
+
 /* 属性页【申请 USB 授权】：权限结果是异步的，返回 false 不刷属性页（同 nikon-source） */
 static bool on_request_permission(obs_properties_t *props, obs_property_t *property, void *data)
 {
@@ -4505,8 +4916,11 @@ static bool on_request_permission(obs_properties_t *props, obs_property_t *prope
 		blog(LOG_INFO, "uvc: 尚未选择 USB 设备，请先选择设备再申请授权");
 		return false;
 	}
-	const int r = obs_android_usb_request_permission(s->usb_device);
-	blog(LOG_INFO, "uvc: 属性页对 '%s' 点【申请授权】，总线返回 %d（%s）", s->usb_device, r,
+	char target[OBS_ANDROID_USB_NAME_LEN];
+	if (!resolve_usb_device_path(s, s->usb_device, target))
+		snprintf(target, sizeof(target), "%s", s->usb_device);
+	const int r = obs_android_usb_request_permission(target);
+	blog(LOG_INFO, "uvc: 属性页对 '%s' 点【申请授权】，总线返回 %d（%s）", target, r,
 	     r == 1   ? "弹窗中，用户选完后重新激活本源生效"
 	     : r == 0 ? "其实已有权限"
 		      : "失败");
@@ -4567,18 +4981,28 @@ static int read_device_modes(struct uvc_source *s, const char *name, struct uvc_
 	const int fd = obs_android_usb_open(resolved);
 	if (fd < 0)
 		return 0;
-	struct uvc_dev device = {0};
-	const struct libusb_init_option options[] = {{LIBUSB_OPTION_NO_DEVICE_DISCOVERY, {0}}};
 	int count = 0;
-	if (libusb_init_context(&device.ctx, options, 1) == 0) {
-		if (libusb_wrap_sys_device(device.ctx, (intptr_t)fd, &device.h) == 0) {
-			if (uvc_scan_device(&device)) {
-				device.quirks = device_quirks(device.h);
-				count = copy_usable_modes(modes, &device);
-			}
-			libusb_close(device.h);
+	if (s && s->backend == UVC_BACKEND_LIBUVC) {
+		struct uvc_libuvc_mode lmodes[MAX_MODES];
+		const int lc = uvc_libuvc_probe_modes(fd, lmodes, MAX_MODES);
+		if (lc > 0) {
+			convert_libuvc_modes(lmodes, lc, modes);
+			count = lc;
 		}
-		libusb_exit(device.ctx);
+	}
+	if (count == 0) {
+		struct uvc_dev device = {0};
+		const struct libusb_init_option options[] = {{LIBUSB_OPTION_NO_DEVICE_DISCOVERY, {0}}};
+		if (libusb_init_context(&device.ctx, options, 1) == 0) {
+			if (libusb_wrap_sys_device(device.ctx, (intptr_t)fd, &device.h) == 0) {
+				if (uvc_scan_device(&device)) {
+					device.quirks = device_quirks(device.h);
+					count = copy_usable_modes(modes, &device);
+				}
+				libusb_close(device.h);
+			}
+			libusb_exit(device.ctx);
+		}
 	}
 	obs_android_usb_close(fd);
 	return count;
@@ -4776,6 +5200,12 @@ static obs_properties_t *uvc_properties(void *data)
 
 	obs_properties_add_button2(props, "request_perm", obs_module_text("RequestPerm"), on_request_permission, s);
 
+	obs_property_t *backend = obs_properties_add_list(props, "uvc_backend", obs_module_text("Backend"),
+							  OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(backend, obs_module_text("Backend.Native"), "native");
+	obs_property_list_add_string(backend, obs_module_text("Backend.Libuvc"), "libuvc");
+	obs_property_set_long_description(backend, obs_module_text("Backend.Description"));
+
 	obs_property_t *mode = obs_properties_add_list(props, "device_mode", obs_module_text("DeviceMode"),
 						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(mode, obs_module_text("DeviceMode.Manual"), "");
@@ -4791,6 +5221,7 @@ static obs_properties_t *uvc_properties(void *data)
 						    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(p, obs_module_text("VideoFormat.Mjpeg"), "mjpeg");
 	obs_property_list_add_string(p, obs_module_text("VideoFormat.Yuyv"), "yuyv");
+	obs_property_list_add_string(p, obs_module_text("VideoFormat.Uyvy"), "uyvy");
 	obs_property_list_add_string(p, obs_module_text("VideoFormat.Nv12"), "nv12");
 	if (p010_available)
 		obs_property_list_add_string(p, "P010 (10-bit)", "p010");
@@ -4886,7 +5317,7 @@ bool obs_module_load(void)
 	}
 
 	blog(LOG_INFO,
-	     "android-capture: 已注册源类型 'android_video_input'（flags=0x%x / 自写 UVC-over-libusb / "
+	     "android-capture: 已注册源类型 'android_video_input'（flags=0x%x / 双后端：自研原生 UVC + Android 补丁版 libuvc 0.0.9 / "
 	     "libusb %u.%u.%u.%u api=0x%x）",
 	     (unsigned)flags, (unsigned)uv->major, (unsigned)uv->minor, (unsigned)uv->micro, (unsigned)uv->nano,
 	     (unsigned)LIBUSB_API_VERSION);

@@ -38,9 +38,9 @@ struct uvc_bulk_pump {
 	pthread_t thread;
 	pthread_mutex_t mutex;
 	pthread_cond_t cond;
-	bool thread_started, init_done, stopping, monotonic_cond, abandoned, owner_held;
+	bool thread_started, init_done, stopping, monotonic_cond, abandoned, owner_held, prev_was_full;
 	int fatal;
-	unsigned active, waiters;
+	unsigned active, waiters, transfer_size;
 	uint32_t retry_pending, retry_stalled;
 	struct slot slots[XFER_COUNT];
 	uint8_t *buffers[BUFFER_MAX];
@@ -118,7 +118,9 @@ static void LIBUSB_CALL on_transfer(struct libusb_transfer *x)
 	}
 	if (x->status == LIBUSB_TRANSFER_COMPLETED) {
 		p->stats.transfers++;
-		if (x->actual_length > 0) {
+		const bool emit_zlp = (x->actual_length == 0 && p->prev_was_full);
+		p->prev_was_full = (x->actual_length > 0 && (unsigned)x->actual_length >= p->transfer_size);
+		if (x->actual_length > 0 || emit_zlp) {
 			unsigned replacement;
 			p->stats.received_bytes += (uint64_t)x->actual_length;
 			if (p->free_count)
@@ -378,6 +380,7 @@ static struct uvc_bulk_pump *pump_start_sized_ex(libusb_context *ctx, libusb_dev
 	p->ctx = ctx;
 	p->handle = handle;
 	p->endpoint = endpoint;
+	p->transfer_size = transfer_size;
 	p->borrowed = -1;
 	p->ready_capacity = READY_BUDGET / transfer_size;
 	if (p->ready_capacity > READY_MAX)
