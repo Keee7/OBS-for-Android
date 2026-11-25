@@ -15,3 +15,6 @@ bool obsAndroidKeepAliveSetRunning(bool running, const char *state, QString *det
 
 // 一行状态快照（起停请求数 / running / wakelock / 最后一次错误），给日志与冒烟用。
 QString obsAndroidKeepAliveStatus();
+
+// 根据设置与当前推流/录制/回放缓存/屏幕采集状态控制 Activity 的 FLAG_KEEP_SCREEN_ON。
+void obsAndroidKeepAliveSetScreenOn(bool enabled, bool outputActive);

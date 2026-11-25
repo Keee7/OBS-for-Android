@@ -104,6 +104,7 @@
 #define MAX_CONSEC_USB_ERR 5
 #define RETRY_BACKOFF_MIN_MS 1000ULL
 #define RETRY_BACKOFF_MAX_MS 8000ULL
+#define PERM_POLL_MS 500ULL
 /* 同一实例连续这么多轮没送出任何帧 = 实例已死（IN 路径全 -1，只有拔插能救），
  * 退避拉到 30s 一档，别 1 秒一轮地锤（真机 1617：猝死后 GET probe -1 无限循环） */
 #define DEAD_ROUND_LIMIT 5U
@@ -198,12 +199,19 @@ struct uvc_source {
 	struct uvc_mode device_modes[MAX_MODES];
 	int device_mode_count;
 	char mode_device[OBS_ANDROID_USB_NAME_LEN];
+	bool negotiated_valid;
+	enum uvc_mode_kind negotiated_kind;
+	uint16_t negotiated_w;
+	uint16_t negotiated_h;
+	uint32_t negotiated_interval;
+	char negotiated_device[OBS_ANDROID_USB_NAME_LEN];
 	struct obs_source_frame2 raw_frame;
 	uint64_t last_frame_timestamp;
 	struct uvc_cadence_stats cadence;
 	struct uvc_reset_limit reset_limit; /* persists across sessions for this source */
 	struct uvc_retire_gate *retire_gate;
 	bool bulk_raw_fallback;
+	bool waiting_permission;
 	char fmt_setting[16]; /* video_format 设置的原始字符串，打日志消歧义用 */
 	char usb_id[16];      /* 首台匹配设备的 "vid:pid"（label 前缀），拔插换号后按它认设备 */
 
@@ -411,6 +419,80 @@ static void sleep_check(struct uvc_source *s, uint32_t ms)
 {
 	while (ms-- && !uvc_stopping(s))
 		os_sleep_ms(1);
+}
+
+static void uvc_format_mode_label(struct dstr *out, enum uvc_mode_kind kind, uint16_t w, uint16_t h,
+				  uint32_t interval)
+{
+	char width[8], height[8], fps[16];
+	snprintf(width, sizeof(width), "%u", (unsigned)w);
+	snprintf(height, sizeof(height), "%u", (unsigned)h);
+	snprintf(fps, sizeof(fps), "%.4g", interval ? 10000000.0 / interval : 0.0);
+	const char *args[] = {mode_kind_name(kind), width, height, fps};
+	obs_android_format_locale(out, obs_module_text("DeviceMode.Label"), args, 4);
+}
+
+static bool uvc_modes_equal(const struct uvc_mode *a, int na, const struct uvc_mode *b, int nb)
+{
+	if (na != nb)
+		return false;
+	for (int i = 0; i < na; i++) {
+		if (a[i].kind != b[i].kind || a[i].fmt_index != b[i].fmt_index ||
+		    a[i].frame_index != b[i].frame_index || a[i].w != b[i].w || a[i].h != b[i].h ||
+		    a[i].bpp != b[i].bpp || a[i].max_frame_size != b[i].max_frame_size ||
+		    a[i].def_interval != b[i].def_interval || a[i].min_iv != b[i].min_iv ||
+		    a[i].max_iv != b[i].max_iv || a[i].step_iv != b[i].step_iv ||
+		    a[i].n_intervals != b[i].n_intervals)
+			return false;
+		for (int j = 0; j < a[i].n_intervals; j++) {
+			if (a[i].intervals[j] != b[i].intervals[j])
+				return false;
+		}
+	}
+	return true;
+}
+
+static bool uvc_set_negotiated_mode(struct uvc_source *s, const char *dev_name, const struct uvc_mode *mode,
+				    uint32_t interval)
+{
+	if (!s || !mode)
+		return false;
+	const char *dev = dev_name ? dev_name : "";
+	pthread_mutex_lock(&s->mtx);
+	const bool changed = !s->negotiated_valid || s->negotiated_kind != mode->kind ||
+			     s->negotiated_w != mode->w || s->negotiated_h != mode->h ||
+			     s->negotiated_interval != interval ||
+			     strcmp(s->negotiated_device, dev) != 0;
+	if (changed) {
+		s->negotiated_valid = true;
+		s->negotiated_kind = mode->kind;
+		s->negotiated_w = mode->w;
+		s->negotiated_h = mode->h;
+		s->negotiated_interval = interval;
+		snprintf(s->negotiated_device, sizeof(s->negotiated_device), "%s", dev);
+	}
+	pthread_mutex_unlock(&s->mtx);
+	return changed;
+}
+
+static void uvc_clear_negotiated_mode(struct uvc_source *s)
+{
+	if (!s)
+		return;
+	pthread_mutex_lock(&s->mtx);
+	s->negotiated_valid = false;
+	s->negotiated_kind = 0;
+	s->negotiated_w = 0;
+	s->negotiated_h = 0;
+	s->negotiated_interval = 0;
+	s->negotiated_device[0] = '\0';
+	pthread_mutex_unlock(&s->mtx);
+}
+
+static void uvc_notify_properties_updated(struct uvc_source *s)
+{
+	if (s && s->source && !uvc_stopping(s))
+		obs_source_update_properties(s->source);
 }
 
 /* ---------------- VS 描述符解析（format/frame 摊平成 modes[]） ---------------- */
@@ -875,10 +957,14 @@ static int copy_usable_modes(struct uvc_mode *out, const struct uvc_dev *device)
 
 /* ---------------- 模式选择（优先用户设置，回退 MJPEG 1080p → 最大 MJPEG → 最大未压缩） ---------------- */
 
+static bool is_yuv_mode_kind(int kind)
+{
+	return kind == MODE_YUYV || kind == MODE_NV12 || kind == MODE_P010;
+}
+
 static bool raw_low_latency(const struct uvc_source *s)
 {
-	return s->yuv_low_latency &&
-	       (s->prefer_fmt == MODE_YUYV || s->prefer_fmt == MODE_NV12 || s->prefer_fmt == MODE_P010);
+	return s->yuv_low_latency && is_yuv_mode_kind(s->prefer_fmt);
 }
 
 /* Accept 59.94 for a requested 60, but never silently accept 30/15 fps. */
@@ -2250,18 +2336,29 @@ struct uvc_retire_job {
 	bool auto_detach_ok;
 };
 
+/* Give slow-cancelling URBs up to 2 s on the detached retire thread so libusb
+ * can reap them cleanly and run op_clear_transfer_priv (freeing Linux usbfs
+ * tpriv->urbs / iso_urbs). Persistent event errors still break out immediately
+ * via DRAIN_EVENT_ERROR_LIMIT, accepting the small (~2-4 KB) libusb 1.0.28
+ * backend URB metadata leak rather than hanging UI teardown or risking UAF. */
+#define UVC_RETIRE_ASYNC_DRAIN_MS 2000U
+#define UVC_RETIRE_OOM_DRAIN_MS 100U
+
 static void uvc_retire_execute(struct uvc_retire_job *job)
 {
 	bool drained = true;
 	if (job->retained_bulk)
-		drained &= uvc_bulk_pump_try_drain(job->retained_bulk, 100);
+		drained &= uvc_bulk_pump_try_drain(job->retained_bulk, UVC_RETIRE_ASYNC_DRAIN_MS);
 	if (job->retained_iso)
-		drained &= uvc_iso_pump_try_drain(job->retained_iso, 100);
+		drained &= uvc_iso_pump_try_drain(job->retained_iso, UVC_RETIRE_ASYNC_DRAIN_MS);
 	if (drained && job->h)
 		uvc_release_and_restore_interfaces(job->h, job->vs_claimed, job->is_iso, job->vs_iface, job->vc_iface,
 						   job->vc_detached, job->vs_detached, job->auto_detach_ok);
 	/* Close handle and underlying fd before freeing transfers/buffers so libusb
-	 * and kernel usbfs stop touching those buffers before exit(ctx). */
+	 * and kernel usbfs stop touching those buffers before exit(ctx). Note: in
+	 * libusb 1.0.28, do_close() + libusb_free_transfer() do not invoke Linux
+	 * op_clear_transfer_priv() if drained == false; only catastrophic event-loop
+	 * failure reaches that forced-close fallback. */
 	if (job->h)
 		libusb_close(job->h);
 	if (job->bridge_fd >= 0)
@@ -2316,9 +2413,9 @@ static void uvc_retire_session_async(struct uvc_source *s, struct uvc_bulk_pump 
 		/* Inline fallback on OOM: run stack job directly via execute? Do not free stack! */
 		bool drained = true;
 		if (stack_job.retained_bulk)
-			drained &= uvc_bulk_pump_try_drain(stack_job.retained_bulk, 100);
+			drained &= uvc_bulk_pump_try_drain(stack_job.retained_bulk, UVC_RETIRE_OOM_DRAIN_MS);
 		if (stack_job.retained_iso)
-			drained &= uvc_iso_pump_try_drain(stack_job.retained_iso, 100);
+			drained &= uvc_iso_pump_try_drain(stack_job.retained_iso, UVC_RETIRE_OOM_DRAIN_MS);
 		if (drained && stack_job.h)
 			uvc_release_and_restore_interfaces(stack_job.h, stack_job.vs_claimed, stack_job.is_iso,
 							   stack_job.vs_iface, stack_job.vc_iface,
@@ -3070,17 +3167,20 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	bool vc_detached = false;
 	bool vs_detached = false;
 	bool progress = false;
+	bool modes_changed = false;
 	struct uvc_active_pump pump = {0};
 	uint64_t received_ns = 0, previous_sequence = 0;
 	bool have_sequence = false;
 	uint64_t parser_gaps = 0, submit_count = 0, submit_total_ns = 0, submit_max_ns = 0;
 	uint64_t max_queue_age_ns = 0, stats_start_ns = 0, stats_bytes = 0, stats_urbs = 0;
 	uint64_t stats_frames = s->frames_out;
+	s->waiting_permission = false;
 	d.chosen = -1;
 	d.bulk_raw_fallback = s->bulk_raw_fallback;
 
 	/* ---- 1. 总线清单里找选中的设备 / 授权 ---- */
 	if (!s->usb_device[0]) {
+		uvc_clear_negotiated_mode(s);
 		set_status_key(s, "Status.NoDeviceSelected", NULL, 0);
 		return false;
 	}
@@ -3093,6 +3193,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	const int sel = find_usb_device(devs, ndev, s->usb_device, s->usb_id);
 	if (sel < 0) {
 		s->bulk_raw_fallback = false;
+		uvc_clear_negotiated_mode(s);
 		const char *args[] = {s->usb_device};
 		set_status_key(s, "Status.DeviceMissing", args, 1);
 		return false;
@@ -3124,6 +3225,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				       : "失败");
 			*perm_requested = true;
 		}
+		s->waiting_permission = true;
 		return false;
 	}
 	*perm_requested = false;
@@ -3200,10 +3302,19 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 		set_status_key(s, "Status.UnsupportedDevice", NULL, 0);
 		goto out;
 	}
-	pthread_mutex_lock(&s->mtx);
-	s->device_mode_count = copy_usable_modes(s->device_modes, &d);
-	snprintf(s->mode_device, sizeof(s->mode_device), "%s", open_name);
-	pthread_mutex_unlock(&s->mtx);
+	{
+		struct uvc_mode scanned[MAX_MODES] = {0};
+		const int scanned_count = copy_usable_modes(scanned, &d);
+		pthread_mutex_lock(&s->mtx);
+		if (strcmp(s->mode_device, open_name) != 0 ||
+		    !uvc_modes_equal(s->device_modes, s->device_mode_count, scanned, scanned_count))
+			modes_changed = true;
+		s->device_mode_count = scanned_count;
+		if (scanned_count > 0)
+			memcpy(s->device_modes, scanned, (size_t)scanned_count * sizeof(scanned[0]));
+		snprintf(s->mode_device, sizeof(s->mode_device), "%s", open_name);
+		pthread_mutex_unlock(&s->mtx);
+	}
 	d.chosen = choose_mode(&d, s);
 	if (d.chosen < 0) {
 		if (s->requested_interval || is_rgb24(s->prefer_fmt))
@@ -3397,6 +3508,14 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	streaming = true;
 	uvc_audio_worker_start(&audio_worker, s, open_name);
 	set_capture_status(s, "Status.Capturing", mode_kind_name(mode->kind), (unsigned)mode->w, (unsigned)mode->h, 0);
+	{
+		const uint32_t neg_iv = d.frame_interval ? d.frame_interval : pick_interval(mode, d.eff_fps);
+		const bool neg_changed = uvc_set_negotiated_mode(s, open_name, mode, neg_iv);
+		if (modes_changed || neg_changed) {
+			modes_changed = false;
+			uvc_notify_properties_updated(s);
+		}
+	}
 	if (d.is_iso) {
 		blog(LOG_INFO, "uvc: 进入 ISO 流循环（端点 0x%02X alt%d，pkt=%u×%u，帧缓冲 %zu 字节）", d.ep_in,
 		     d.vs_alt, (unsigned)d.iso_packet_size, pump.iso_pkts_per_xfer, st.frame_cap);
@@ -3473,6 +3592,10 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				}
 				blog(LOG_WARNING, "uvc: 端点恢复/重新协商结果 %d", nr);
 				if (nr == 0) {
+					if (d.chosen >= 0 && d.chosen < d.n_modes) {
+						mode = &d.modes[d.chosen];
+						fctx.mode = mode;
+					}
 					stream_reset_parse(&st);
 					uvc_raw_payload_init(&raw, st.frame_buf, st.frame_total);
 					uvc_iso_assembler_init(&iso_asm, st.frame_buf, st.frame_cap, st.frame_total,
@@ -3489,6 +3612,12 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 					stats_start_ns = os_gettime_ns();
 					capture_epoch++;
 					uvc_recovery_restart_finished(&recovery, os_gettime_ns());
+					{
+						const uint32_t neg_iv = d.frame_interval ? d.frame_interval
+											 : pick_interval(mode, d.eff_fps);
+						if (uvc_set_negotiated_mode(s, open_name, mode, neg_iv))
+							uvc_notify_properties_updated(s);
+					}
 					continue;
 				}
 			}
@@ -3941,6 +4070,14 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 				abort_stream = true;
 				break;
 			}
+			{
+				const struct uvc_mode *cur_mode =
+					(d.chosen >= 0 && d.chosen < d.n_modes) ? &d.modes[d.chosen] : mode;
+				const uint32_t neg_iv =
+					d.frame_interval ? d.frame_interval : pick_interval(cur_mode, d.eff_fps);
+				if (uvc_set_negotiated_mode(s, open_name, cur_mode, neg_iv))
+					uvc_notify_properties_updated(s);
+			}
 			if (!d.is_iso && !raw_packets && !ensure_bulk_stream_buffer(&st)) {
 				blog(LOG_ERROR, "uvc: 切 YUYV 分配流缓冲失败");
 				set_status_key(s, "Status.OutOfMemoryBuffer", NULL, 0);
@@ -4057,6 +4194,8 @@ out:
 		bfree(st.frame_buf);
 	if (fctx.bgra)
 		bfree(fctx.bgra);
+	if (modes_changed)
+		uvc_notify_properties_updated(s);
 
 	blog(LOG_INFO, "uvc: 本轮采集结束（送出 %llu 帧，丢弃 %llu 帧）", (unsigned long long)s->frames_out,
 	     (unsigned long long)s->frames_dropped);
@@ -4080,7 +4219,11 @@ static void *uvc_thread_main(void *arg)
 		const bool progress = uvc_run_once(s, &perm_requested);
 		if (os_atomic_load_long(&s->shutting_down))
 			break;
-		if (s->frames_out > out_before) {
+		if (s->waiting_permission) {
+			/* User hasn't responded to Android USB permission dialog yet: poll frequently without
+			 * counting this wait toward unresponsive dead-round backoff. */
+			retry_ms = PERM_POLL_MS;
+		} else if (s->frames_out > out_before) {
 			dead_rounds = 0;
 			retry_ms = RETRY_BACKOFF_MIN_MS;
 		} else if (++dead_rounds >= DEAD_ROUND_LIMIT) {
@@ -4275,7 +4418,24 @@ static void uvc_activate(void *data)
 
 static void uvc_deactivate(void *data)
 {
-	uvc_stop_thread(data);
+	struct uvc_source *s = data;
+	uvc_stop_thread(s);
+	uvc_clear_negotiated_mode(s);
+}
+
+static int settings_effective_fmt_kind(obs_data_t *settings)
+{
+	const char *mode = obs_data_get_string(settings, "device_mode");
+	if (mode && *mode) {
+		int kind = -1, width = 0, height = 0;
+		unsigned interval = 0;
+		char extra = 0;
+		if (sscanf(mode, "%d:%d:%d:%u%c", &kind, &width, &height, &interval, &extra) == 4 &&
+		    kind >= MODE_MJPEG && kind <= MODE_P010 && width >= 16 && width <= 7680 && height >= 16 &&
+		    height <= 4320 && interval >= 41666 && interval <= 10000000)
+			return kind;
+	}
+	return fmt_string_to_kind(obs_data_get_string(settings, "video_format"));
 }
 
 static void uvc_update(void *data, obs_data_t *settings)
@@ -4299,15 +4459,27 @@ static void uvc_update(void *data, obs_data_t *settings)
 		pthread_mutex_unlock(&s->mtx);
 	}
 	const bool unbuffered = obs_data_get_bool(settings, "yuv_unbuffered");
+	const bool new_yuv_low_latency = obs_data_get_bool(settings, "yuv_low_latency");
+	const bool new_raw_ll = new_yuv_low_latency && is_yuv_mode_kind(settings_effective_fmt_kind(settings));
+	const bool raw_ll_changed = new_raw_ll != raw_low_latency(s);
 	bool changed = (dev_changed && !path_synced) || manual_change ||
 		       strcmp(obs_data_get_string(settings, "device_mode"), s->mode_setting) != 0 ||
-		       obs_data_get_bool(settings, "yuv_low_latency") != s->yuv_low_latency ||
+		       raw_ll_changed ||
 		       obs_data_get_int(settings, "yuv_colorspace") != s->colorspace ||
 		       obs_data_get_int(settings, "audio_device") != s->audio_device;
-	if (changed)
+	if (changed) {
 		uvc_stop_thread(s);
+		uvc_clear_negotiated_mode(s);
+		if (dev_changed && !path_synced) {
+			pthread_mutex_lock(&s->mtx);
+			s->device_mode_count = 0;
+			s->mode_device[0] = '\0';
+			pthread_mutex_unlock(&s->mtx);
+		}
+	}
 	atomic_store_explicit(&s->color_range, uvc_color_range(settings), memory_order_relaxed);
 	if (!changed) {
+		s->yuv_low_latency = new_yuv_low_latency;
 		if (path_synced) {
 			pthread_mutex_lock(&s->mtx);
 			snprintf(s->usb_device, sizeof(s->usb_device), "%s", dev);
@@ -4424,15 +4596,29 @@ static void add_mode_option(obs_property_t *list, const struct uvc_mode *mode, u
 		if (strcmp(obs_property_list_item_string(list, i), value) == 0)
 			return;
 	}
-	char width[8], height[8], fps[16];
-	snprintf(width, sizeof(width), "%u", (unsigned)mode->w);
-	snprintf(height, sizeof(height), "%u", (unsigned)mode->h);
-	snprintf(fps, sizeof(fps), "%.4g", 10000000.0 / interval);
-	const char *args[] = {mode_kind_name(mode->kind), width, height, fps};
 	struct dstr label;
-	obs_android_format_locale(&label, obs_module_text("DeviceMode.Label"), args, 4);
+	uvc_format_mode_label(&label, mode->kind, mode->w, mode->h, interval);
 	obs_property_list_add_string(list, label.array, value);
 	dstr_free(&label);
+}
+
+static void update_yuv_option_visibility(obs_properties_t *props, obs_data_t *settings)
+{
+	const bool yuv = is_yuv_mode_kind(settings_effective_fmt_kind(settings));
+	const bool yuv_strict = yuv && obs_data_get_bool(settings, "yuv_low_latency");
+	obs_property_t *latency = obs_properties_get(props, "yuv_low_latency");
+	obs_property_t *unbuffered = obs_properties_get(props, "yuv_unbuffered");
+	if (latency)
+		obs_property_set_visible(latency, yuv);
+	if (unbuffered)
+		obs_property_set_visible(unbuffered, yuv_strict);
+}
+
+static bool on_yuv_options_change(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+	update_yuv_option_visibility(props, settings);
+	return true;
 }
 
 static bool on_mode_change(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
@@ -4443,6 +4629,7 @@ static bool on_mode_change(obs_properties_t *props, obs_property_t *property, ob
 	obs_property_set_visible(obs_properties_get(props, "height"), manual);
 	obs_property_set_visible(obs_properties_get(props, "fps"), manual);
 	obs_property_set_visible(obs_properties_get(props, "video_format"), manual);
+	update_yuv_option_visibility(props, settings);
 	return true;
 }
 
@@ -4489,18 +4676,49 @@ static void load_audio_inputs(struct uvc_source *s, obs_property_t *list, const 
 static bool on_usb_device_change(void *data, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(property);
+	struct uvc_source *s = data;
 	const char *name = obs_data_get_string(settings, "usb_device");
 	char resolved[OBS_ANDROID_USB_NAME_LEN] = {0};
-	if (resolve_usb_device_path(data, name, resolved) && strcmp(resolved, name) != 0)
+	if (resolve_usb_device_path(s, name, resolved) && strcmp(resolved, name) != 0)
 		obs_data_set_string(settings, "usb_device", resolved);
 	const char *effective = resolved[0] ? resolved : name;
 	const char *selected = obs_data_get_string(settings, "device_mode");
+
+	bool neg_valid = false;
+	enum uvc_mode_kind neg_kind = MODE_MJPEG;
+	uint16_t neg_w = 0;
+	uint16_t neg_h = 0;
+	uint32_t neg_iv = 0;
+	char neg_dev[OBS_ANDROID_USB_NAME_LEN] = {0};
+	if (s) {
+		pthread_mutex_lock(&s->mtx);
+		neg_valid = s->negotiated_valid;
+		neg_kind = s->negotiated_kind;
+		neg_w = s->negotiated_w;
+		neg_h = s->negotiated_h;
+		neg_iv = s->negotiated_interval;
+		memcpy(neg_dev, s->negotiated_device, sizeof(neg_dev));
+		pthread_mutex_unlock(&s->mtx);
+	}
+
 	obs_property_t *list = obs_properties_get(props, "device_mode");
 	obs_property_list_clear(list);
-	obs_property_list_add_string(list, obs_module_text("DeviceMode.Manual"), "");
+	if (!*selected && neg_valid && *effective && strcmp(neg_dev, effective) == 0 && neg_iv > 0) {
+		struct dstr mode_label;
+		uvc_format_mode_label(&mode_label, neg_kind, neg_w, neg_h, neg_iv);
+		const char *args[] = {mode_label.array ? mode_label.array : ""};
+		struct dstr manual_label;
+		obs_android_format_locale(&manual_label, obs_module_text("DeviceMode.ManualNegotiated"), args, 1);
+		obs_property_list_add_string(
+			list, manual_label.array ? manual_label.array : obs_module_text("DeviceMode.Manual"), "");
+		dstr_free(&manual_label);
+		dstr_free(&mode_label);
+	} else {
+		obs_property_list_add_string(list, obs_module_text("DeviceMode.Manual"), "");
+	}
 	if (*effective) {
 		struct uvc_mode modes[MAX_MODES];
-		const int count = read_device_modes(data, effective, modes);
+		const int count = read_device_modes(s, effective, modes);
 		for (int i = 0; i < count; ++i) {
 			const struct uvc_mode *mode = &modes[i];
 			for (int j = 0; j < mode->n_intervals; ++j)
@@ -4525,7 +4743,7 @@ static bool on_usb_device_change(void *data, obs_properties_t *props, obs_proper
 			obs_property_list_item_disable(list, item, true);
 		}
 	}
-	load_audio_inputs(data, obs_properties_get(props, "audio_device"), effective);
+	load_audio_inputs(s, obs_properties_get(props, "audio_device"), effective);
 	return on_mode_change(props, list, settings);
 }
 
@@ -4580,6 +4798,7 @@ static obs_properties_t *uvc_properties(void *data)
 	obs_property_list_add_string(p, obs_module_text("VideoFormat.Bgr24"), "bgr24");
 	obs_property_list_add_string(p, obs_module_text("VideoFormat.Auto"), "");
 	obs_property_set_long_description(p, obs_module_text("VideoFormat.Description"));
+	obs_property_set_modified_callback(p, on_yuv_options_change);
 
 	obs_property_t *color = obs_properties_add_list(props, "yuv_colorspace", obs_module_text("YuvColorSpace"),
 							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -4606,6 +4825,7 @@ static obs_properties_t *uvc_properties(void *data)
 	obs_property_set_long_description(
 		latency,
 		obs_module_text("YuvPassthrough.Description"));
+	obs_property_set_modified_callback(latency, on_yuv_options_change);
 
 	obs_property_t *unbuffered = obs_properties_add_bool(props, "yuv_unbuffered", obs_module_text("YuvUnbuffered"));
 	obs_property_set_long_description(unbuffered,

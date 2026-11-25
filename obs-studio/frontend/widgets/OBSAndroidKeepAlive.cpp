@@ -128,6 +128,25 @@ bool obsAndroidKeepAliveSetRunning(bool running, const char *state, QString *det
 	return ok;
 }
 
+void obsAndroidKeepAliveSetScreenOn(bool enabled, bool outputActive)
+{
+	const QJniObject act = hostActivity();
+	if (!act.isValid())
+		return;
+
+	bool wantOn = false;
+	if (enabled) {
+		wantOn = outputActive;
+		if (!wantOn) {
+			wantOn = QJniObject::callStaticMethod<jboolean>(
+					 "com/obsproject/studio/ObsProjectionHost", "projectionActive", "()Z") != 0;
+		}
+	}
+
+	QJniObject::callStaticMethod<void>(kServiceClass, "setKeepScreenOn", "(Landroid/app/Activity;Z)V",
+					   act.object<jobject>(), jboolean(wantOn));
+}
+
 QString obsAndroidKeepAliveStatus()
 {
 	const QString desc = callDescribe();

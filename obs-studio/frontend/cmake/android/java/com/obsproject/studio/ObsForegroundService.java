@@ -29,6 +29,7 @@ package com.obsproject.studio;
 import com.obsproject.studio.R;
 
 import android.Manifest;
+import android.app.Activity;
 import android.content.pm.PackageManager;
 import android.app.ActivityManager;
 import android.app.Notification;
@@ -47,6 +48,8 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
+import android.view.Window;
+import android.view.WindowManager;
 
 import java.util.Locale;
 
@@ -79,6 +82,12 @@ public final class ObsForegroundService extends Service {
     private static volatile boolean startedForProjection = false;
     /** OBS 前端选定的语言（BCP-47，如 "en-US" / "zh-CN"），空串表示跟随系统 */
     private static volatile String appLocale = "";
+
+    private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
+    private static volatile boolean desiredKeepScreenOn = false;
+    private static volatile boolean screenKeepOnActive = false;
+    private static int lastKeepScreenOnActivityHash = 0;
+    private static boolean lastKeepScreenOnRequested = false;
 
     private static volatile boolean cameraSourceActive;
     private static volatile boolean microphoneSourceActive;
@@ -183,11 +192,49 @@ public final class ObsForegroundService extends Service {
         return "start=" + startRequests + " stop=" + stopRequests + " created=" + createdCount
                + " destroyed=" + destroyedCount + " running=" + (instance != null)
                + " state=" + lastState + " 类型=" + lastPromoteType + " wakelock=" + wakeLockHeld
+               + " screenOn=" + screenKeepOnActive
                + " err=" + lastError;
     }
 
     public static synchronized boolean isRunning() {
         return instance != null;
+    }
+
+    public static synchronized void setKeepScreenOn(final Activity activity, final boolean keepOn) {
+        desiredKeepScreenOn = keepOn;
+        if (activity == null) {
+            return;
+        }
+        final int actHash = System.identityHashCode(activity);
+        if (keepOn == lastKeepScreenOnRequested && actHash == lastKeepScreenOnActivityHash &&
+                screenKeepOnActive == keepOn) {
+            return;
+        }
+        lastKeepScreenOnRequested = keepOn;
+        lastKeepScreenOnActivityHash = actHash;
+        MAIN_HANDLER.post(new Runnable() {
+            @Override
+            public void run() {
+                if (activity.isFinishing() || activity.isDestroyed()) {
+                    return;
+                }
+                final Window window = activity.getWindow();
+                if (window == null) {
+                    return;
+                }
+                final boolean want = desiredKeepScreenOn;
+                final boolean hasFlag =
+                        (window.getAttributes().flags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0;
+                if (want && !hasFlag) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    Log.i(TAG, "已开启屏幕常亮 (FLAG_KEEP_SCREEN_ON)");
+                } else if (!want && hasFlag) {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    Log.i(TAG, "已恢复系统自动息屏 (清除 FLAG_KEEP_SCREEN_ON)");
+                }
+                screenKeepOnActive = want;
+            }
+        });
     }
 
     /**

@@ -452,6 +452,7 @@ void OBSApp::InitUserConfigDefaults()
 	config_set_default_bool(userConfig, "BasicWindow", "SideDocks", true);
 
 #ifdef __ANDROID__
+	config_set_default_bool(userConfig, "BasicWindow", "KeepScreenOnDuringCapture", true);
 	config_set_default_bool(userConfig, "BasicWindow", "VerticalVolumeControl", false);
 #else
 	config_set_default_bool(userConfig, "BasicWindow", "VerticalVolumeControl", true);

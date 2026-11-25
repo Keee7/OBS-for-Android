@@ -31,6 +31,8 @@
 #ifdef __ANDROID__
 #include <utility/AndroidCodecCapabilities.hpp>
 #include <utility/android-window-fit.hpp>
+#include <widgets/OBSAndroidKeepAlive.hpp>
+#include <QCheckBox>
 #endif
 #include <utility/BaseLexer.hpp>
 #include <utility/FFmpegCodec.hpp>
@@ -389,6 +391,15 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	HookWidget(ui->keepRecordStreamStops,CHECK_CHANGED,  GENERAL_CHANGED);
 	HookWidget(ui->replayWhileStreaming, CHECK_CHANGED,  GENERAL_CHANGED);
 	HookWidget(ui->keepReplayStreamStops,CHECK_CHANGED,  GENERAL_CHANGED);
+#ifdef __ANDROID__
+	keepScreenOnDuringCapture =
+		new QCheckBox(QTStr("Basic.Settings.General.KeepScreenOnDuringCapture"), ui->groupBox_16);
+	keepScreenOnDuringCapture->setObjectName(QStringLiteral("keepScreenOnDuringCapture"));
+	if (ui->formLayout_2) {
+		ui->formLayout_2->addRow(QString(), keepScreenOnDuringCapture);
+	}
+	HookWidget(keepScreenOnDuringCapture, CHECK_CHANGED, GENERAL_CHANGED);
+#endif
 	HookWidget(ui->systemTrayEnabled,    CHECK_CHANGED,  GENERAL_CHANGED);
 	HookWidget(ui->systemTrayWhenStarted,CHECK_CHANGED,  GENERAL_CHANGED);
 	HookWidget(ui->systemTrayAlways,     CHECK_CHANGED,  GENERAL_CHANGED);
@@ -1407,6 +1418,14 @@ void OBSBasicSettings::LoadGeneralSettings()
 	bool keepReplayStreamStops =
 		config_get_bool(App()->GetUserConfig(), "BasicWindow", "KeepReplayBufferStreamStops");
 	ui->keepReplayStreamStops->setChecked(keepReplayStreamStops);
+
+#ifdef __ANDROID__
+	if (keepScreenOnDuringCapture) {
+		bool keepScreenOn =
+			config_get_bool(App()->GetUserConfig(), "BasicWindow", "KeepScreenOnDuringCapture");
+		keepScreenOnDuringCapture->setChecked(keepScreenOn);
+	}
+#endif
 
 	bool systemTrayEnabled = config_get_bool(App()->GetUserConfig(), "BasicWindow", "SysTrayEnabled");
 	ui->systemTrayEnabled->setChecked(systemTrayEnabled);
@@ -3310,6 +3329,15 @@ void OBSBasicSettings::SaveGeneralSettings()
 		config_set_bool(App()->GetUserConfig(), "BasicWindow", "KeepReplayBufferStreamStops",
 				ui->keepReplayStreamStops->isChecked());
 	}
+
+#ifdef __ANDROID__
+	if (keepScreenOnDuringCapture && WidgetChanged(keepScreenOnDuringCapture)) {
+		const bool enabled = keepScreenOnDuringCapture->isChecked();
+		config_set_bool(App()->GetUserConfig(), "BasicWindow", "KeepScreenOnDuringCapture", enabled);
+		obsAndroidKeepAliveSetScreenOn(
+			enabled, main->StreamingActive() || main->RecordingActive() || main->ReplayBufferActive());
+	}
+#endif
 
 	if (WidgetChanged(ui->systemTrayEnabled)) {
 		config_set_bool(App()->GetUserConfig(), "BasicWindow", "SysTrayEnabled",

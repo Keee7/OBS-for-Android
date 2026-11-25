@@ -37,6 +37,7 @@ class Auth;
 class OBSBasic;
 class OBSHotkeyWidget;
 class OBSPropertiesView;
+class QCheckBox;
 struct FFmpegFormat;
 struct OBSTheme;
 
@@ -189,6 +190,7 @@ private:
 
 	void UpdateColorFormatSpaceWarning();
 #ifdef __ANDROID__
+	QCheckBox *keepScreenOnDuringCapture = nullptr;
 	void UpdateAndroidHevcMain10Options();
 #endif
 
