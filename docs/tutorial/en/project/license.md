@@ -17,6 +17,7 @@ This project is a community-maintained Android port of [OBS Studio](https://gith
 | **SRT** | MPL-2.0 | SRT media ingest |
 | **librist** | BSD-2-Clause | RIST media ingest |
 | **libusb** | LGPL-2.1-or-later | User-space USB UVC capture and Nikon PTP communication |
+| **libuvc 0.0.9** | BSD-3-Clause | Bundled Android-hardened UVC compatibility capture backend |
 | **libxml2 / cJSON** | MIT | DASH manifest parsing and configuration/media helpers |
 | **mbedTLS / curl / FreeType / libjpeg-turbo / Jansson / RNNoise / SpeexDSP** | Upstream permissive licenses | RTMPS TLS transport, text rendering, JPEG decode, audio noise suppression |
 

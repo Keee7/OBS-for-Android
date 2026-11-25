@@ -71,7 +71,8 @@
 | --- | --- |
 | **屏幕与单应用采集** | MediaProjection GPU 零拷贝采集（`SurfaceTexture`/OES，可选 CPU 回退），支持 Android 14+ 单应用窗口尺寸自适应及直通/预乘 Alpha 透明合成。 |
 | **WebView 浏览器源** | 基于系统 WebView 的 GPU 纹理采集，支持透明背景弹幕叠加、网页/本地 HTML、自定义 CSS、触摸交互及“通过 OBS 控制音频”。 |
-| **USB 与相机采集** | 支持 USB 3.0 UVC 采集卡/摄像头（`YUYV`、`NV12`、`RGB24`、`BGR24`、`MJPEG`，自动匹配 UAC 音频与断流重连）、内置 Camera2 NDK 与 Nikon Z 系列 PTP 实时取景。 |
+| **USB 与相机采集** | 双后端 USB UVC 采集（内置原生 + Android 加固版 `libuvc 0.0.9`；支持 `YUYV`、`UYVY`、`NV12`、`P010`、`RGB24`、`BGR24`、`MJPEG`、Sony A7M4 等大载荷 Bulk 相机、自动匹配 UAC 音频与断流重连）、内置 Camera2 NDK 与 Nikon Z 系列 PTP 实时取景。 |
+| **NDI® 局域网收发（BYOR）** | 原生 NDI® 输入源（`NsdManager` 自动发现与手动 IP）与主程序 NDI® 输出，支持应用内安全导入官方 Android `libndi.so`。 |
 | **媒体与网络拉流** | FFmpeg MediaCodec 硬件解码（`H.264`、`HEVC`、`VP8`、`VP9`、`AV1`，失败自动软解）；支持文档 URI 与 `HTTP(S)`、`HLS`、`DASH`、`RTSP(S)`、`RTMP(S)`、`SRT`、`RIST`、`UDP`/`RTP`/`TCP` 流。 |
 | **AAudio 音频输入** | 原生低延迟 AAudio 引擎，适配机身麦克风、有线耳机与 USB 声卡/采集卡伴音输入。 |
 

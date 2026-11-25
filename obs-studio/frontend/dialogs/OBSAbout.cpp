@@ -43,7 +43,7 @@ QString GetAndroidAboutVersionName()
 			version = verObj.toString().trimmed();
 	}
 	if (version.isEmpty())
-		version = QStringLiteral("0.2.7");
+		version = QStringLiteral("0.2.8");
 	return version;
 }
 

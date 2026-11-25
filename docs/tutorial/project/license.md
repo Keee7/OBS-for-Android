@@ -17,6 +17,7 @@
 | **SRT** | MPL-2.0 | SRT 媒体流拉取支持 |
 | **librist** | BSD-2-Clause | RIST 媒体流拉取支持 |
 | **libusb** | LGPL-2.1-or-later | 用户态 USB UVC 采集卡与 Nikon PTP 通信 |
+| **libuvc 0.0.9** | BSD-3-Clause | 内嵌 Android 加固版 UVC 兼容采集后端 |
 | **libxml2 / cJSON** | MIT | DASH 解析与配置/媒体辅助 |
 | **mbedTLS / curl / FreeType / libjpeg-turbo / Jansson / RNNoise / SpeexDSP** | 见各自上游许可证 | TLS 加密推流、字体渲染、JPEG 解码、音频降噪等 |
 
