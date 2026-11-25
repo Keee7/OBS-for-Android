@@ -71,7 +71,7 @@ An independent community Android port of [OBS Studio](https://github.com/obsproj
 | --- | --- |
 | **Screen & Single-App Capture** | Zero-copy MediaProjection GPU capture (`SurfaceTexture`/OES, optional CPU fallback), Android 14+ single-app resize tracking, and Straight/Premultiplied Alpha compositing. |
 | **WebView Browser Source** | Android System WebView GPU capture for transparent overlays &amp; danmaku widgets, local HTML/custom CSS, touch interaction, and "Control Audio via OBS" mixer routing. |
-| **USB & Camera Sources** | Dual-backend USB UVC capture (Built-in Native + Android-hardened `libuvc 0.0.9`; `YUYV`, `UYVY`, `NV12`, `P010`, `RGB24`, `BGR24`, `MJPEG`, large-payload Bulk cameras like Sony A7M4, auto-matched UAC audio &amp; watchdog recovery), built-in Camera2 NDK, and Nikon Z-series PTP Live View. |
+| **USB & Camera Sources** | Dual-backend USB UVC capture (Built-in Native + Android-hardened `libuvc 0.0.9`; `YUYV`, `UYVY`, `NV12`, `P010`, `RGB24`, `BGR24`, `MJPEG`, large-payload Bulk cameras, auto-matched UAC audio &amp; watchdog recovery), built-in Camera2 NDK, and Nikon Z-series PTP Live View. |
 | **NDI® LAN I/O (BYOR)** | Native NDI® Input Source (`NsdManager` + manual IP discovery) and Main Program NDI® Output via user-imported official Android `libndi.so`. |
 | **Media & Network Streams** | MediaCodec hardware decoding (`H.264`, `HEVC`, `VP8`, `VP9`, `AV1`) with software fallback; Document URI playback and `HTTP(S)`, `HLS`, `DASH`, `RTSP(S)`, `RTMP(S)`, `SRT`, `RIST`, `UDP`/`RTP`/`TCP` feeds. |
 | **AAudio Input** | Low-latency native AAudio capture for built-in microphones, wired headsets, and USB audio interfaces / capture cards. |

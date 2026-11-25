@@ -12,7 +12,7 @@ Using **UVC Camera (Android USB)**, you can feed HDMI video from a Nintendo Swit
 ## 2. Capture Backend, Video Modes & Formats
 
 * **Capture Backend (Dual-Backend Architecture)**:
-  * **Built-in Native Engine (Default)**: Zero-copy ring buffer supporting non-standard capture cards (e.g., MS2130), large-payload Bulk cameras (such as Sony A7M4 / ZV-E10 with `> 64 KiB` payloads and ZLP termination), and standard ISO webcams. Recommended for most setups.
+  * **Built-in Native Engine (Default)**: Zero-copy ring buffer supporting standard ISO webcams, capture cards, and large-payload Bulk cameras (`> 64 KiB` payloads with ZLP termination). Recommended for most setups.
   * **libuvc Compatibility Engine**: Powered by an Android-hardened `libuvc 0.0.9` backend (64 KiB chunked Bulk URBs to stay within Android `usbfs` limits, bounded-timeout stop). If an unusual camera or capture card fails to show video under the default engine, switch here—the **Device Video Mode** list refreshes immediately.
 * **Device Video Mode**:
   * **Hardware Capability Preset** (e.g., `MJPEG 1920×1080 · 60 FPS`): Locks directly onto an exact descriptor reported by the capture card—most reliable.
