@@ -263,7 +263,7 @@ static QString probeNdiRuntimeVersion(const QString &soPath, QString *errOut = n
 
 static void openNdiSdkDownloadPage()
 {
-	const QString url = QStringLiteral("https://ndi.video/for-developers/ndi-sdk/");
+	const QString url = QStringLiteral("https://downloads.ndi.tv/SDK/NDI_SDK_Android/Install_NDI_SDK_v6_Android.tar.gz");
 	const QJniObject activity = QJniObject::callStaticObjectMethod(
 		"org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
 	if (activity.isValid()) {
@@ -300,7 +300,7 @@ static void showNdiOutputSettingsDialog(QWidget *parent)
 
 	auto *rtBtns = new QHBoxLayout();
 	auto *importBtn = new QPushButton(QStringLiteral("导入官方 NDI SDK / libndi.so…"), rtGroup);
-	auto *downloadBtn = new QPushButton(QStringLiteral("官方下载页"), rtGroup);
+	auto *downloadBtn = new QPushButton(QStringLiteral("下载官方 SDK"), rtGroup);
 	auto *removeBtn = new QPushButton(QStringLiteral("移除运行库"), rtGroup);
 	rtBtns->addWidget(importBtn);
 	rtBtns->addWidget(downloadBtn);
@@ -334,7 +334,7 @@ static void showNdiOutputSettingsDialog(QWidget *parent)
 		}
 		rtStatus->setText(QStringLiteral(
 			"状态：未安装官方 NDI® 运行库。为遵循 GPLv2 与 NDI SDK 许可协议，公开版 APK 不内置闭源 libndi.so；"
-			"请从 ndi.video 下载 NDI SDK for Android（.tar.gz / .sh 或 arm64-v8a/libndi.so）后点击下方导入。"));
+			"请点击下方「下载官方 SDK」通过浏览器下载官方 .tar.gz（无需手动解压），再点击「导入」选择该文件。"));
 	};
 	refreshRuntimeStatus();
 
