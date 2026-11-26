@@ -2,7 +2,14 @@
 
 以下记录整理自本仓库主要发布节点与工程提交历史（完整提交记录见 [GitHub Commits](https://github.com/Keee7/OBS-for-Android/commits/main) 与 [Releases](https://github.com/Keee7/OBS-for-Android/releases)）。
 
-## v0.2.8（当前基线）
+## v0.2.9（当前基线）
+
+* **UVC 低延迟平滑缓冲**：新增按时间预算控制的异步缓冲与自动追帧，并升级批量帧时间戳平滑，显著提升采集流畅度并加快卡顿恢复。
+* **UVC 级联控制与 USB 安全弹出**：将 UVC 参数拆分为格式 → 分辨率 → 帧率级联选择，统一 `libuvc` 与原生后端锁帧行为，自动选设备时过滤非视频 USB 外设；为 UVC 与尼康源新增安全弹出 / 重连功能，并修复重复弹 USB 授权的问题。
+* **浏览器桌面模式**：浏览器源新增桌面模式（支持 Client Hints 与桌面视口）及适应宽度选项。
+* **NDI® 与常规维护**：NDI® 设置改为直连官方 NDI v6 Android SDK 压缩包，修复重复发现 NDI 源，加固 USB / 存储宿主桥并完善插件装载文档与 SPDX 声明。
+
+## v0.2.8
 
 * **UVC 双后端与大载荷 Bulk 兼容**：新增“内置原生引擎（默认）/ `libuvc` 兼容引擎”即时切换；内置引擎支持大载荷 Bulk 重组与 ZLP 帧边界，补齐 `UYVY` 格式、`P010` 能力过滤与重连后 USB 授权路径刷新，并加固 `libuvc` 停流回收与黑屏回退。
 * **原生 NDI® 局域网收发（BYOR）**：新增 NDI® 输入源（自动发现与手动 IP）与主画面 NDI® 输出，支持应用内安全导入官方 `libndi.so`。

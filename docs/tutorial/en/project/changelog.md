@@ -2,7 +2,14 @@
 
 Highlights compiled from major repository releases and commit milestones (full history on [GitHub Commits](https://github.com/Keee7/OBS-for-Android/commits/main) and [Releases](https://github.com/Keee7/OBS-for-Android/releases)).
 
-## v0.2.8 (Current Baseline)
+## v0.2.9 (Current Baseline)
+
+* **UVC Low-Latency Smoothing**: Added time-budgeted buffering with automatic backlog recovery and upgraded batch timestamp smoothing, significantly improving capture smoothness and stall recovery.
+* **UVC Controls & Safe USB Eject**: Split UVC settings into cascading Format → Resolution → Frame Rate selectors, aligned `libuvc` frame-rate locking with the native engine, filtered non-video USB devices on auto-select, and added Safe Eject / Reconnect for UVC and Nikon USB sources while fixing repeated USB permission prompts.
+* **Browser Desktop Mode**: Added Desktop Mode (with Client Hints and desktop-scale viewport) and Fit Width options to the Android browser source.
+* **NDI® & Maintenance**: Linked NDI® Settings directly to the official NDI v6 Android SDK archive, deduplicated discovered NDI sources, hardened USB/storage bridges, and cleaned up Android plugin docs and SPDX headers.
+
+## v0.2.8
 
 * **UVC Dual-Backend & Large-Payload Bulk Support**: Added selectable Built-in Native (default) and Android-hardened `libuvc 0.0.9` backends with instant mode refresh; added large-payload Bulk reassembly with ZLP handling, `UYVY` support, `P010` capability filtering, refreshed USB permission paths after replug, and hardened `libuvc` teardown and fallback.
 * **Native NDI® LAN I/O (BYOR)**: Added NDI® Input Source (mDNS + manual IP discovery) and Main Program NDI® Output with an in-app official `libndi.so` importer.
