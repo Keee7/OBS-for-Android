@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
     Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
@@ -54,29 +55,6 @@ static const char *get_root_path(void)
 			dstr_copy(&root_path, env);
 	}
 	return root_path.len ? root_path.array : NULL;
-}
-
-void add_default_module_paths(void)
-{
-	const char *root = get_root_path();
-
-	if (!root) {
-		blog(LOG_ERROR,
-		     "%s is not set: OBS cannot locate its plugins. The Java layer must extract the APK assets "
-		     "into a private directory and export that path before calling obs_startup().",
-		     ROOT_PATH_ENV);
-		return;
-	}
-
-	struct dstr bin = {0};
-	struct dstr data = {0};
-
-	dstr_printf(&bin, "%s/lib", root);
-	dstr_printf(&data, "%s/share/obs/obs-plugins/%%module%%", root);
-	obs_add_module_path(bin.array, data.array);
-
-	dstr_free(&data);
-	dstr_free(&bin);
 }
 
 char *find_libobs_data_file(const char *file)
