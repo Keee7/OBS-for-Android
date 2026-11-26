@@ -44,6 +44,8 @@ struct obs_android_usb_device {
 	char label[OBS_ANDROID_USB_LABEL_LEN];
 	/** UsbManager.hasPermission() */
 	bool has_permission;
+	/** 设备本身或任一接口为 USB_CLASS_VIDEO (0x0E)，用于 UVC 自动选设备时过滤非视频外设 */
+	bool is_video;
 };
 
 /** App（壳）注册进来的回调表。任何一项都可以是 NULL，libobs 的包装函数会按"失败"处理。 */
@@ -327,7 +329,7 @@ EXPORT uint32_t obs_android_screen_read_audio(int16_t *out, uint32_t max_frames)
  * OBS graphics thread; UI work is queued by the host and never waited for. */
 struct obs_android_browser_host {
  void *(*create)(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css,
-		 bool transparent, bool reroute_audio);
+		 bool transparent, bool reroute_audio, bool desktop_mode, bool fit_width);
  /* Reader mode, selected by create(texture = 0): instead of binding a
   * SurfaceTexture, the host hands over the compositor's own buffers. Returns
   * the AHardwareBuffer* of the newest frame, valid until the next call, or NULL
@@ -348,7 +350,8 @@ struct obs_android_browser_host {
 };
 EXPORT void obs_android_set_browser_host(const struct obs_android_browser_host *host);
 EXPORT void *obs_android_browser_create(uint32_t texture, uint32_t width, uint32_t height, const char *url,
-					const char *css, bool transparent, bool reroute_audio);
+					const char *css, bool transparent, bool reroute_audio, bool desktop_mode,
+					bool fit_width);
 /* Reader mode only; see the host struct. */
 EXPORT void *obs_android_browser_take_buffer(void *handle);
 /* -1: failed; 0: no new frame; 1: matrix updated. */

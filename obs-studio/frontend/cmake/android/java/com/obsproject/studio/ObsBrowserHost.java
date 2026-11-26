@@ -22,6 +22,7 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.OpenableColumns;
 import android.util.Base64;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Surface;
 import android.view.MotionEvent;
@@ -32,10 +33,16 @@ import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
+import androidx.webkit.UserAgentMetadata;
+import androidx.webkit.WebSettingsCompat;
+import androidx.webkit.WebViewFeature;
 import org.json.JSONObject;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.lang.reflect.Method;
@@ -283,6 +290,8 @@ public final class ObsBrowserHost {
     private volatile String localDisplayName;
     private final boolean allowFileAccess;
     private final boolean transparent;
+    private final boolean desktopMode;
+    private final boolean fitWidth;
     private volatile boolean closed, failed;
     // The following fields are touched only on the main thread.
     private VirtualDisplay display;
@@ -292,13 +301,17 @@ public final class ObsBrowserHost {
     private boolean touching;
     private long downTime;
 
+    private static final Pattern CHROME_VERSION_PATTERN = Pattern.compile("Chrome/\\d+(?:\\.\\d+)*");
+
     private ObsBrowserHost(Context context, int id, int width, int height, String url, String css,
-                           boolean transparent, boolean audioReroute) {
+                           boolean transparent, boolean audioReroute, boolean desktopMode, boolean fitWidth) {
         this.context = context.getApplicationContext();
         String cleanUrl = url == null ? "" : url.trim();
         this.width = width; this.height = height; this.url = cleanUrl; this.css = css;
         this.transparent = transparent;
         this.audioReroute = audioReroute;
+        this.desktopMode = desktopMode;
+        this.fitWidth = fitWidth;
         this.readerMode = id == 0;
         if (cleanUrl.regionMatches(true, 0, "content://", 0, 10)) {
             this.localContentUri = Uri.parse(cleanUrl);
@@ -330,10 +343,12 @@ public final class ObsBrowserHost {
         ui.post(this::startOnUi);
     }
     public static ObsBrowserHost create(Context context, int id, int width, int height, String url, String css,
-                                        boolean transparent, boolean audioReroute) {
+                                        boolean transparent, boolean audioReroute, boolean desktopMode, boolean fitWidth) {
         if (context == null || width <= 0 || height <= 0) return null;
-        try { return new ObsBrowserHost(context, id, width, height, url, css, transparent, audioReroute); }
-        catch (RuntimeException e) { Log.e(TAG, "Surface creation failed", e); return null; }
+        try {
+            return new ObsBrowserHost(context, id, width, height, url, css, transparent, audioReroute,
+                    desktopMode, fitWidth);
+        } catch (RuntimeException e) { Log.e(TAG, "Surface creation failed", e); return null; }
     }
     private void startOnUi() {
         if (closed) return;
@@ -351,8 +366,10 @@ public final class ObsBrowserHost {
                 reader.setOnImageAvailableListener(r -> frame.set(true), ui);
                 target = reader.getSurface();
             }
-            display = manager.createVirtualDisplay("OBS browser", width, height,
-                    context.getResources().getDisplayMetrics().densityDpi, target,
+            final int densityDpi = desktopMode
+                    ? DisplayMetrics.DENSITY_MEDIUM
+                    : context.getResources().getDisplayMetrics().densityDpi;
+            display = manager.createVirtualDisplay("OBS browser", width, height, densityDpi, target,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY |
                             DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION);
             if (display == null) throw new IllegalStateException("createVirtualDisplay returned null");
@@ -368,7 +385,8 @@ public final class ObsBrowserHost {
             presentation.setContentView(container);
             configureWindow(presentation.getWindow(), transparent);
             presentation.show();
-            Log.i(TAG, "browser " + width + "x" + height + " transparent=" + transparent
+            Log.i(TAG, "browser " + width + "x" + height + " dpi=" + densityDpi + " desktop=" + desktopMode
+                    + " fitWidth=" + fitWidth + " transparent=" + transparent
                     + " output=" + (readerMode ? "imagereader" : "surfacetexture"));
             createWebSafe();
         } catch (RuntimeException e) { Log.e(TAG, "Browser display creation failed", e); failed = true; cleanupUi(); }
@@ -504,6 +522,45 @@ public final class ObsBrowserHost {
             return localNotFoundResponse();
         }
     }
+    private static String buildDesktopUserAgent(Context ctx) {
+        String chromeToken = "Chrome/131.0.0.0";
+        try {
+            String defUa = WebSettings.getDefaultUserAgent(ctx);
+            if (defUa != null) {
+                Matcher m = CHROME_VERSION_PATTERN.matcher(defUa);
+                if (m.find()) {
+                    chromeToken = m.group(0);
+                }
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Failed to read default WebView UA; using fallback Chrome version", e);
+        }
+        return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                + chromeToken + " Safari/537.36";
+    }
+
+    private static void applyDesktopClientHints(WebSettings settings) {
+        try {
+            if (!WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA)) {
+                Log.i(TAG, "WebView USER_AGENT_METADATA not supported; desktop UA only");
+                return;
+            }
+            UserAgentMetadata current = WebSettingsCompat.getUserAgentMetadata(settings);
+            UserAgentMetadata desktopMeta = new UserAgentMetadata.Builder(current)
+                    .setMobile(false)
+                    .setPlatform("Linux")
+                    .setPlatformVersion("")
+                    .setModel("")
+                    .setArchitecture("x86")
+                    .setBitness(64)
+                    .build();
+            WebSettingsCompat.setUserAgentMetadata(settings, desktopMeta);
+            Log.i(TAG, "Applied desktop Client Hints (mobile=false, platform=Linux, bitness=64)");
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to apply desktop Client Hints; desktop UA still active", t);
+        }
+    }
+
     private void createWeb() {
         if (closed || container == null) return;
         if (localContentUri != null && localVirtualUri == null) {
@@ -517,14 +574,24 @@ public final class ObsBrowserHost {
         }
         web = new WebView(presentation.getContext());
         web.setBackgroundColor(Color.TRANSPARENT);
-        web.getSettings().setJavaScriptEnabled(true);
-        web.getSettings().setDomStorageEnabled(true);
-        web.getSettings().setAllowFileAccess(allowFileAccess);
-        web.getSettings().setAllowContentAccess(false);
-        web.getSettings().setAllowFileAccessFromFileURLs(false);
-        web.getSettings().setAllowUniversalAccessFromFileURLs(false);
+        WebSettings settings = web.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setAllowFileAccess(allowFileAccess);
+        settings.setAllowContentAccess(false);
+        settings.setAllowFileAccessFromFileURLs(false);
+        settings.setAllowUniversalAccessFromFileURLs(false);
+        if (desktopMode) {
+            String desktopUa = buildDesktopUserAgent(presentation.getContext());
+            settings.setUserAgentString(desktopUa);
+            applyDesktopClientHints(settings);
+        }
+        if (fitWidth) {
+            settings.setUseWideViewPort(true);
+            settings.setLoadWithOverviewMode(true);
+        }
         if (audioReroute) {
-            web.getSettings().setMediaPlaybackRequiresUserGesture(false);
+            settings.setMediaPlaybackRequiresUserGesture(false);
             web.addJavascriptInterface(new AudioBridge(), "__obsAudio");
         }
         web.setWebViewClient(new WebViewClient() {

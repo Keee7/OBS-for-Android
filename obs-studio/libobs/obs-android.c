@@ -638,10 +638,12 @@ bool obs_android_finish_replay_document(const char *uri, bool publish)
 static const struct obs_android_browser_host *browser_host;
 void obs_android_set_browser_host(const struct obs_android_browser_host *host) { browser_host = host; }
 void *obs_android_browser_create(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css,
-				 bool transparent, bool reroute_audio)
+				 bool transparent, bool reroute_audio, bool desktop_mode, bool fit_width)
 {
  const struct obs_android_browser_host *h = browser_host;
- return h && h->create ? h->create(texture, width, height, url, css, transparent, reroute_audio) : NULL;
+ return h && h->create ? h->create(texture, width, height, url, css, transparent, reroute_audio, desktop_mode,
+				   fit_width)
+		       : NULL;
 }
 int obs_android_browser_update(void *handle, float transform[16])
 {

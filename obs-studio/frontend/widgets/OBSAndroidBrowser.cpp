@@ -15,7 +15,7 @@ struct BrowserHandle {
 	jintArray audioFormat = nullptr;
 };
 static void *createBrowser(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css,
-			   bool transparent, bool rerouteAudio)
+			   bool transparent, bool rerouteAudio, bool desktopMode, bool fitWidth)
 {
 	QJniObject context = QJniObject::callStaticObjectMethod("org/qtproject/qt/android/QtNative", "getContext",
 								"()Landroid/content/Context;");
@@ -26,9 +26,10 @@ static void *createBrowser(uint32_t texture, uint32_t width, uint32_t height, co
 	auto jcss = QJniObject::fromString(QString::fromUtf8(css ? css : ""));
 	auto object = QJniObject::callStaticObjectMethod(
 		hostClass, "create",
-		"(Landroid/content/Context;IIILjava/lang/String;Ljava/lang/String;ZZ)Lcom/obsproject/studio/ObsBrowserHost;",
+		"(Landroid/content/Context;IIILjava/lang/String;Ljava/lang/String;ZZZZ)Lcom/obsproject/studio/ObsBrowserHost;",
 		context.object<jobject>(), jint(texture), jint(width), jint(height), jurl.object<jstring>(),
-		jcss.object<jstring>(), jboolean(transparent), jboolean(rerouteAudio));
+		jcss.object<jstring>(), jboolean(transparent), jboolean(rerouteAudio), jboolean(desktopMode),
+		jboolean(fitWidth));
 	if (!object.isValid()) {
 		return nullptr;
 	}

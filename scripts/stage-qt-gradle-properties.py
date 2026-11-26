@@ -111,6 +111,31 @@ def _keep_app_locales(build_gradle: Path) -> None:
         build_gradle.write_text(updated, encoding="utf-8", newline="\n")
 
 
+def _ensure_obs_dependencies(build_gradle: Path) -> None:
+    if not build_gradle.is_file():
+        return
+    source = build_gradle.read_text(encoding="utf-8")
+    dep_line = "    implementation 'androidx.webkit:webkit:1.12.1' // OBS browser Client Hints"
+    if "androidx.webkit:webkit:" in source:
+        return
+    anchor = "implementation 'androidx.core:core:"
+    idx = source.find(anchor)
+    if idx != -1:
+        line_end = source.find("\n", idx)
+        if line_end == -1:
+            line_end = len(source)
+        updated = source[:line_end] + "\n" + dep_line + source[line_end:]
+    else:
+        updated = re.sub(
+            r"(?m)^(dependencies\s*\{\s*)$",
+            r"\1\n" + dep_line,
+            source,
+            count=1,
+        )
+    if updated != source:
+        build_gradle.write_text(updated, encoding="utf-8", newline="\n")
+
+
 def _resolve_abi_value(raw_val: object, abi: str, default: str = "") -> str:
     if isinstance(raw_val, dict):
         v = raw_val.get(abi)
@@ -178,6 +203,7 @@ def main() -> int:
 
     build_gradle = output_dir / "build.gradle"
     _keep_app_locales(build_gradle)
+    _ensure_obs_dependencies(build_gradle)
     platform = args.android_platform
     if _uses_integer_compile_sdk(build_gradle) and "-" in platform and platform.rsplit("-", 1)[-1].isdigit():
         compile_sdk = platform.rsplit("-", 1)[-1]

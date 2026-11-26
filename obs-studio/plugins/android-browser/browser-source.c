@@ -30,7 +30,7 @@ struct browser_source {
 	pthread_mutex_t mutex;
 	uint32_t width, height, fps;
 	char *url, *css;
-	bool transparent, reroute_audio;
+	bool transparent, reroute_audio, desktop_mode, fit_width;
 	long alpha_mode;
 	bool dirty, reload, probed;
 	/* Transparent sources take the ImageReader path; see render(). */
@@ -197,6 +197,8 @@ static void update(void *data, obs_data_t *settings)
 	const char *css = obs_data_get_string(settings, "css");
 	const bool transparent = obs_data_get_bool(settings, "transparent");
 	const bool reroute = obs_data_get_bool(settings, "reroute_audio");
+	const bool desktop_mode = obs_data_get_bool(settings, "desktop_mode");
+	const bool fit_width = obs_data_get_bool(settings, "fit_width");
 	long alpha = (long)obs_data_get_int(settings, "alpha_mode");
 	if (alpha < BROWSER_ALPHA_COMPAT || alpha > BROWSER_ALPHA_PREMULTIPLIED)
 		alpha = BROWSER_ALPHA_COMPAT;
@@ -205,7 +207,7 @@ static void update(void *data, obs_data_t *settings)
 	os_atomic_set_long(&s->alpha_mode, alpha);
 	pthread_mutex_lock(&s->mutex);
 	if (!s->url || s->width != w || s->height != h || strcmp(s->url, target_url) || strcmp(s->css, css) ||
-	    s->transparent != transparent) {
+	    s->transparent != transparent || s->desktop_mode != desktop_mode || s->fit_width != fit_width) {
 		bfree(s->url);
 		bfree(s->css);
 		s->url = bstrdup(target_url);
@@ -213,6 +215,8 @@ static void update(void *data, obs_data_t *settings)
 		s->width = (uint32_t)w;
 		s->height = (uint32_t)h;
 		s->transparent = transparent;
+		s->desktop_mode = desktop_mode;
+		s->fit_width = fit_width;
 		s->reader_mode = transparent;
 		s->dirty = true;
 		s->retry_at = 0;
@@ -350,7 +354,8 @@ static void render(void *data, gs_effect_t *effect)
 			const uint32_t texture =
 				s->reader_mode ? 0 : gs_android_external_texture_get_id(s->external);
 			s->host = obs_android_browser_create(texture, s->width, s->height, s->url, s->css,
-							     s->transparent, s->reroute_audio && s->audio_thread_started);
+							     s->transparent, s->reroute_audio && s->audio_thread_started,
+							     s->desktop_mode, s->fit_width);
 		}
 		if (s->host) {
 			if (s->reroute_audio && s->audio_thread_started) {
@@ -515,6 +520,8 @@ static void defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "width", 1280);
 	obs_data_set_default_int(settings, "height", 720);
 	obs_data_set_default_int(settings, "fps", 30);
+	obs_data_set_default_bool(settings, "desktop_mode", false);
+	obs_data_set_default_bool(settings, "fit_width", false);
 	obs_data_set_default_bool(settings, "transparent", false);
 	obs_data_set_default_bool(settings, "reroute_audio", false);
 	obs_data_set_default_int(settings, "alpha_mode", BROWSER_ALPHA_COMPAT);
@@ -569,6 +576,10 @@ static obs_properties_t *properties(void *data)
 	obs_properties_add_int(p, "width", obs_module_text("Width"), 1, 4096, 1);
 	obs_properties_add_int(p, "height", obs_module_text("Height"), 1, 4096, 1);
 	obs_properties_add_int(p, "fps", obs_module_text("FPS"), 1, 60, 1);
+	obs_property_t *desktop = obs_properties_add_bool(p, "desktop_mode", obs_module_text("DesktopMode"));
+	obs_property_set_long_description(desktop, obs_module_text("DesktopMode.Description"));
+	obs_property_t *fit = obs_properties_add_bool(p, "fit_width", obs_module_text("FitWidth"));
+	obs_property_set_long_description(fit, obs_module_text("FitWidth.Description"));
 	obs_property_t *transparent = obs_properties_add_bool(p, "transparent", obs_module_text("Transparent"));
 	obs_property_set_long_description(transparent, obs_module_text("Transparent.Description"));
 	obs_property_t *audio = obs_properties_add_bool(p, "reroute_audio", obs_module_text("RerouteAudio"));
