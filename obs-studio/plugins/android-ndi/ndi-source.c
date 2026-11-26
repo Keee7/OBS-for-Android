@@ -515,6 +515,37 @@ static void ndi_source_update(void *data, obs_data_t *settings)
 		ndi_start_thread(s);
 }
 
+static void format_status_text(struct ndi_source *s, char *out, size_t out_sz)
+{
+	if (!out || !out_sz)
+		return;
+	out[0] = '\0';
+	if (s) {
+		pthread_mutex_lock(&s->mtx);
+		snprintf(out, out_sz, "%s", s->status);
+		pthread_mutex_unlock(&s->mtx);
+	}
+	if (!out[0]) {
+		if (ndi_runtime_is_loaded()) {
+			char ver[128] = {0};
+			ndi_runtime_get_info(ver, sizeof(ver), NULL, 0, NULL, 0);
+			snprintf(out, out_sz, "%s (%s)", obs_module_text("Ndi.Status.Ready"), ver);
+		} else {
+			snprintf(out, out_sz, "%s", obs_module_text("Ndi.Status.RuntimeMissing"));
+		}
+	}
+}
+
+static void refresh_status_property(obs_properties_t *props, struct ndi_source *s)
+{
+	obs_property_t *st = obs_properties_get(props, "ndi_status");
+	if (!st)
+		return;
+	char status_text[384] = {0};
+	format_status_text(s, status_text, sizeof(status_text));
+	obs_property_set_description(st, status_text);
+}
+
 static void populate_source_list(obs_property_t *list, const char *current)
 {
 	obs_property_list_clear(list);
@@ -524,6 +555,15 @@ static void populate_source_list(obs_property_t *list, const char *current)
 	const int n = ndi_finder_get_sources(srcs, NDI_FINDER_MAX_SOURCES);
 	bool found_cur = !current || !current[0];
 	for (int i = 0; i < n; i++) {
+		bool dup = false;
+		for (int j = 0; j < i; j++) {
+			if (strcmp(srcs[j].name, srcs[i].name) == 0) {
+				dup = true;
+				break;
+			}
+		}
+		if (dup)
+			continue;
 		char label[NDI_FINDER_NAME_LEN + NDI_FINDER_URL_LEN + 16];
 		if (srcs[i].url[0])
 			snprintf(label, sizeof(label), "%s [%s]", srcs[i].name, srcs[i].url);
@@ -542,20 +582,23 @@ static bool on_refresh_sources(obs_properties_t *props, obs_property_t *property
 	UNUSED_PARAMETER(property);
 	struct ndi_source *s = data;
 	ndi_finder_refresh();
-	os_sleep_ms(120);
+	os_sleep_ms(450);
 	obs_property_t *list = obs_properties_get(props, "ndi_source_name");
 	if (list)
 		populate_source_list(list, s ? s->source_name : "");
+	refresh_status_property(props, s);
 	return true;
 }
 
 static bool on_extra_ips_modified(void *priv, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(property);
+	struct ndi_source *s = priv;
 	ndi_finder_set_source_extra_ips(priv, obs_data_get_string(settings, "ndi_extra_ips"));
 	obs_property_t *list = obs_properties_get(props, "ndi_source_name");
 	if (list)
 		populate_source_list(list, obs_data_get_string(settings, "ndi_source_name"));
+	refresh_status_property(props, s);
 	return true;
 }
 
@@ -616,21 +659,7 @@ static obs_properties_t *ndi_source_properties(void *data)
 	obs_property_list_add_int(cr, obs_module_text("Ndi.ColorRange.Full"), VIDEO_RANGE_FULL);
 
 	char status_text[384] = {0};
-	if (s) {
-		pthread_mutex_lock(&s->mtx);
-		snprintf(status_text, sizeof(status_text), "%s", s->status);
-		pthread_mutex_unlock(&s->mtx);
-	}
-	if (!status_text[0]) {
-		if (ndi_runtime_is_loaded()) {
-			char ver[128] = {0};
-			ndi_runtime_get_info(ver, sizeof(ver), NULL, 0, NULL, 0);
-			snprintf(status_text, sizeof(status_text), "%s (%s)", obs_module_text("Ndi.Status.Ready"), ver);
-		} else {
-			snprintf(status_text, sizeof(status_text), "%s",
-				 obs_module_text("Ndi.Status.RuntimeMissing"));
-		}
-	}
+	format_status_text(s, status_text, sizeof(status_text));
 	obs_properties_add_text(props, "ndi_status", status_text, OBS_TEXT_INFO);
 	return props;
 }

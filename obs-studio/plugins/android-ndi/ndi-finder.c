@@ -116,6 +116,36 @@ static void build_combined_extra_ips(char *out, size_t out_size, const char *use
 #endif
 }
 
+static void upsert_discovered_source(struct ndi_discovered_source *list, int *count, int max, const char *name,
+				     const char *url, bool from_sdk)
+{
+	if (!list || !count || !name || !name[0])
+		return;
+	const char *clean_url = url ? url : "";
+	for (int i = 0; i < *count; i++) {
+		if (strcmp(list[i].name, name) == 0) {
+			if (from_sdk && !list[i].from_sdk) {
+				if (clean_url[0])
+					snprintf(list[i].url, sizeof(list[i].url), "%s", clean_url);
+				list[i].from_sdk = true;
+			} else if (!list[i].url[0] && clean_url[0]) {
+				snprintf(list[i].url, sizeof(list[i].url), "%s", clean_url);
+			}
+			return;
+		}
+		if (!from_sdk && clean_url[0] && list[i].url[0] && strcmp(list[i].url, clean_url) == 0) {
+			/* Already represented by an SDK-resolved canonical entry at the same ip:port. */
+			return;
+		}
+	}
+	if (*count >= max)
+		return;
+	struct ndi_discovered_source *dst = &list[(*count)++];
+	snprintf(dst->name, sizeof(dst->name), "%s", name);
+	snprintf(dst->url, sizeof(dst->url), "%s", clean_url);
+	dst->from_sdk = from_sdk;
+}
+
 static void *finder_thread_main(void *arg)
 {
 	(void)arg;
@@ -138,10 +168,12 @@ static void *finder_thread_main(void *arg)
 		if (!api)
 			api = ndi_runtime_acquire();
 
+		struct ndi_discovered_source nsd_only[NDI_FINDER_MAX_SOURCES];
+		int nsd_count = 0;
 		struct ndi_discovered_source merged[NDI_FINDER_MAX_SOURCES];
 		int merged_count = 0;
 		char combined_ips[1024] = {0};
-		build_combined_extra_ips(combined_ips, sizeof(combined_ips), user_ips, merged, &merged_count,
+		build_combined_extra_ips(combined_ips, sizeof(combined_ips), user_ips, nsd_only, &nsd_count,
 					 NDI_FINDER_MAX_SOURCES);
 
 		if (api) {
@@ -164,19 +196,20 @@ static void *finder_thread_main(void *arg)
 				uint32_t sdk_count = 0;
 				const NDIlib_source_t *sdk_srcs = api->find_get_current_sources(finder, &sdk_count);
 				if (sdk_srcs && sdk_count > 0) {
-					/* Prefer SDK-resolved canonical NDI names over raw NsdManager entries. */
-					merged_count = 0;
-					for (uint32_t i = 0; i < sdk_count && merged_count < NDI_FINDER_MAX_SOURCES; i++) {
-						if (!sdk_srcs[i].p_ndi_name || !sdk_srcs[i].p_ndi_name[0])
-							continue;
-						struct ndi_discovered_source *dst = &merged[merged_count++];
-						snprintf(dst->name, sizeof(dst->name), "%s", sdk_srcs[i].p_ndi_name);
-						snprintf(dst->url, sizeof(dst->url), "%s",
-							 sdk_srcs[i].p_url_address ? sdk_srcs[i].p_url_address : "");
-						dst->from_sdk = true;
+					/* Prefer SDK-resolved canonical NDI names, deduplicated by name. */
+					for (uint32_t i = 0; i < sdk_count; i++) {
+						upsert_discovered_source(merged, &merged_count, NDI_FINDER_MAX_SOURCES,
+									 sdk_srcs[i].p_ndi_name,
+									 sdk_srcs[i].p_url_address, true);
 					}
 				}
 			}
+		}
+
+		/* Append any NsdManager peers not yet represented by SDK entries (deduplicated by name/url). */
+		for (int i = 0; i < nsd_count; i++) {
+			upsert_discovered_source(merged, &merged_count, NDI_FINDER_MAX_SOURCES, nsd_only[i].name,
+						 nsd_only[i].url, false);
 		}
 
 		pthread_mutex_lock(&g_finder_mtx);

@@ -561,8 +561,11 @@ static void ndi_output_stop(void *data, uint64_t ts)
 	o->session = NULL;
 	pthread_mutex_unlock(&o->mtx);
 
+	if (!sess)
+		return;
+
 	uint64_t vf = 0, af = 0, dv = 0, da = 0;
-	if (sess) {
+	{
 		pthread_mutex_lock(&sess->video_mtx);
 		vf = sess->total_video_frames;
 		dv = sess->dropped_video_frames;
