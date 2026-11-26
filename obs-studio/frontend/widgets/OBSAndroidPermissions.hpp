@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 // 3-5（plan.md §五）：一期运行时权限的申请口。Java 侧 = ObsPermissionHost.java。
 // 只负责"把系统弹窗弹出来 + 现读状态"，不接 onRequestPermissionsResult（那个回调归 Qt 自己的
 // QtActivityDelegate，插不进去），所以要查结果就在下一次事件里再读一次。

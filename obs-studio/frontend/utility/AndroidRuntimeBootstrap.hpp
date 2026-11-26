@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
     Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
@@ -17,10 +18,15 @@
 
 /* 3-2 ②：APK 里的数据落到应用私有目录，再用 OBS_ROOT_PATH 公布出来。
  *
- * 为什么前端自己也要做一遍这件事：libobs 的 find_libobs_data_file()/
- * add_default_module_paths()（libobs/obs-android.c）和平台的 GetDataFilePath()
- * （utility/platform-android.cpp）读的都是同一个 OBS_ROOT_PATH，谁先要数据谁就要求它
- * 已经就位 —— 而第一次要数据的是 OBSApp 构造之后的 InitLocale()。
+ * 为什么前端自己也要做一遍这件事：libobs 的 find_libobs_data_file()（libobs/obs-android.c）
+ * 和平台的 GetDataFilePath()（utility/platform-android.cpp）读的都是同一个 OBS_ROOT_PATH，
+ * 谁先要数据谁就要求它已经就位 —— 而第一次要数据的是 OBSApp 构造之后的 InitLocale()。
+ *
+ * 插件 .so 走另一条链：EnsureAndroidPluginBinaries() 解析 APK 里的
+ * assets:/obs-plugins/MANIFEST（每项含 SHA-256 与字节数），全部校验通过后才把整批 .so
+ * 原子发布到 $OBS_ROOT_PATH/bundled-plugins/<MANIFEST 的 SHA-256>/，再用
+ * OBS_ANDROID_BUNDLED_PLUGIN_DIR 把这个目录交给 PluginManager::loadAllPlugins()
+ * （核心模块 → 随包可选插件 → 用户插件）。
  *
  * 只在 Android 上编译（见 cmake/os-android.cmake 的 target_sources）。 */
 

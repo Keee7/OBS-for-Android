@@ -55,6 +55,21 @@ This document provides a technical overview of the architectural changes, hardwa
 
 ---
 
+### 4. Bundled Plugin Loading Chain
+
+The order below is the real startup order; every step maps to code in this tree.
+
+1. `scripts/android-plugin-bundle.py` — `generate` walks `assets/obs-plugins/*.so`, enforces the required set (`android-browser`, `android-mediacodec`, `android-capture`, `obs-ffmpeg`, `obs-outputs`, `obs-x264`), rejects anything that is not an AArch64 shared object, and writes one line per plugin. `verify` recomputes the same lines from a built APK and fails the build on mismatch.
+2. `MANIFEST` — `assets/obs-plugins/MANIFEST`, one `<name>.so <sha256> <size>` line per bundled plugin. It is both the integrity contract and, through its own SHA-256, the on-disk name of the published bundle directory.
+3. `AndroidRuntimeBootstrap` — `EnsureAndroidPluginBinaries()` runs in `OBSApp::loadAppModules()` before any module is loaded. It parses the MANIFEST (malformed, duplicate or empty entries are rejected). When a bundle must be extracted, each `.so` is streamed out with its SHA-256 and byte count checked against the MANIFEST, staged in `.staging-XXXXXX`, and published with a single `rename()` only after every file verified. **The reuse path has a narrower trust boundary:** an already published `bundled-plugins/<MANIFEST SHA-256>/` directory is accepted after checking only the `.complete` marker, that each entry is a regular non-symlink file, and that its size matches the MANIFEST. It is not re-hashed, so equal-length corruption or tampering in an existing directory can pass the reuse check; hashes are enforced only when extracting a new bundle.
+4. `OBS_ANDROID_BUNDLED_PLUGIN_DIR` — the published `$OBS_ROOT_PATH/bundled-plugins/<MANIFEST SHA-256>` directory, exported after extraction under `.extract-lock`.
+5. `PluginManager::loadAllPlugins` — `preLoad()` reads `modules.json` and applies the disabled list, then `obs_load_core_modules()` loads the core set from the bundle. The optional-plugin scan (`loadPlugins()`) runs only in the plugin manager's Full mode: `OBSApp::loadAppModules()` selects CoreOnly when safe mode or "disable third-party plugins" is active, and CoreOnly skips optional plugins entirely. In Full mode the bundle is scanned before `$OBS_ROOT_PATH/lib`, so a bundled plugin wins over a user-installed one with the same module name.
+6. `obs_load_plugins` — libobs enumerates the directory (`find_modules_in_path` → `load_all_callback`), skips names that are already loaded, honours the disabled list, and records the failures that happen before init (open failure, incompatible version, unknown error) in `obs_module_failure_info`; the frontend logs those names and reports `PartialFailure` when the count is non-zero. A module that opens but then fails `obs_init_module()` is not counted there: it is registered as a disabled module flagged `OBS_MODULE_FAILED_TO_INITIALIZE`, so it never enters the failed-module list and does not by itself drive `PartialFailure`.
+
+Kept behaviour: MANIFEST SHA-256 verification (extraction path only), atomic directory publication, the core/optional split (the CMake `OBS_MODULES_ENABLED` list becomes `obs_core_modules[]` and is loaded as core modules — never listed in the plugin manager, never user-disableable — while the remaining bundled modules are loaded as optional plugins that do appear there and honour the disabled state), the disabled state stored in `modules.json`, bundled-over-user precedence, and failure reporting that distinguishes counted pre-init failures from init failures flagged on disabled modules.
+
+---
+
 <a name="简体中文"></a>
 ## 简体中文
 
@@ -120,3 +135,18 @@ This document provides a technical overview of the architectural changes, hardwa
 #### 3.2 坐标几何与输入法适配
 * **统一坐标系统**：统一采用 `getLocationInWindow` 作为基准窗口坐标系计算，将 Qt 界面位置与 Android 原生父容器精准对齐，彻底解决悬浮小窗与分屏拖拽时的画面错位问题。
 * **软键盘优化**：针对部分输入法软键盘退格时多余触发的显示请求进行针对性防护，并完善光标手柄的焦点清理机制。
+
+---
+
+### 4. 随包插件装载链
+
+下面的顺序就是实际启动顺序，每一步都能在代码树里核对：
+
+1. `scripts/android-plugin-bundle.py` —— `generate` 扫描 `assets/obs-plugins/*.so`，校验必需插件集合（`android-browser`、`android-mediacodec`、`android-capture`、`obs-ffmpeg`、`obs-outputs`、`obs-x264`），拒绝任何不是 AArch64 共享对象的文件，逐个插件写一行清单；`verify` 在构建出的 APK 上重算同样的行，不一致就让构建失败。
+2. `MANIFEST` —— `assets/obs-plugins/MANIFEST`，每个随包插件一行 `<模块>.so <sha256> <字节数>`；它既是完整性契约，又通过自身 SHA-256 决定发布目录在磁盘上的名字。
+3. `AndroidRuntimeBootstrap` —— `EnsureAndroidPluginBinaries()` 在 `OBSApp::loadAppModules()` 里、任何模块装载之前执行：解析 MANIFEST（格式错误、重复项、空清单一律拒绝）。**只有需要解包时**才逐文件流式校验 SHA-256 与字节数，先解到 `.staging-XXXXXX`，全部校验通过后才用一次 `rename()` 原子发布。**复用路径的信任边界更窄**：已发布的 `bundled-plugins/<MANIFEST 的 SHA-256>/` 目录只检查 `.complete` 标记、每项是否为非符号链接的普通文件、以及大小是否与 MANIFEST 一致，**不会重新计算哈希** —— 因此已有目录里等长的损坏或篡改能通过复用检查；哈希只在解包新 bundle 时强制。保留 MANIFEST 校验与原子目录发布：解包路径上残缺的 bundle 不会被发布，复用路径则以上述边界为准。
+4. `OBS_ANDROID_BUNDLED_PLUGIN_DIR` —— 发布目录 `$OBS_ROOT_PATH/bundled-plugins/<MANIFEST 的 SHA-256>`，在 `.extract-lock` 保护下解包成功后导出到环境变量。
+5. `PluginManager::loadAllPlugins` —— `preLoad()` 读取 `modules.json` 并落地禁用列表，`obs_load_core_modules()` 从 bundle 装载核心模块。可选插件扫描（`loadPlugins()`）只在插件管理器的 Full 模式下运行：`OBSApp::loadAppModules()` 在安全模式或「禁用第三方插件」时选择 CoreOnly，而 CoreOnly 完全跳过可选插件。Full 模式下随包目录先于 `$OBS_ROOT_PATH/lib` 扫描，因此同名模块随包优先于用户自装。
+6. `obs_load_plugins` —— libobs 侧 `find_modules_in_path` → `load_all_callback` 遍历目录，跳过已装载的同名模块、遵守禁用列表，并把**初始化之前**的失败（打开失败、版本不兼容、未知错误）记进 `obs_module_failure_info`；前端逐条打日志，计数非零时返回 `PartialFailure`。能打开但 `obs_init_module()` 失败的模块**不计入**该结构：它会被登记为标记 `OBS_MODULE_FAILED_TO_INITIALIZE` 的禁用模块，因此不会进入失败模块清单，也不会单独触发 `PartialFailure`。
+
+保留项：MANIFEST SHA-256 校验（只在解包路径执行）与原子目录发布、核心/可选分类（CMake 的 `OBS_MODULES_ENABLED` 会生成 `obs_core_modules[]`，按核心模块装载 —— 不进插件管理器、不受用户禁用配置影响；其余随包模块按可选插件装载，会出现在插件管理器里并遵守禁用状态）、`modules.json` 里的禁用状态、随包优先于用户插件、失败记录（`obs_module_failure_info` 只收初始化之前的失败，初始化失败改为禁用模块上的标记）。

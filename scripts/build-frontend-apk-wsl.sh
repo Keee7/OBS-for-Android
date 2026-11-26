@@ -43,7 +43,7 @@ export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"
 command -v cmake >/dev/null || { echo "FATAL: PATH 里没有 cmake（venv 没生效？）" >&2; exit 1; }
 
 BUILD_DIR="$ROOT/build-fe-$ABI-plugins"
-LOGDIR="$ROOT/.qoder"
+LOGDIR="$ROOT/build-logs"
 mkdir -p "$LOGDIR"
 LOG="${LOG:-$LOGDIR/fe-$ABI-apk-build-wsl.log}"
 

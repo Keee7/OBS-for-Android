@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * 运行时权限申请宿主（plan.md §五 3-5 第 3 项）
  *

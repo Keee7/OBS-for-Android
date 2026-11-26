@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * 前台保活宿主（plan.md §五 3-5）：推流/录制期间把进程钉在"前台服务"档，
  * 免得 HOME 切后台后被 low memory killer 回收（8.20 实测的 `has died: cch CRE`）。
