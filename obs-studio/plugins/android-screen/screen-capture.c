@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 // P-18 屏幕采集源（MediaProjection + AImageReader）。当前进度：a 授权与前台服务类型接线、
 // b 取帧进预览、c 进白名单/装载清单、d 生命周期与交还（收回、尺寸变化重建、最后一颗源销毁
 // 交还三支都在设备上量过）、e 系统内录（一路一份的泵，下面 P-18-e 那一段）—— **a~e 五条腿已闭**。

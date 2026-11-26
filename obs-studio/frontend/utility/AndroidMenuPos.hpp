@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 // 3-4 触摸：弹出菜单/浮层的定位。上游一律写 `exec(QCursor::pos())`，Android 上照抄会弹到别处，
 // 两条都是实测出来的（不是推测）：
 //   ① 触摸**不更新**那个光标缓存 —— build 62 长按投影仪画面，菜单左上角落在**上一次** tap 的位置；

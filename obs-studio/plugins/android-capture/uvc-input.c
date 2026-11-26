@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 // UVC 采集源（USB Webcam / HDMI 采集卡，自写最小 UVC-over-libusb，无 root）。
 //
 // 为什么是重写而不是继续用 libuvc：旧实现经 libuvc 的 uvc_init(&ctx, NULL) 起内部

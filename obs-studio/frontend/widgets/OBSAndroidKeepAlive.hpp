@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 // 3-5（plan.md §五）：把"OBS 有没有输出在跑"翻译成 Android 前台服务的起停。
 // 与 OBSAndroidDisplay 同一类宿主桥，方向相反：那个是把 Surface 递给 obs_display，
 // 这个是把 Qt 侧的 Streaming/Recording 信号递给 Java 的 Service。

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * reader-ctx.h —— AImageReader 回调上下文的生命周期
  *

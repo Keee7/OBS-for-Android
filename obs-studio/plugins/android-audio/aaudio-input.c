@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 // 阶段 2 第 1 项：AAudio 采集源（内置麦克风 / 有线耳机麦克风）。
 //
 // A4（阶段 2 第 4 项）在它上面加了"选哪台输入设备"：设备 id 只能由 Java 的

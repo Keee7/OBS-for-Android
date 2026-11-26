@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 // P-17 内置摄像头采集源（Camera2 NDK）。当前进度：a 权限总线、b 枚举相机、c 取帧进预览
 // （AImageReader + capture session → obs_source_output_video）、d 分辨率/FPS 属性（照设备
 // 自己那两张表挑档）、e 主界面一键前后置、f 生命周期与释放（退后台交还 + 失联重开，见

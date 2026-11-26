@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 // 3-4（plan.md §五）：桌面平台那 6 处 "QDesktopServices::openUrl(本地路径)" 的 Android 替代。
 // 实测依据（34l / emulator-5554 / 文件→显示录像，21:21:53）：Qt 会把本地路径换成
 // content://com.obsproject.studio.qtprovider/... 再发 ACTION_VIEW，系统把它派给了

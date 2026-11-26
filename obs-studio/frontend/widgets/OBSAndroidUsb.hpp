@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 // USB host 总线（obs_android_usb_*）的前端注册口。Java 侧 = ObsUsbHost.java。
 // 自 android-shell/obs_usb_host.h 移植：形状与 OBSAndroidPermissions.hpp 里相机/屏幕两条总线
 // 的注册口一致（幂等、App 启动时调一次）。

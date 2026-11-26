@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "OBSAndroidDisplay.hpp"
 
 #ifdef __ANDROID__
