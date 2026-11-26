@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * 屏幕采集授权宿主（plan.md §五 P-18-a）
  *

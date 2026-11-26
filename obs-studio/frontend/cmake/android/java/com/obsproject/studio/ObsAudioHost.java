@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Android 音频输入设备宿主（plan.md 第四节 · 阶段 2 的 A4）
  *

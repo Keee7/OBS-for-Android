@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * 无 root 的 USB 设备宿主（自 android-shell/android/java/org/qtproject/example/obs_shell/ObsUsbHost.java
  * 忠实移植，仅改了包名与两条广播 action 的字符串前缀）。
