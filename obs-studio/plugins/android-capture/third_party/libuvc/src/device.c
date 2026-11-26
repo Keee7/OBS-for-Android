@@ -1939,7 +1939,14 @@ void uvc_close(uvc_device_handle_t *devh) {
   if (devh->streams)
     uvc_stop_streaming(devh);
 
-  uvc_release_if(devh, devh->info->ctrl_if.bInterfaceNumber);
+  /* Release every claimed interface (including any streaming interface claimed
+   * during uvc_get_stream_ctrl_format_size before stream creation failed). */
+  if (devh->info)
+    uvc_release_if(devh, devh->info->ctrl_if.bInterfaceNumber);
+  for (int iface = 0; iface < 32; ++iface) {
+    if (devh->claimed & (1U << iface))
+      uvc_release_if(devh, iface);
+  }
 
   /* If we are managing the libusb context and this is the last open device,
    * then we need to cancel the handler thread. When we call libusb_close,

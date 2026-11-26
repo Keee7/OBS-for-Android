@@ -16,7 +16,10 @@
 #define BUFFER_MAX (XFER_COUNT + READY_MAX)
 #define MAX_ISO_PACKET_BYTES 98304U
 #define ERROR_LIMIT 20U
-#define BAD_SECONDS_LIMIT 5U
+#define BAD_SECONDS_LIMIT 2U
+#define CONSEC_ERROR_LIMIT 16U
+#define RETRY_BACKOFF_AFTER 4U
+#define RETRY_BACKOFF_NS 5000000L
 #define DRAIN_EVENT_ERROR_LIMIT 5U
 #define DRAIN_TIMEOUT_NS 2000000000ULL
 
@@ -58,7 +61,7 @@ struct uvc_iso_pump {
 	unsigned ready_head, ready_count, ready_capacity, buffer_count;
 	int borrowed;
 	uint64_t sequence, win_start;
-	unsigned win_errors, bad_seconds;
+	unsigned win_errors, bad_seconds, consec_errors;
 	struct uvc_iso_stats stats;
 };
 
@@ -161,6 +164,7 @@ static void LIBUSB_CALL on_transfer(struct libusb_transfer *x)
 
 	if (x->status == LIBUSB_TRANSFER_COMPLETED) {
 		p->stats.transfers++;
+		p->consec_errors = 0;
 
 		struct uvc_iso_packet_desc pkts[UVC_ISO_MAX_PACKETS];
 		unsigned n_pkts = 0;
@@ -236,6 +240,8 @@ static void LIBUSB_CALL on_transfer(struct libusb_transfer *x)
 		p->win_errors++;
 		if (x->status == LIBUSB_TRANSFER_NO_DEVICE)
 			set_fatal_locked(p, LIBUSB_ERROR_NO_DEVICE);
+		else if (x->status != LIBUSB_TRANSFER_TIMED_OUT && ++p->consec_errors >= CONSEC_ERROR_LIMIT)
+			set_fatal_locked(p, LIBUSB_ERROR_IO);
 		else
 			p->retry_pending |= UINT32_C(1) << slot->index;
 	}
@@ -285,8 +291,15 @@ static void *pump_thread(void *arg)
 		const bool stop = p->stopping || p->fatal;
 		uint32_t pending = p->retry_pending;
 		const bool had_retries = pending != 0;
+		const bool retry_backoff = had_retries && p->consec_errors >= RETRY_BACKOFF_AFTER;
 		p->retry_pending = 0;
-		if (!stop) {
+		if (!stop && retry_backoff) {
+			pthread_mutex_unlock(&p->mutex);
+			struct timespec ts = {0, RETRY_BACKOFF_NS};
+			nanosleep(&ts, NULL);
+			pthread_mutex_lock(&p->mutex);
+		}
+		if (!p->stopping && !p->fatal) {
 			for (unsigned i = 0; pending && i < XFER_COUNT; i++) {
 				const uint32_t bit = UINT32_C(1) << i;
 				if (!(pending & bit))
@@ -304,7 +317,7 @@ static void *pump_thread(void *arg)
 		pthread_mutex_unlock(&p->mutex);
 		if (stop || stop_after)
 			break;
-		if (had_retries)
+		if (had_retries && !retry_backoff)
 			continue;
 		struct timeval tv = {0, 10000};
 		r = libusb_handle_events_timeout(p->ctx, &tv);

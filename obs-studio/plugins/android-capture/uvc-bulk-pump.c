@@ -14,7 +14,10 @@
 #define READY_MAX 256U
 #define BUFFER_MAX (XFER_COUNT + READY_MAX)
 #define ERROR_LIMIT 20U
-#define BAD_SECONDS_LIMIT 5U
+#define BAD_SECONDS_LIMIT 2U
+#define CONSEC_ERROR_LIMIT 32U
+#define RETRY_BACKOFF_AFTER 4U
+#define RETRY_BACKOFF_NS 5000000L
 #define DRAIN_EVENT_ERROR_LIMIT 5U
 #define DRAIN_TIMEOUT_NS 2000000000ULL
 
@@ -49,7 +52,7 @@ struct uvc_bulk_pump {
 	unsigned ready_head, ready_count, ready_capacity, buffer_count;
 	int borrowed;
 	uint64_t sequence, win_start;
-	unsigned win_errors, bad_seconds;
+	unsigned win_errors, bad_seconds, consec_errors;
 	struct uvc_bulk_stats stats;
 };
 
@@ -118,6 +121,7 @@ static void LIBUSB_CALL on_transfer(struct libusb_transfer *x)
 	}
 	if (x->status == LIBUSB_TRANSFER_COMPLETED) {
 		p->stats.transfers++;
+		p->consec_errors = 0;
 		const bool emit_zlp = (x->actual_length == 0 && p->prev_was_full);
 		p->prev_was_full = (x->actual_length > 0 && (unsigned)x->actual_length >= p->transfer_size);
 		if (x->actual_length > 0 || emit_zlp) {
@@ -159,9 +163,11 @@ static void LIBUSB_CALL on_transfer(struct libusb_transfer *x)
 		default: break;
 		}
 		p->win_errors++;
-		if (x->status == LIBUSB_TRANSFER_NO_DEVICE)
+		if (x->status == LIBUSB_TRANSFER_NO_DEVICE) {
 			set_fatal_locked(p, LIBUSB_ERROR_NO_DEVICE);
-		else {
+		} else if (x->status != LIBUSB_TRANSFER_TIMED_OUT && ++p->consec_errors >= CONSEC_ERROR_LIMIT) {
+			set_fatal_locked(p, LIBUSB_ERROR_IO);
+		} else {
 			uint32_t bit = UINT32_C(1) << slot->index;
 			p->retry_pending |= bit;
 			if (x->status == LIBUSB_TRANSFER_STALL)
@@ -207,11 +213,16 @@ static void *pump_thread(void *arg)
 		 * errors arriving during recovery remain pending for the next pass. */
 		uint32_t pending = p->retry_pending;
 		bool had_retries = pending != 0;
+		bool retry_backoff = had_retries && p->consec_errors >= RETRY_BACKOFF_AFTER;
 		uint32_t stalled = p->retry_stalled;
 		p->retry_pending = p->retry_stalled = 0;
 		pthread_mutex_unlock(&p->mutex);
 		if (stop)
 			break;
+		if (retry_backoff) {
+			struct timespec ts = {0, RETRY_BACKOFF_NS};
+			nanosleep(&ts, NULL);
+		}
 		for (unsigned i = 0; pending && i < XFER_COUNT; i++) {
 			uint32_t bit = UINT32_C(1) << i;
 			if (!(pending & bit))
@@ -232,8 +243,9 @@ static void *pump_thread(void *arg)
 		}
 		if (stop)
 			break;
-		/* Pick up errors dispatched during recovery before waiting for events. */
-		if (had_retries)
+		/* Pick up errors dispatched during recovery before waiting for events,
+		 * unless we are already backing off from repeated I/O failures. */
+		if (had_retries && !retry_backoff)
 			continue;
 		struct timeval tv = {0, 10000};
 		r = libusb_handle_events_timeout(p->ctx, &tv);
