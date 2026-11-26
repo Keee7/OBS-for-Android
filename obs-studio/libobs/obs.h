@@ -1586,6 +1586,19 @@ EXPORT void obs_source_get_audio_mix(const obs_source_t *source, struct obs_sour
 EXPORT void obs_source_set_async_unbuffered(obs_source_t *source, bool unbuffered);
 EXPORT bool obs_source_async_unbuffered(const obs_source_t *source);
 
+/** Opt-in time-based buffer budget (nanoseconds) for live wall-clock async
+ * video sources when buffered mode is active.
+ * - target_buffer_ns: steady-state target cushion (play_ts = sys_time - target_buffer_ns).
+ * - max_latency_ns: catch-up threshold; backlog exceeding this skips stale due
+ *   frames to the latest frame with timestamp <= play_ts and restores the
+ *   playhead to play_ts.
+ * Setting max_latency_ns == 0 (default) disables bounded catch-up and preserves
+ * standard OBS async buffering. */
+EXPORT void obs_source_set_async_latency_budget_ns(obs_source_t *source, uint64_t target_buffer_ns,
+						   uint64_t max_latency_ns);
+EXPORT uint64_t obs_source_async_target_buffer_ns(const obs_source_t *source);
+EXPORT uint64_t obs_source_async_max_latency_ns(const obs_source_t *source);
+
 /** Used to decouple audio from video so that audio doesn't attempt to sync up
  * with video.  I.E. Audio acts independently.  Only works when in unbuffered
  * mode. */

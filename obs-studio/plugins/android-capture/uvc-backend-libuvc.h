@@ -31,6 +31,10 @@ struct uvc_libuvc_mode {
 	int n_intervals;
 };
 
+enum {
+	UVC_LIBUVC_ERR_NOT_SUPPORTED = -12,
+};
+
 struct uvc_libuvc_session;
 
 /* Open an already-authorized Android USB file descriptor through our
@@ -40,10 +44,13 @@ int uvc_libuvc_open(int fd, bool allow_p010, struct uvc_libuvc_session **out, st
 		    int max_modes, int *n_modes_out, int *usb_speed_out, char *err_buf, size_t err_cap);
 
 /* Negotiate and start streaming for the chosen mode in polling mode
- * (uvc_libuvc_get_frame). Returns 0 on success or a negative uvc_error_t. */
+ * (uvc_libuvc_get_frame). When strict_mode is true, refuses silent fallback to
+ * default interval or negotiated format/frame/interval outside max_interval_delta
+ * (matching the native backend's locked-mode rules).
+ * Returns 0 on success or a negative uvc_error_t. */
 int uvc_libuvc_start(struct uvc_libuvc_session *sess, const struct uvc_libuvc_mode *mode, uint32_t target_interval,
-		     uint32_t *neg_interval_out, uint32_t *neg_payload_out, uint32_t *neg_maxframe_out,
-		     char *err_buf, size_t err_cap);
+		     bool strict_mode, uint32_t max_interval_delta, uint32_t *neg_interval_out,
+		     uint32_t *neg_payload_out, uint32_t *neg_maxframe_out, char *err_buf, size_t err_cap);
 
 /* Stop only the active stream (keeping devh/usb_ctx open for mode switch such
  * as YUYV black-screen fallback). Returns 0 if drained cleanly, or < 0 if

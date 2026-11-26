@@ -293,8 +293,8 @@ int uvc_libuvc_open(int fd, bool allow_p010, struct uvc_libuvc_session **out, st
 }
 
 int uvc_libuvc_start(struct uvc_libuvc_session *sess, const struct uvc_libuvc_mode *mode, uint32_t target_interval,
-		     uint32_t *neg_interval_out, uint32_t *neg_payload_out, uint32_t *neg_maxframe_out,
-		     char *err_buf, size_t err_cap)
+		     bool strict_mode, uint32_t max_interval_delta, uint32_t *neg_interval_out,
+		     uint32_t *neg_payload_out, uint32_t *neg_maxframe_out, char *err_buf, size_t err_cap)
 {
 	if (err_buf && err_cap)
 		err_buf[0] = '\0';
@@ -302,16 +302,40 @@ int uvc_libuvc_start(struct uvc_libuvc_session *sess, const struct uvc_libuvc_mo
 		return UVC_ERROR_INVALID_PARAM;
 
 	const enum uvc_frame_format cf = to_libuvc_frame_format(mode->fmt);
-	const int fps = target_interval > 0 ? (int)((10000000U + target_interval / 2U) / target_interval) : 0;
 
 	uvc_stream_ctrl_t ctrl;
 	memset(&ctrl, 0, sizeof(ctrl));
-	uvc_error_t ur = uvc_get_stream_ctrl_format_size(sess->devh, &ctrl, cf, mode->w, mode->h, fps);
-	if (ur != UVC_SUCCESS && fps != 0)
-		ur = uvc_get_stream_ctrl_format_size(sess->devh, &ctrl, cf, mode->w, mode->h, 0);
+	/* Pass exact 100 ns dwFrameInterval straight into UVC PROBE so fractional
+	 * NTSC rates (59.94 / 29.97 / 23.976 / 119.88 fps) are never rounded. */
+	uvc_error_t ur = uvc_get_stream_ctrl_format_size_interval(sess->devh, &ctrl, cf, mode->w, mode->h,
+								  target_interval);
+	if (ur != UVC_SUCCESS && !strict_mode && target_interval != 0)
+		ur = uvc_get_stream_ctrl_format_size_interval(sess->devh, &ctrl, cf, mode->w, mode->h, 0);
 	if (ur != UVC_SUCCESS) {
-		set_err(err_buf, err_cap, "uvc_get_stream_ctrl_format_size", ur);
+		set_err(err_buf, err_cap, "uvc_get_stream_ctrl_format_size_interval", ur);
 		return ur;
+	}
+	if (strict_mode) {
+		if (ctrl.bFormatIndex != mode->fmt_index || ctrl.bFrameIndex != mode->frame_index) {
+			if (err_buf && err_cap)
+				snprintf(err_buf, err_cap, "device declined mode %u:%u (reported %u:%u)",
+					 (unsigned)mode->fmt_index, (unsigned)mode->frame_index,
+					 (unsigned)ctrl.bFormatIndex, (unsigned)ctrl.bFrameIndex);
+			return UVC_LIBUVC_ERR_NOT_SUPPORTED;
+		}
+		if (target_interval != 0) {
+			const uint32_t diff = ctrl.dwFrameInterval > target_interval
+						      ? ctrl.dwFrameInterval - target_interval
+						      : target_interval - ctrl.dwFrameInterval;
+			if (diff > max_interval_delta) {
+				if (err_buf && err_cap)
+					snprintf(err_buf, err_cap,
+						 "device declined interval %u (reported %u, tol=%u)",
+						 (unsigned)target_interval, (unsigned)ctrl.dwFrameInterval,
+						 (unsigned)max_interval_delta);
+				return UVC_LIBUVC_ERR_NOT_SUPPORTED;
+			}
+		}
 	}
 
 	ur = uvc_stream_open_ctrl(sess->devh, &sess->strmh, &ctrl);

@@ -862,8 +862,13 @@ struct obs_source {
 	uint64_t next_audio_sys_ts_min;
 	uint64_t last_frame_ts;
 	uint64_t last_sys_timestamp;
+	uint64_t async_target_buffer_ns;
+	uint64_t async_max_latency_ns;
 #ifdef __ANDROID__
-	uint64_t android_uvc_cadence_start, android_uvc_selected, android_uvc_empty, android_uvc_waiting, android_uvc_skipped;
+	uint64_t android_uvc_cadence_start, android_uvc_selected, android_uvc_empty, android_uvc_waiting,
+		android_uvc_skipped, android_uvc_catchup_skipped;
+	uint32_t android_uvc_delay_us[320];
+	uint16_t android_uvc_delay_count;
 	bool android_uvc_cadence_valid, android_uvc_showing, android_uvc_active, android_uvc_has_data;
 #endif
 	bool async_rendered;

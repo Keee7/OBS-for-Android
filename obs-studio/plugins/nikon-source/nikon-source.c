@@ -109,6 +109,8 @@ struct nikon_source {
 	/* 状态文本：采集线程写、UI 线程读，mtx 只护它（读到半条文案最多难看一帧） */
 	pthread_mutex_t mtx;
 	char status[256];
+	bool safely_ejected;
+	char ejected_device[OBS_ANDROID_USB_NAME_LEN];
 
 	/* 只写给人看的计数：采集线程写、属性页读，不做任何判定依据 */
 	uint64_t frames_out;
@@ -499,11 +501,26 @@ static int start_liveview(struct nikon_source *s, struct nikon_cam *c)
 	return LIBUSB_ERROR_INTERRUPTED;
 }
 
+static bool nikon_usb_device_present(const char *path)
+{
+	if (!path || !*path)
+		return false;
+	struct obs_android_usb_device devs[8];
+	const int ndev = obs_android_usb_enum_devices(devs, 8);
+	if (ndev <= 0)
+		return false;
+	for (int i = 0; i < ndev; i++) {
+		if (strcmp(devs[i].name, path) == 0)
+			return true;
+	}
+	return false;
+}
+
 /* 完整跑一轮：拿 fd → libusb → 会话 → LiveView → 取帧循环，直到出错或关停。
  * 所有运行期资源在返回前全部拆干净（fd 归还总线），可安全重进。
  * fail_count 是跨轮传递的连续失败计数，>=2 时本轮启用 SET_CONFIGURATION 硬恢复。
  * 返回 true = 本轮有进展（进过 Live View），false = 一无所获。 */
-static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fail_count)
+static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fail_count, bool *parked_ejected)
 {
 	struct nikon_cam c = {0};
 	struct obs_android_usb_device devs[8];
@@ -514,6 +531,37 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 	bool lv_started = false;
 	bool session_open = false;
 	int usb_errs = 0;
+
+	if (parked_ejected)
+		*parked_ejected = false;
+
+	/* Respect explicit safe-eject: never open USB or request permission while the
+	 * ejected device instance is still plugged in; auto-clear once unplugged so
+	 * replugging resumes capture seamlessly. */
+	{
+		bool ejected = false;
+		char ejected_path[OBS_ANDROID_USB_NAME_LEN] = {0};
+		pthread_mutex_lock(&s->mtx);
+		ejected = s->safely_ejected;
+		if (ejected)
+			snprintf(ejected_path, sizeof(ejected_path), "%s", s->ejected_device);
+		pthread_mutex_unlock(&s->mtx);
+		if (ejected) {
+			if (!ejected_path[0] || nikon_usb_device_present(ejected_path)) {
+				set_status_key(s, "Status.SafelyEjected", NULL, 0);
+				if (parked_ejected)
+					*parked_ejected = true;
+				return false;
+			}
+			pthread_mutex_lock(&s->mtx);
+			s->safely_ejected = false;
+			s->ejected_device[0] = '\0';
+			pthread_mutex_unlock(&s->mtx);
+			blog(LOG_INFO, "nikon: 检测到已安全弹出的设备 '%s' 物理拔出，重新接入后将自动恢复采集",
+			     ejected_path);
+			obs_source_update_properties(s->source);
+		}
+	}
 
 	/* ---- 1. 在总线清单里找选中的设备 ---- */
 	if (!s->usb_device[0]) {
@@ -937,9 +985,31 @@ static void *nikon_thread_main(void *arg)
 	     s->lv_quality);
 
 	while (!os_atomic_load_long(&s->shutting_down)) {
-		const bool progress = nikon_run_once(s, &perm_requested, fail_count);
+		bool parked_ejected = false;
+		const bool progress = nikon_run_once(s, &perm_requested, fail_count, &parked_ejected);
 		if (os_atomic_load_long(&s->shutting_down))
 			break;
+		if (parked_ejected) {
+			fail_count = 0;
+			retry_ms = 0;
+			while (!os_atomic_load_long(&s->shutting_down)) {
+				sleep_check(s, 500);
+				if (os_atomic_load_long(&s->shutting_down))
+					break;
+				bool still_ejected = false;
+				char ej_path[OBS_ANDROID_USB_NAME_LEN] = {0};
+				pthread_mutex_lock(&s->mtx);
+				still_ejected = s->safely_ejected;
+				if (still_ejected)
+					snprintf(ej_path, sizeof(ej_path), "%s", s->ejected_device);
+				pthread_mutex_unlock(&s->mtx);
+				if (!still_ejected)
+					break;
+				if (ej_path[0] && !nikon_usb_device_present(ej_path))
+					break;
+			}
+			continue;
+		}
 		fail_count = progress ? 0 : fail_count + 1;
 		/* 指数退避：相机是独占设备，连续敲门抢不过别人还刷爆日志（camera2 同款账） */
 		retry_ms = retry_ms ? (retry_ms * 2 > RETRY_BACKOFF_MAX_MS ? RETRY_BACKOFF_MAX_MS : retry_ms * 2)
@@ -1038,7 +1108,9 @@ static void nikon_activate(void *data)
 
 static void nikon_deactivate(void *data)
 {
-	nikon_stop_thread(data);
+	struct nikon_source *s = data;
+	nikon_stop_thread(s);
+	obs_source_output_video(s->source, NULL);
 }
 
 static void nikon_update(void *data, obs_data_t *settings)
@@ -1048,13 +1120,19 @@ static void nikon_update(void *data, obs_data_t *settings)
 	const long long size = obs_data_get_int(settings, "lv_size");
 	const long long q = obs_data_get_int(settings, "lv_quality");
 
+	const bool dev_changed = strcmp(dev ? dev : "", s->usb_device) != 0;
 	/* 与 uvc-input.c 同款判法：只拿"设置项 vs 设置项"比，没变化就不重启 */
-	const bool changed = strcmp(dev ? dev : "", s->usb_device) != 0 || (int) size != s->lv_size ||
-			     (int) q != s->lv_quality;
+	const bool changed = dev_changed || (int) size != s->lv_size || (int) q != s->lv_quality;
 	if (!changed)
 		return;
 
 	nikon_stop_thread(s);
+	if (dev_changed || !dev || !*dev) {
+		pthread_mutex_lock(&s->mtx);
+		s->safely_ejected = false;
+		s->ejected_device[0] = '\0';
+		pthread_mutex_unlock(&s->mtx);
+	}
 	nikon_settings_apply(s, settings);
 	if (obs_source_active(s->source))
 		nikon_start_thread(s);
@@ -1079,6 +1157,76 @@ static bool on_request_permission(obs_properties_t *props, obs_property_t *prope
 	return false;
 }
 
+static bool on_safe_eject(obs_properties_t *props, obs_property_t *property, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(property);
+	struct nikon_source *s = data;
+	if (!s)
+		return false;
+
+	bool was_ejected = false;
+	pthread_mutex_lock(&s->mtx);
+	was_ejected = s->safely_ejected;
+	pthread_mutex_unlock(&s->mtx);
+
+	if (was_ejected) {
+		pthread_mutex_lock(&s->mtx);
+		s->safely_ejected = false;
+		s->ejected_device[0] = '\0';
+		pthread_mutex_unlock(&s->mtx);
+		nikon_stop_thread(s);
+		set_status_key(s, "Status.Initializing", NULL, 0);
+		blog(LOG_INFO, "nikon: 用户点击【重新连接 USB 设备】，正在恢复采集 '%s'", s->usb_device);
+		if (obs_source_active(s->source))
+			nikon_start_thread(s);
+		obs_property_set_description(property, obs_module_text("SafeEject"));
+		obs_property_set_long_description(property, obs_module_text("SafeEject.Description"));
+		obs_property_t *state_prop = obs_properties_get(props, "cap_state");
+		if (state_prop)
+			obs_property_set_description(state_prop, obs_module_text("Status.Initializing"));
+		return true;
+	}
+
+	pthread_mutex_lock(&s->mtx);
+	s->safely_ejected = true;
+	snprintf(s->ejected_device, sizeof(s->ejected_device), "%s", s->usb_device);
+	pthread_mutex_unlock(&s->mtx);
+
+	nikon_stop_thread(s);
+	obs_source_output_video(s->source, NULL);
+	set_status_key(s, "Status.SafelyEjected", NULL, 0);
+	blog(LOG_INFO, "nikon: USB 设备 '%s' 已安全弹出（PTP 会话、USB 接口与系统 fd 已全部释放，可安全拔出）",
+	     s->usb_device);
+
+	if (obs_source_active(s->source))
+		nikon_start_thread(s);
+	obs_property_set_description(property, obs_module_text("ReconnectUsb"));
+	obs_property_set_long_description(property, obs_module_text("ReconnectUsb.Description"));
+	obs_property_t *state_prop = obs_properties_get(props, "cap_state");
+	if (state_prop)
+		obs_property_set_description(state_prop, obs_module_text("Status.SafelyEjected"));
+	return true;
+}
+
+static bool on_nikon_device_change(void *data, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+	struct nikon_source *s = data;
+	obs_property_t *eject_btn = obs_properties_get(props, "safe_eject");
+	if (eject_btn) {
+		const char *dev = obs_data_get_string(settings, "usb_device");
+		bool ejected = false;
+		if (s) {
+			pthread_mutex_lock(&s->mtx);
+			ejected = s->safely_ejected;
+			pthread_mutex_unlock(&s->mtx);
+		}
+		obs_property_set_enabled(eject_btn, ejected || (dev && *dev));
+	}
+	return true;
+}
+
 static obs_properties_t *nikon_properties(void *data)
 {
 	struct nikon_source *s = data;
@@ -1087,6 +1235,7 @@ static obs_properties_t *nikon_properties(void *data)
 	/* 设备清单是打开属性页这一刻的快照（同 uvc-input.c：插拔后要重开对话框） */
 	obs_property_t *dev_list = obs_properties_add_list(props, "usb_device", obs_module_text("UsbDevice"),
 							   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_set_modified_callback2(dev_list, on_nikon_device_change, s);
 	struct obs_android_usb_device devs[8];
 	const int n = obs_android_usb_enum_devices(devs, 8);
 	if (n < 0) {
@@ -1104,6 +1253,18 @@ static obs_properties_t *nikon_properties(void *data)
 	}
 
 	obs_properties_add_button2(props, "request_perm", obs_module_text("RequestPerm"), on_request_permission, s);
+
+	bool is_ejected = false;
+	if (s) {
+		pthread_mutex_lock(&s->mtx);
+		is_ejected = s->safely_ejected;
+		pthread_mutex_unlock(&s->mtx);
+	}
+	obs_property_t *eject_btn = obs_properties_add_button2(
+		props, "safe_eject", obs_module_text(is_ejected ? "ReconnectUsb" : "SafeEject"), on_safe_eject, s);
+	obs_property_set_long_description(
+		eject_btn, obs_module_text(is_ejected ? "ReconnectUsb.Description" : "SafeEject.Description"));
+	obs_property_set_enabled(eject_btn, is_ejected || (s && s->usb_device[0] != '\0'));
 
 	obs_property_t *size_list = obs_properties_add_list(props, "lv_size", obs_module_text("LvSize"),
 							    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);

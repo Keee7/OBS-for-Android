@@ -604,6 +604,14 @@ uvc_error_t uvc_get_stream_ctrl_format_size(
     int fps
     );
 
+uvc_error_t uvc_get_stream_ctrl_format_size_interval(
+    uvc_device_handle_t *devh,
+    uvc_stream_ctrl_t *ctrl,
+    enum uvc_frame_format format,
+    int width, int height,
+    uint32_t target_interval
+    );
+
 uvc_error_t uvc_get_still_ctrl_format_size(
     uvc_device_handle_t *devh,
     uvc_stream_ctrl_t *ctrl,

@@ -589,6 +589,112 @@ found:
   return uvc_probe_stream_ctrl(devh, ctrl);
 }
 
+/** Get a negotiated streaming control block using an exact 100 ns frame interval
+ *  (preserving NTSC fractional rates such as 59.94 / 29.97 / 23.976 / 119.88 fps).
+ *  Pass target_interval == 0 to use the frame's default/first interval. */
+uvc_error_t uvc_get_stream_ctrl_format_size_interval(
+    uvc_device_handle_t *devh,
+    uvc_stream_ctrl_t *ctrl,
+    enum uvc_frame_format cf,
+    int width, int height,
+    uint32_t target_interval) {
+  uvc_streaming_interface_t *stream_if;
+  uint8_t best_if = 0, best_fmt = 0, best_frame = 0;
+  uint32_t best_iv = 0;
+  uint64_t best_diff = UINT64_MAX;
+  int have_best = 0;
+
+  DL_FOREACH(devh->info->stream_ifs, stream_if) {
+    uvc_format_desc_t *format;
+
+    DL_FOREACH(stream_if->format_descs, format) {
+      uvc_frame_desc_t *frame;
+
+      if (!_uvc_frame_format_matches_guid(cf, format->guidFormat))
+        continue;
+
+      DL_FOREACH(format->frame_descs, frame) {
+        if (frame->wWidth != width || frame->wHeight != height)
+          continue;
+
+        uint32_t cand_iv = 0;
+        uint64_t cand_diff = UINT64_MAX;
+
+        if (frame->intervals) {
+          uint32_t *interval;
+          if (target_interval == 0) {
+            cand_iv = frame->intervals[0];
+            for (interval = frame->intervals; *interval; ++interval) {
+              if (*interval == frame->dwDefaultFrameInterval) {
+                cand_iv = *interval;
+                break;
+              }
+            }
+            cand_diff = 0;
+          } else {
+            for (interval = frame->intervals; *interval; ++interval) {
+              uint64_t diff = *interval > target_interval
+                                  ? (uint64_t)(*interval - target_interval)
+                                  : (uint64_t)(target_interval - *interval);
+              if (diff < cand_diff) {
+                cand_diff = diff;
+                cand_iv = *interval;
+                if (diff == 0)
+                  break;
+              }
+            }
+          }
+        } else {
+          uint32_t interval_100ns = target_interval > 0 ? target_interval : frame->dwDefaultFrameInterval;
+          if (frame->dwMinFrameInterval && interval_100ns < frame->dwMinFrameInterval)
+            interval_100ns = frame->dwMinFrameInterval;
+          if (frame->dwMaxFrameInterval && interval_100ns > frame->dwMaxFrameInterval)
+            interval_100ns = frame->dwMaxFrameInterval;
+          if (frame->dwFrameIntervalStep > 0 && interval_100ns >= frame->dwMinFrameInterval) {
+            uint32_t offset = interval_100ns - frame->dwMinFrameInterval;
+            uint32_t step = frame->dwFrameIntervalStep;
+            offset = ((offset + step / 2U) / step) * step;
+            interval_100ns = frame->dwMinFrameInterval + offset;
+            if (frame->dwMaxFrameInterval && interval_100ns > frame->dwMaxFrameInterval)
+              interval_100ns = frame->dwMaxFrameInterval;
+          }
+          cand_iv = interval_100ns;
+          cand_diff = target_interval > 0
+                          ? (cand_iv > target_interval ? (uint64_t)(cand_iv - target_interval)
+                                                       : (uint64_t)(target_interval - cand_iv))
+                          : 0;
+        }
+
+        if (cand_iv != 0 && (!have_best || cand_diff < best_diff)) {
+          have_best = 1;
+          best_diff = cand_diff;
+          best_iv = cand_iv;
+          best_if = stream_if->bInterfaceNumber;
+          best_fmt = format->bFormatIndex;
+          best_frame = frame->bFrameIndex;
+          if (best_diff == 0)
+            goto found_interval;
+        }
+      }
+    }
+  }
+
+  if (!have_best)
+    return UVC_ERROR_INVALID_MODE;
+
+found_interval:
+  ctrl->bInterfaceNumber = best_if;
+  UVC_DEBUG("claiming streaming interface %d", best_if);
+  uvc_claim_if(devh, ctrl->bInterfaceNumber);
+  /* get the max values */
+  uvc_query_stream_ctrl(devh, ctrl, 1, UVC_GET_MAX);
+  ctrl->bmHint = (1 << 0); /* don't negotiate interval */
+  ctrl->bFormatIndex = best_fmt;
+  ctrl->bFrameIndex = best_frame;
+  ctrl->dwFrameInterval = best_iv;
+  return uvc_probe_stream_ctrl(devh, ctrl);
+}
+
 /** Get a negotiated still control block for some common parameters.
  * @ingroup streaming
  *

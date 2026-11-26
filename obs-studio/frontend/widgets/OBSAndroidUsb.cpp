@@ -78,6 +78,7 @@ static int jbGetDevices(void *param, struct obs_android_usb_device *out, int max
 		copyField(out[n].name, sizeof(out[n].name), f.at(0));
 		copyField(out[n].label, sizeof(out[n].label), f.at(1));
 		out[n].has_permission = f.at(2) == QLatin1String("1");
+		out[n].is_video = f.size() >= 4 && f.at(3) == QLatin1String("1");
 		n++;
 	}
 	return n;

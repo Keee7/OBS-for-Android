@@ -19,6 +19,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
@@ -75,6 +76,9 @@ public final class ObsUsbHost {
     private static int hotplugEvents = 0;
     private static String lastAction = "<none>";
     private static String lastPermissionResult = "<none>";
+    private static final long PERMISSION_COOLDOWN_MS = 8000L;
+    private static String pendingPermissionKey = null;
+    private static long pendingPermissionAtMs = 0L;
 
     private ObsUsbHost() {}
 
@@ -143,7 +147,20 @@ public final class ObsUsbHost {
         return true;
     }
 
-    /** "name|label|hasPermission" 拼成的单串，native 侧拆开填 obs_android_usb_device。 */
+    private static boolean isVideoDevice(UsbDevice d) {
+        if (d == null)
+            return false;
+        if (d.getDeviceClass() == UsbConstants.USB_CLASS_VIDEO)
+            return true;
+        final int n = d.getInterfaceCount();
+        for (int i = 0; i < n; i++) {
+            if (d.getInterface(i).getInterfaceClass() == UsbConstants.USB_CLASS_VIDEO)
+                return true;
+        }
+        return false;
+    }
+
+    /** "name|label|hasPermission|isVideo" 拼成的单串，native 侧拆开填 obs_android_usb_device。 */
     public static synchronized String snapshot() {
         if (manager == null)
             return "";
@@ -153,7 +170,8 @@ public final class ObsUsbHost {
             if (sb.length() > 0)
                 sb.append(ENTRY_SEP);
             sb.append(d.getDeviceName()).append(FIELD_SEP).append(labelOf(d)).append(FIELD_SEP)
-              .append(manager.hasPermission(d) ? "1" : "0");
+              .append(manager.hasPermission(d) ? "1" : "0").append(FIELD_SEP)
+              .append(isVideoDevice(d) ? "1" : "0");
         }
         return sb.toString();
     }
@@ -193,6 +211,10 @@ public final class ObsUsbHost {
         return manager.getDeviceList().get(name);
     }
 
+    private static String deviceKey(UsbDevice d) {
+        return String.format("%04x:%04x", d.getVendorId(), d.getProductId());
+    }
+
     /** 0=已有权限 1=已弹授权框（异步，等广播） -1=失败（设备不存在等） */
     public static synchronized int requestPermission(String name) {
         UsbDevice d = find(name);
@@ -200,8 +222,18 @@ public final class ObsUsbHost {
             Log.w(TAG, "requestPermission(" + name + ")：未在设备列表中找到该设备（可能已拔出）");
             return -1;
         }
-        if (manager.hasPermission(d))
+        if (manager.hasPermission(d)) {
+            pendingPermissionKey = null;
             return 0;
+        }
+        final String key = deviceKey(d);
+        final long nowMs = android.os.SystemClock.elapsedRealtime();
+        if (key.equals(pendingPermissionKey) && (nowMs - pendingPermissionAtMs) < PERMISSION_COOLDOWN_MS) {
+            Log.i(TAG, "requestPermission(" + d.getDeviceName() + ")：同设备(" + key + ")授权框已在进行中，跳过重复弹窗");
+            return 1;
+        }
+        pendingPermissionKey = key;
+        pendingPermissionAtMs = nowMs;
         /* Android 12+ (API 31+) 需要带显式 package 的 FLAG_MUTABLE，系统才会回填
          * EXTRA_DEVICE 与 EXTRA_PERMISSION_GRANTED。 */
         int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
@@ -210,7 +242,7 @@ public final class ObsUsbHost {
         PendingIntent pi = PendingIntent.getBroadcast(
             context, 0, new Intent(PERMISSION_ACTION).setPackage(context.getPackageName()), piFlags);
         manager.requestPermission(d, pi);
-        Log.i(TAG, "已弹出 USB 授权框：" + d.getDeviceName());
+        Log.i(TAG, "已弹出 USB 授权框：" + d.getDeviceName() + " (" + key + ")");
         return 1;
     }
 
@@ -278,7 +310,8 @@ public final class ObsUsbHost {
         } catch (IOException e) {
             Log.w(TAG, "closeFd(" + fd + ")：关闭借用 fd 失败", e);
         }
-        Log.i(TAG, "closeFd(" + fd + ") 已关闭 " + loan.name);
+        Log.i(TAG, "closeFd(" + fd + ") 已关闭 " + loan.name
+              + "（剩余活跃连接=" + connections.size() + "，借出fd=" + loans.size() + "）");
     }
 
     private static void disconnect(String name) {
@@ -319,8 +352,15 @@ public final class ObsUsbHost {
 
             if (PERMISSION_ACTION.equals(action)) {
                 boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
-                lastPermissionResult = granted ? "granted" : "denied";
-                Log.i(TAG, "USB 授权结果：" + lastPermissionResult);
+                UsbDevice pd = Build.VERSION.SDK_INT >= 33
+                    ? intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice.class)
+                    : intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                synchronized (ObsUsbHost.class) {
+                    pendingPermissionKey = null;
+                    lastPermissionResult = granted ? "granted" : "denied";
+                }
+                Log.i(TAG, "USB 授权结果：" + lastPermissionResult
+                      + (pd != null ? " (" + pd.getDeviceName() + ")" : ""));
             }
             if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
                 /* getParcelableExtra(String, Class) 这个重载要 API 33，minSdk 是 29，

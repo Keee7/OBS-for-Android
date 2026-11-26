@@ -1298,6 +1298,8 @@ void obs_source_deactivate(obs_source_t *source, enum view_type type)
 }
 
 static inline struct obs_source_frame *get_closest_frame(obs_source_t *source, uint64_t sys_time);
+static struct obs_source_frame *get_closest_frame_bounded(obs_source_t *source, uint64_t sys_time,
+							  size_t *catchup_dropped);
 
 static void filter_frame(obs_source_t *source, struct obs_source_frame **ref_frame)
 {
@@ -1362,6 +1364,25 @@ void process_media_actions(obs_source_t *source)
 	}
 }
 
+#ifdef __ANDROID__
+static uint32_t uvc_compute_p95_us(uint32_t *samples, uint16_t count)
+{
+	if (!samples || count == 0)
+		return 0;
+	for (uint16_t i = 1; i < count; i++) {
+		uint32_t key = samples[i];
+		int j = (int)i - 1;
+		while (j >= 0 && samples[j] > key) {
+			samples[j + 1] = samples[j];
+			j--;
+		}
+		samples[j + 1] = key;
+	}
+	uint16_t idx = (uint16_t)(((uint32_t)(count - 1) * 95U) / 100U);
+	return samples[idx];
+}
+#endif
+
 static void async_tick(obs_source_t *source)
 {
 	uint64_t sys_time = obs->video.video_time;
@@ -1376,11 +1397,15 @@ static void async_tick(obs_source_t *source)
 			source->cur_async_frame = NULL;
 		}
 
+		size_t catchup_dropped = 0;
 #ifdef __ANDROID__
 		const bool uvc_cadence = strcmp(source->info.id, "android_video_input") == 0;
 		const size_t queued_before = uvc_cadence ? source->async_frames.num : 0;
 #endif
-		source->cur_async_frame = get_closest_frame(source, sys_time);
+		if (source->async_max_latency_ns > 0 && !source->async_unbuffered)
+			source->cur_async_frame = get_closest_frame_bounded(source, sys_time, &catchup_dropped);
+		else
+			source->cur_async_frame = get_closest_frame(source, sys_time);
 #ifdef __ANDROID__
 		if (uvc_cadence) {
 			const bool showing = os_atomic_load_long(&source->show_refs) != 0;
@@ -1392,27 +1417,49 @@ static void async_tick(obs_source_t *source)
 				source->android_uvc_cadence_valid = true;
 				source->android_uvc_cadence_start = sys_time;
 				source->android_uvc_selected = source->android_uvc_empty = source->android_uvc_waiting =
-					source->android_uvc_skipped = 0;
+					source->android_uvc_skipped = source->android_uvc_catchup_skipped = 0;
+				source->android_uvc_delay_count = 0;
 				source->android_uvc_showing = showing;
 				source->android_uvc_active = active;
 				source->android_uvc_has_data = has_data;
 			}
 			const size_t selected = source->cur_async_frame ? 1 : 0;
+			const size_t total_removed =
+				queued_before >= source->async_frames.num + selected
+					? queued_before - source->async_frames.num - selected
+					: 0;
+			const size_t cadence_skipped =
+				total_removed >= catchup_dropped ? total_removed - catchup_dropped : 0;
 			source->android_uvc_selected += selected;
 			source->android_uvc_empty += !selected && !queued_before;
 			source->android_uvc_waiting += !selected && queued_before;
-			source->android_uvc_skipped += queued_before - source->async_frames.num - selected;
+			source->android_uvc_skipped += cadence_skipped;
+			source->android_uvc_catchup_skipped += catchup_dropped;
+			if (source->cur_async_frame && source->android_uvc_delay_count < 320) {
+				const uint64_t fts = source->cur_async_frame->timestamp;
+				const uint64_t delay_us = sys_time > fts ? (sys_time - fts) / 1000ULL : 0ULL;
+				source->android_uvc_delay_us[source->android_uvc_delay_count++] =
+					delay_us > UINT32_MAX ? UINT32_MAX : (uint32_t)delay_us;
+			}
 			if (sys_time - source->android_uvc_cadence_start >= 5000000000ULL) {
-				blog(LOG_INFO, "uvc: event=cadence_select selected=%llu no_frame_empty=%llu no_frame_waiting=%llu "
-				     "skipped=%llu queued=%zu showing=%d active=%d async_active=%d",
+				const uint32_t delay_p95_us = uvc_compute_p95_us(source->android_uvc_delay_us,
+										 source->android_uvc_delay_count);
+				const unsigned target_ms = (unsigned)(source->async_target_buffer_ns / 1000000ULL);
+				const unsigned budget_ms = (unsigned)(source->async_max_latency_ns / 1000000ULL);
+				blog(LOG_INFO,
+				     "uvc: event=cadence_select selected=%llu no_frame_empty=%llu no_frame_waiting=%llu "
+				     "skipped=%llu catchup_skipped=%llu queued=%zu delay_p95_us=%u target_ms=%u budget_ms=%u "
+				     "showing=%d active=%d async_active=%d",
 				     (unsigned long long)source->android_uvc_selected,
 				     (unsigned long long)source->android_uvc_empty,
 				     (unsigned long long)source->android_uvc_waiting,
-				     (unsigned long long)source->android_uvc_skipped, source->async_frames.num,
-				     showing, active, has_data);
+				     (unsigned long long)source->android_uvc_skipped,
+				     (unsigned long long)source->android_uvc_catchup_skipped, source->async_frames.num,
+				     delay_p95_us, target_ms, budget_ms, showing, active, has_data);
 				source->android_uvc_cadence_start = sys_time;
 				source->android_uvc_selected = source->android_uvc_empty = source->android_uvc_waiting =
-					source->android_uvc_skipped = 0;
+					source->android_uvc_skipped = source->android_uvc_catchup_skipped = 0;
+				source->android_uvc_delay_count = 0;
 			}
 		}
 #endif
@@ -3595,6 +3642,14 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source, co
 
 	pthread_mutex_lock(&source->async_mutex);
 
+	if (source->async_max_latency_ns > 0 && !source->async_unbuffered) {
+		const uint64_t now_ns = os_gettime_ns();
+		if (frame->timestamp > now_ns && frame->timestamp - now_ns > MAX_TS_VAR) {
+			pthread_mutex_unlock(&source->async_mutex);
+			return NULL;
+		}
+	}
+
 	if (source->async_frames.num >= MAX_ASYNC_FRAMES) {
 		free_async_cache(source);
 		source->last_frame_ts = 0;
@@ -4275,6 +4330,126 @@ static inline struct obs_source_frame *get_closest_frame(obs_source_t *source, u
 	}
 
 	return NULL;
+}
+
+/* Opt-in time-budget buffering & catch-up for live wall-clock async sources
+ * (e.g. UVC). All dequeue paths (cold start, steady state, and catch-up) share
+ * a single due-time clock: play_ts = sys_time - async_target_buffer_ns.
+ * - Normal future frames (play_ts < ts <= sys_time + MAX_TS_VAR) wait in queue.
+ * - Anomalous future frames (ts > sys_time + MAX_TS_VAR) are dropped and reset
+ *   the playhead so they can never be displayed early or block the FIFO queue.
+ * - Backlog exceeding async_max_latency_ns skips stale due frames to the latest
+ *   frame with timestamp <= play_ts and restores the playhead to play_ts,
+ *   preserving async_target_buffer_ns of arrival jitter cushion. */
+static struct obs_source_frame *get_closest_frame_bounded(obs_source_t *source, uint64_t sys_time,
+							  size_t *catchup_dropped)
+{
+	const uint64_t budget = source->async_max_latency_ns;
+	const uint64_t target =
+		source->async_target_buffer_ns <= budget ? source->async_target_buffer_ns : budget;
+	const uint64_t play_ts = sys_time > target ? sys_time - target : 0;
+	const uint64_t sys_offset =
+		(source->last_sys_timestamp && sys_time > source->last_sys_timestamp)
+			? (sys_time - source->last_sys_timestamp)
+			: 0;
+
+	/* Purge anomalous future timestamps at queue head so they can never be
+	 * emitted early or head-of-line block valid frames behind them. */
+	while (source->async_frames.num) {
+		struct obs_source_frame *head = source->async_frames.array[0];
+		if (head->timestamp > sys_time && head->timestamp - sys_time > MAX_TS_VAR) {
+			da_erase(source->async_frames, 0);
+			remove_async_frame(source, head);
+			source->last_frame_ts = 0;
+			continue;
+		}
+		break;
+	}
+
+	ssize_t due_idx = -1;
+	for (size_t i = 0; i < source->async_frames.num; i++) {
+		if (source->async_frames.array[i]->timestamp <= play_ts)
+			due_idx = (ssize_t)i;
+		else
+			break;
+	}
+
+	/* Unified due-time guard: never dequeue a frame whose timestamp > play_ts.
+	 * Advance an active playhead by sys_offset (clamped to play_ts) even on
+	 * empty/waiting ticks so a brief dropout does not freeze the playhead behind
+	 * target_buffer_ns on recovery. */
+	if (due_idx < 0) {
+		if (source->last_frame_ts) {
+			uint64_t next_play_ts = source->last_frame_ts + sys_offset;
+			if (next_play_ts > play_ts)
+				next_play_ts = play_ts;
+			source->last_frame_ts = next_play_ts;
+		}
+		return NULL;
+	}
+
+	const uint64_t head_ts = source->async_frames.array[0]->timestamp;
+	if (!source->last_frame_ts || frame_out_of_bounds(source, head_ts)) {
+		const uint64_t head_age = sys_time - head_ts;
+		if (head_age > budget && due_idx > 0) {
+			for (ssize_t i = 0; i < due_idx; i++) {
+				struct obs_source_frame *stale = source->async_frames.array[0];
+				da_erase(source->async_frames, 0);
+				remove_async_frame(source, stale);
+				if (catchup_dropped)
+					(*catchup_dropped)++;
+			}
+		}
+
+		struct obs_source_frame *frame = source->async_frames.array[0];
+		da_erase(source->async_frames, 0);
+		source->last_frame_ts = play_ts;
+		return frame;
+	}
+
+	const uint64_t projected_play_ts = source->last_frame_ts + sys_offset;
+	const bool head_over_budget = (sys_time - head_ts) > budget;
+	const bool playhead_over_budget = (projected_play_ts < sys_time) && ((sys_time - projected_play_ts) > budget);
+
+	if (head_over_budget || playhead_over_budget) {
+		for (ssize_t i = 0; i < due_idx; i++) {
+			struct obs_source_frame *stale = source->async_frames.array[0];
+			da_erase(source->async_frames, 0);
+			remove_async_frame(source, stale);
+			if (catchup_dropped)
+				(*catchup_dropped)++;
+		}
+		struct obs_source_frame *frame = source->async_frames.array[0];
+		da_erase(source->async_frames, 0);
+		source->last_frame_ts = play_ts;
+		return frame;
+	}
+
+	/* Steady-state pacing aligned to play_ts: advance smoothly with sys_offset
+	 * without ever running ahead of play_ts, and preserve the 2 ms boundary guard
+	 * against needless frame duplication when multiple frames are already due. */
+	uint64_t next_play_ts = projected_play_ts;
+	if (next_play_ts > play_ts)
+		next_play_ts = play_ts;
+	source->last_frame_ts = next_play_ts;
+
+	if (head_ts > next_play_ts)
+		return NULL;
+
+	while (source->async_frames.num > 1) {
+		struct obs_source_frame *next = source->async_frames.array[1];
+		if (next->timestamp > next_play_ts)
+			break;
+		if (next_play_ts - next->timestamp < 2000000ULL)
+			break;
+		struct obs_source_frame *old = source->async_frames.array[0];
+		da_erase(source->async_frames, 0);
+		remove_async_frame(source, old);
+	}
+
+	struct obs_source_frame *frame = source->async_frames.array[0];
+	da_erase(source->async_frames, 0);
+	return frame;
 }
 
 /*
@@ -5721,6 +5896,32 @@ void obs_source_set_async_unbuffered(obs_source_t *source, bool unbuffered)
 bool obs_source_async_unbuffered(const obs_source_t *source)
 {
 	return obs_source_valid(source, "obs_source_async_unbuffered") ? source->async_unbuffered : false;
+}
+
+void obs_source_set_async_latency_budget_ns(obs_source_t *source, uint64_t target_buffer_ns, uint64_t max_latency_ns)
+{
+	if (!obs_source_valid(source, "obs_source_set_async_latency_budget_ns"))
+		return;
+
+	if (max_latency_ns == 0)
+		target_buffer_ns = 0;
+	else if (target_buffer_ns > max_latency_ns)
+		target_buffer_ns = max_latency_ns;
+
+	pthread_mutex_lock(&source->async_mutex);
+	source->async_target_buffer_ns = target_buffer_ns;
+	source->async_max_latency_ns = max_latency_ns;
+	pthread_mutex_unlock(&source->async_mutex);
+}
+
+uint64_t obs_source_async_target_buffer_ns(const obs_source_t *source)
+{
+	return obs_source_valid(source, "obs_source_async_target_buffer_ns") ? source->async_target_buffer_ns : 0;
+}
+
+uint64_t obs_source_async_max_latency_ns(const obs_source_t *source)
+{
+	return obs_source_valid(source, "obs_source_async_max_latency_ns") ? source->async_max_latency_ns : 0;
 }
 
 obs_data_t *obs_source_get_private_settings(obs_source_t *source)
