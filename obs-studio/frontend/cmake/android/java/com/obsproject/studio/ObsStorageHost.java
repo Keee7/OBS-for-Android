@@ -217,6 +217,52 @@ public final class ObsStorageHost {
         while ((size = input.read(buffer)) != -1) output.write(buffer, 0, size);
     }
 
+    public static String exportFileToUri(Context context, String sourcePath, String destinationUri,
+                                         boolean prependUtf8Bom) {
+        if (context == null || sourcePath == null || destinationUri == null)
+            return "Invalid arguments";
+        ContentResolver resolver = context.getContentResolver();
+        Uri uri = Uri.parse(destinationUri);
+        OutputStream output = null;
+        try {
+            try {
+                output = resolver.openOutputStream(uri, "wt");
+            } catch (Exception first) {
+                output = resolver.openOutputStream(uri, "w");
+            }
+            if (output == null)
+                return "Could not open output stream for " + destinationUri;
+            try (InputStream input = new FileInputStream(new File(sourcePath));
+                 OutputStream out = output) {
+                output = null;
+                byte[] buffer = new byte[65536];
+                int firstRead = input.read(buffer);
+                if (prependUtf8Bom) {
+                    boolean hasBom = firstRead >= 3 &&
+                            (buffer[0] & 0xFF) == 0xEF &&
+                            (buffer[1] & 0xFF) == 0xBB &&
+                            (buffer[2] & 0xFF) == 0xBF;
+                    if (!hasBom)
+                        out.write(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
+                }
+                if (firstRead > 0)
+                    out.write(buffer, 0, firstRead);
+                int size;
+                while ((size = input.read(buffer)) != -1)
+                    out.write(buffer, 0, size);
+                out.flush();
+            }
+            return "";
+        } catch (Exception e) {
+            Log.e(TAG, "Cannot export file to " + destinationUri, e);
+            return e.getMessage() != null && !e.getMessage().isEmpty() ? e.getMessage() : e.toString();
+        } finally {
+            if (output != null) {
+                try { output.close(); } catch (IOException ignored) {}
+            }
+        }
+    }
+
     public static int open(Context context, String path, String mode) {
         try (ParcelFileDescriptor fd = context.getContentResolver().openFileDescriptor(Uri.parse(path),
                 mode.startsWith("w") ? "rwt" : mode.startsWith("a") ? "wa" : "r")) {

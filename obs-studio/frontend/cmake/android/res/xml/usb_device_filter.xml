@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- USB Video Class (UVC, bInterfaceClass = 0x0E / 14).
+         Android matches against both device class and every interface class, so this
+         covers standard UVC webcams, HDMI capture cards, and composite IAD UVC cameras. -->
+    <usb-device class="14" />
+</resources>

@@ -202,8 +202,13 @@ public final class ObsUsbHost {
         }
         if (manager.hasPermission(d))
             return 0;
-        int piFlags = PendingIntent.FLAG_IMMUTABLE;
-        PendingIntent pi = PendingIntent.getBroadcast(context, 0, new Intent(PERMISSION_ACTION).setPackage(context.getPackageName()), piFlags);
+        /* Android 12+ (API 31+) 需要带显式 package 的 FLAG_MUTABLE，系统才会回填
+         * EXTRA_DEVICE 与 EXTRA_PERMISSION_GRANTED。 */
+        int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= 31)
+            piFlags |= PendingIntent.FLAG_MUTABLE;
+        PendingIntent pi = PendingIntent.getBroadcast(
+            context, 0, new Intent(PERMISSION_ACTION).setPackage(context.getPackageName()), piFlags);
         manager.requestPermission(d, pi);
         Log.i(TAG, "已弹出 USB 授权框：" + d.getDeviceName());
         return 1;
@@ -211,6 +216,7 @@ public final class ObsUsbHost {
 
     /** 成功返回 getFileDescriptor()（>=0）；用户拒授权 / 设备不存在 / 已拔 → -1。 */
     public static synchronized int openFd(String name) {
+        dropDisconnected();
         UsbDevice d = find(name);
         if (d == null) {
             Log.w(TAG, "openFd(" + name + ")：未在设备列表中找到该设备");

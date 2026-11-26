@@ -155,7 +155,7 @@ def main():
                     errors.append('UVC YUV low-latency mode missing from APK')
                 if short == 'android-capture.so' and b'event=acquire_stopped' not in payload:
                     errors.append('UVC transport recovery diagnostics missing from APK')
-                if short == 'android-capture.so' and b'yuv_unbuffered' not in payload:
+                if short == 'android-capture.so' and b'low_latency_unbuffered' not in payload and b'yuv_unbuffered' not in payload:
                     errors.append('UVC independent cadence/buffering control missing from APK')
                 if short == 'android-capture.so' and b'transport=iso' not in payload:
                     errors.append('UVC Isochronous support missing from APK')

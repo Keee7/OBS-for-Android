@@ -155,7 +155,8 @@ void obsAndroidExportLog(QWidget *parent, const char *name)
 	}
 
 	const QString fileName = QString::fromUtf8(name);
-	QFile source(QDir(QString::fromUtf8(logDir)).filePath(fileName));
+	const QString sourcePath = QDir(QString::fromUtf8(logDir)).filePath(fileName);
+	QFile source(sourcePath);
 	if (!source.open(QIODevice::ReadOnly)) {
 		showError(source.errorString());
 		return;
@@ -167,7 +168,33 @@ void obsAndroidExportLog(QWidget *parent, const char *name)
 		return;
 	}
 
-	QSaveFile output(destination.isLocalFile() ? destination.toLocalFile() : destination.toString(QUrl::FullyEncoded));
+	if (!destination.isLocalFile()) {
+		source.close();
+		const auto context = storageContext();
+		if (!context.isValid()) {
+			showError(QStringLiteral("Android context unavailable"));
+			return;
+		}
+		const auto src = QJniObject::fromString(sourcePath);
+		const auto dst = QJniObject::fromString(destination.toString(QUrl::FullyEncoded));
+		const QJniObject result = QJniObject::callStaticObjectMethod(
+			storageClass, "exportFileToUri",
+			"(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/String;",
+			context.object<jobject>(), src.object<jstring>(), dst.object<jstring>(), jboolean(true));
+		if (!result.isValid()) {
+			showError(QStringLiteral("Android storage export unavailable"));
+			return;
+		}
+		const QString err = result.toString();
+		if (!err.isEmpty()) {
+			showError(err);
+			return;
+		}
+		OBSMessageBox::information(parent, title, QTStr("LogExport.Success"));
+		return;
+	}
+
+	QSaveFile output(destination.toLocalFile());
 	output.setDirectWriteFallback(true);
 	if (!output.open(QIODevice::WriteOnly)) {
 		showError(output.errorString());
