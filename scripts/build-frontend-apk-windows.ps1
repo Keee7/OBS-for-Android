@@ -13,14 +13,17 @@
 )
 $ErrorActionPreference = 'Stop'
 
-function Resolve-Tool([string]$Name, [string]$EnvVar, [string[]]$Commands, [string]$FallbackPath, [switch]$Optional) {
+function Resolve-Tool([string]$Name, [string]$EnvVar, [string[]]$Commands, [string]$FallbackPath, [switch]$Optional, [switch]$PreferFallback) {
     if ($EnvVar) {
         $val = [Environment]::GetEnvironmentVariable($EnvVar)
         if ($val -and (Test-Path -LiteralPath $val -PathType Leaf)) { return [IO.Path]::GetFullPath($val) }
     }
+    if ($PreferFallback -and $FallbackPath -and (Test-Path -LiteralPath $FallbackPath -PathType Leaf)) {
+        return [IO.Path]::GetFullPath($FallbackPath)
+    }
     foreach ($cmd in $Commands) {
-        $hit = Get-Command $cmd -All -ErrorAction SilentlyContinue |
-            Where-Object { $_.Source -notlike '*\WindowsApps\*' } | Select-Object -First 1
+        $hit = Get-Command $cmd -CommandType Application -All -ErrorAction SilentlyContinue |
+            Where-Object { $_.Source -and $_.Source -notlike '*\WindowsApps\*' } | Select-Object -First 1
         if ($hit) { return $hit.Source }
     }
     if ($FallbackPath -and (Test-Path -LiteralPath $FallbackPath -PathType Leaf)) {
@@ -30,15 +33,52 @@ function Resolve-Tool([string]$Name, [string]$EnvVar, [string[]]$Commands, [stri
     throw "Required tool '$Name' not found in environment/PATH or '$FallbackPath'."
 }
 
-function Resolve-Dir([string]$Name, [string[]]$EnvVars, [string]$MarkerRel, [string]$FallbackPath) {
+function Resolve-Dir([string]$Name, [string[]]$EnvVars, [string[]]$MarkerRels, [string]$FallbackPath) {
+    $hasAll = {
+        param([string]$Base)
+        if (!$Base) { return $false }
+        foreach ($rel in $MarkerRels) {
+            if (!(Test-Path -LiteralPath (Join-Path $Base $rel))) { return $false }
+        }
+        return $true
+    }
     foreach ($v in $EnvVars) {
         $val = [Environment]::GetEnvironmentVariable($v)
-        if ($val -and (Test-Path -LiteralPath (Join-Path $val $MarkerRel))) { return [IO.Path]::GetFullPath($val) }
+        if (& $hasAll $val) { return [IO.Path]::GetFullPath($val) }
     }
-    if ($FallbackPath -and (Test-Path -LiteralPath (Join-Path $FallbackPath $MarkerRel))) {
+    if (& $hasAll $FallbackPath) {
         return [IO.Path]::GetFullPath($FallbackPath)
     }
     throw "Required directory '$Name' not found in environment or '$FallbackPath'."
+}
+
+function Get-VersionSortKey([string]$Text) {
+    return [regex]::Replace($Text, '\d+', { param($m) $m.Value.PadLeft(10, '0') })
+}
+
+function Normalize-CachePath([string]$Value) {
+    return ($Value.Trim() -replace '\\', '/').TrimEnd('/')
+}
+
+function Test-NdkMatchesMajor([string]$Dir, [string]$Major) {
+    if (!$Dir) { return $false }
+    $props = Join-Path $Dir 'source.properties'
+    if (!(Test-Path -LiteralPath $props -PathType Leaf)) { return $false }
+    if (!$Major) { return $true }
+    $revLine = Get-Content -LiteralPath $props -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match '^Pkg\.Revision\s*=' } | Select-Object -First 1
+    if (!$revLine) { return $false }
+    $rev = ($revLine -split '=', 2)[1].Trim()
+    return $rev.StartsWith("$Major.")
+}
+
+function Test-JavaHomeCompatible([string]$Dir, [int[]]$AllowedMajors) {
+    if (!$Dir -or !(Test-Path -LiteralPath (Join-Path $Dir 'bin/javac.exe') -PathType Leaf)) { return $false }
+    $releaseFile = Join-Path $Dir 'release'
+    if (!(Test-Path -LiteralPath $releaseFile -PathType Leaf)) { return $true }
+    $verLine = Get-Content -LiteralPath $releaseFile -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match '^JAVA_VERSION="(\d+)' } | Select-Object -First 1
+    return ($verLine -match '^JAVA_VERSION="(\d+)' -and ([int]$Matches[1] -in $AllowedMajors))
 }
 
 $toolchain = @{}
@@ -63,27 +103,60 @@ $tools = [IO.Path]::GetFullPath($ToolsRoot)
 $build = Join-Path $tools ('build-obs33-arm64-qt' + $QtVersion.Replace('.', ''))
 $logs = Join-Path $tools 'build-logs'
 
-$sdk = Resolve-Dir 'Android SDK' @('ANDROID_SDK_ROOT','ANDROID_HOME') "platforms/android-$CompileSdkVersion/android.jar" (Join-Path $tools 'android-sdk')
+$sdk = Resolve-Dir 'Android SDK' @('ANDROID_SDK_ROOT','ANDROID_HOME') @(
+    "platforms/android-$CompileSdkVersion/android.jar",
+    "build-tools/$BuildToolsVersion/zipalign.exe"
+) (Join-Path $tools 'android-sdk')
 
-$ndkMajor = $NdkVersion -replace '^[rR]', ''
-$sdkNdkDir = Get-ChildItem -Path (Join-Path $sdk 'ndk') -Directory -ErrorAction SilentlyContinue |
-    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'source.properties') } |
-    Sort-Object @{ Expression = { $_.Name.StartsWith("$ndkMajor.") }; Descending = $true }, Name -Descending |
-    Select-Object -First 1
-$ndk = Resolve-Dir "Android NDK ($NdkVersion)" @('ANDROID_NDK_ROOT','ANDROID_NDK_HOME') 'source.properties' $(if ($sdkNdkDir) { $sdkNdkDir.FullName } else { '' })
+$ndkMajorMatch = [regex]::Match($NdkVersion, '^\D*(\d+)')
+$ndkMajor = if ($ndkMajorMatch.Success) { $ndkMajorMatch.Groups[1].Value } else { '' }
+$ndk = $null
+foreach ($envVar in @('ANDROID_NDK_ROOT','ANDROID_NDK_HOME')) {
+    $candidate = [Environment]::GetEnvironmentVariable($envVar)
+    if (Test-NdkMatchesMajor $candidate $ndkMajor) {
+        $ndk = [IO.Path]::GetFullPath($candidate)
+        break
+    }
+}
+if (!$ndk) {
+    $sdkNdkDir = Get-ChildItem -Path (Join-Path $sdk 'ndk') -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-NdkMatchesMajor $_.FullName $ndkMajor } |
+        Sort-Object { Get-VersionSortKey $_.Name } -Descending | Select-Object -First 1
+    if ($sdkNdkDir) { $ndk = [IO.Path]::GetFullPath($sdkNdkDir.FullName) }
+}
+if (!$ndk) {
+    $legacyNdk = Join-Path $tools "ndk/android-ndk-$NdkVersion"
+    if (Test-NdkMatchesMajor $legacyNdk $ndkMajor) { $ndk = [IO.Path]::GetFullPath($legacyNdk) }
+}
+if (!$ndk) {
+    throw "Required directory 'Android NDK ($NdkVersion)' not found in ANDROID_NDK_ROOT/ANDROID_NDK_HOME, '$sdk/ndk/$ndkMajor.*', or '$tools/ndk/android-ndk-$NdkVersion'."
+}
 
-$jdkDir = Get-ChildItem -Path $tools -Directory -Filter "jdk-$JdkVersion*" -ErrorAction SilentlyContinue |
-    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'bin/javac.exe') } |
-    Sort-Object Name -Descending | Select-Object -First 1
-$javaHome = Resolve-Dir "JDK $JdkVersion" @('JAVA_HOME') 'bin/javac.exe' $(if ($jdkDir) { $jdkDir.FullName } else { '' })
+$allowedJdkMajors = @([int]$JdkVersion, 17)
+$javaHome = $null
+if (Test-JavaHomeCompatible $env:JAVA_HOME $allowedJdkMajors) {
+    $javaHome = [IO.Path]::GetFullPath($env:JAVA_HOME)
+}
+if (!$javaHome) {
+    $jdkDir = @("jdk-$JdkVersion*", 'jdk-17*') | ForEach-Object {
+        Get-ChildItem -Path $tools -Directory -Filter $_ -ErrorAction SilentlyContinue |
+            Where-Object { Test-JavaHomeCompatible $_.FullName $allowedJdkMajors } |
+            Sort-Object { Get-VersionSortKey $_.Name } -Descending | Select-Object -First 1
+    } | Where-Object { $_ } | Select-Object -First 1
+    if ($jdkDir) { $javaHome = [IO.Path]::GetFullPath($jdkDir.FullName) }
+}
+if (!$javaHome) {
+    throw "Required directory 'JDK $JdkVersion' not found in compatible JAVA_HOME or '$tools/jdk-$JdkVersion*'."
+}
 
 $cmakeDir = Get-ChildItem -Path (Join-Path $tools 'cmake') -Directory -Filter 'cmake-*' -ErrorAction SilentlyContinue |
-    Sort-Object Name -Descending | Select-Object -First 1
+    Sort-Object { Get-VersionSortKey $_.Name } -Descending | Select-Object -First 1
 $cmakeFallback = if ($cmakeDir) { Join-Path $cmakeDir.FullName 'bin/cmake.exe' } else { '' }
-$cmake = Resolve-Tool 'CMake' '' @('cmake') $cmakeFallback
+$cmake = Resolve-Tool 'CMake' '' @('cmake') $cmakeFallback -PreferFallback
 $ninja = Resolve-Tool 'Ninja' '' @('ninja') (Join-Path $tools 'ninja/ninja.exe')
-$gradle = Resolve-Tool 'Gradle' '' @('gradle') (Join-Path $tools "gradle/gradle-$GradleVersion/bin/gradle.bat")
-$python = Resolve-Tool 'Python' 'PYTHON' @('python','py') (Join-Path $tools 'python/python.exe')
+$gradle = Resolve-Tool 'Gradle' '' @('gradle') (Join-Path $tools "gradle/gradle-$GradleVersion/bin/gradle.bat") -PreferFallback
+$python = Resolve-Tool 'Python' 'PYTHON' @('python') (Join-Path $tools 'python/python.exe') -Optional
+if (!$python) { $python = Resolve-Tool 'Python' '' @('py') '' }
 $ccache = Resolve-Tool 'ccache' '' @('ccache') (Join-Path $tools 'ccache/ccache.exe') -Optional
 
 $qt = Join-Path $tools "Qt/$QtVersion/android_arm64_v8a"
@@ -99,8 +172,16 @@ $env:ANDROID_USER_HOME = Join-Path $tools 'android-user-home'
 $env:GRADLE_USER_HOME = Join-Path $tools 'gradle-cache'
 # Qt invokes Gradle internally. A persistent daemon can retain this script's
 # redirected output handle after a successful build and block the pipeline.
-$env:GRADLE_OPTS = ($env:GRADLE_OPTS + ' -Dorg.gradle.daemon=false').Trim()
-$env:PATH = "$(Split-Path $gradle -Parent);$javaHome/bin;$hostQt/bin;$(Split-Path $ninja -Parent);$env:PATH"
+if ($env:GRADLE_OPTS -notmatch '(^|\s)-Dorg\.gradle\.daemon=false(\s|$)') {
+    $env:GRADLE_OPTS = ($env:GRADLE_OPTS + ' -Dorg.gradle.daemon=false').Trim()
+}
+$pathEntries = @((Split-Path $gradle -Parent), "$javaHome/bin", "$hostQt/bin", (Split-Path $ninja -Parent))
+$existingPath = @($env:PATH -split ';' | Where-Object { $_ })
+$newPath = @()
+foreach ($p in ($pathEntries + $existingPath)) {
+    if ($p -and ($newPath -notcontains $p)) { $newPath += $p }
+}
+$env:PATH = $newPath -join ';'
 New-Item -ItemType Directory -Force -Path $build,$logs,$env:ANDROID_USER_HOME | Out-Null
 
 $packageId = if ($AntutuPackage) { 'com.antutu.ABenchMark' } else { 'com.obsproject.studio' }
@@ -125,6 +206,19 @@ $servicePath = Join-Path $packageSource 'java/com/obsproject/studio/ObsForegroun
 $serviceText = [IO.File]::ReadAllText($servicePath)
 $serviceText = ([regex]'import com\.(?:obsproject\.studio|antutu\.ABenchMark)\.R;').Replace($serviceText, "import $packageId.R;", 1)
 [IO.File]::WriteAllText($servicePath, $serviceText, [Text.UTF8Encoding]::new($false))
+# Ensure AGP/Gradle can locate android.ndkVersion under $sdk/ndk/<revision>
+# when $ndk comes from ANDROID_NDK_ROOT or legacy build-tools/ndk/android-ndk-*.
+$revisionLine = Get-Content -LiteralPath "$ndk/source.properties" | Where-Object { $_ -match '^Pkg\.Revision\s*=' } | Select-Object -First 1
+if ($revisionLine) {
+    $revision = ($revisionLine -split '=', 2)[1].Trim()
+    $sdkNdk = [IO.Path]::GetFullPath((Join-Path $sdk "ndk/$revision"))
+    if ($sdkNdk -ne $ndk -and !(Test-Path -LiteralPath $sdkNdk)) {
+        $staleLink = Get-Item -LiteralPath $sdkNdk -Force -ErrorAction SilentlyContinue
+        if ($staleLink) { $staleLink.Delete() }
+        New-Item -ItemType Directory -Force -Path (Split-Path $sdkNdk -Parent) | Out-Null
+        New-Item -ItemType Junction -Path $sdkNdk -Target $ndk | Out-Null
+    }
+}
 
 function Invoke-BuildTool([string]$Program, [string[]]$Arguments, [string]$LogName) {
     # Gradle daemons can retain inherited log handles after a successful build.
@@ -153,7 +247,31 @@ if ($ccache) {
     New-Item -ItemType Directory -Force -Path $env:CCACHE_DIR | Out-Null
 }
 
-$needConfigure = $Action -in @('configure','all') -or !(Test-Path -LiteralPath (Join-Path $build 'CMakeCache.txt'))
+$cacheFile = Join-Path $build 'CMakeCache.txt'
+$expectedCcache = if ($ccache) { Normalize-CachePath $ccache } else { '' }
+$needConfigure = $Action -in @('configure','all') -or !(Test-Path -LiteralPath $cacheFile)
+if (!$needConfigure) {
+    $cacheText = [IO.File]::ReadAllText($cacheFile)
+    $expectedCache = @{
+        'OBS_ANDROID_PACKAGE_NAME' = $packageId
+        'OBS_ANDROID_COMPILE_SDK_VERSION' = "$CompileSdkVersion"
+        'CMAKE_PREFIX_PATH' = "$(Normalize-CachePath $prefix);$(Normalize-CachePath $qt)"
+        'CMAKE_TOOLCHAIN_FILE' = Normalize-CachePath "$ndk/build/cmake/android.toolchain.cmake"
+        'ANDROID_SDK_ROOT' = Normalize-CachePath $sdk
+        'CMAKE_MAKE_PROGRAM' = Normalize-CachePath $ninja
+        'CMAKE_C_COMPILER_LAUNCHER' = $expectedCcache
+        'CMAKE_CXX_COMPILER_LAUNCHER' = $expectedCcache
+    }
+    foreach ($entry in $expectedCache.GetEnumerator()) {
+        $pattern = "(?m)^$([regex]::Escape($entry.Key)):[^=]*=(.*)$"
+        $m = [regex]::Match($cacheText, $pattern)
+        $actual = if ($m.Success) { Normalize-CachePath $m.Groups[1].Value } else { '' }
+        if ($actual -ne $entry.Value) {
+            $needConfigure = $true
+            break
+        }
+    }
+}
 if ($needConfigure) {
     $argsConfigure = @('-S', "$repo/obs-studio", '-B', $build, '-G', 'Ninja',
         "-DCMAKE_MAKE_PROGRAM=$ninja", "-DCMAKE_TOOLCHAIN_FILE=$ndk/build/cmake/android.toolchain.cmake",
@@ -167,6 +285,8 @@ if ($needConfigure) {
         $ccachePath = $ccache.Replace('\', '/')
         $argsConfigure += "-DCMAKE_C_COMPILER_LAUNCHER=$ccachePath", "-DCMAKE_CXX_COMPILER_LAUNCHER=$ccachePath"
         Write-Host "Using ccache: $ccachePath (CCACHE_DIR=$env:CCACHE_DIR)"
+    } else {
+        $argsConfigure += '-UCMAKE_C_COMPILER_LAUNCHER', '-UCMAKE_CXX_COMPILER_LAUNCHER'
     }
     Invoke-BuildTool $cmake $argsConfigure 'configure.log'
 }
@@ -238,7 +358,9 @@ if ($Action -in @('package','all')) {
         Invoke-BuildTool "$sdk/build-tools/$BuildToolsVersion/apksigner.bat" @('verify','--verbose',$signed) 'verify-signature.log'
         Invoke-BuildTool "$sdk/build-tools/$BuildToolsVersion/zipalign.exe" @('-c','-P','16','-v','4',$signed) 'verify-alignment.log'
         Invoke-BuildTool $python @("$PSScriptRoot/verify-android-apk.py", $signed, '--tools-root', $tools,
-            '--native-dir', $build, '--expected-package', $packageId) 'strict-apk-check.log'
+            '--native-dir', $build, '--expected-package', $packageId,
+            '--aapt', "$sdk/build-tools/$BuildToolsVersion/aapt.exe",
+            '--readelf', "$ndk/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-readelf.exe") 'strict-apk-check.log'
         Invoke-BuildTool $python @("$PSScriptRoot/qt-android-ime/verify-runtime-apk.py", $signed) 'qt-runtime-apk-check.log'
         Invoke-BuildTool $python @("$PSScriptRoot/android-plugin-bundle.py", 'verify', $signed) 'plugin-bundle-apk.log'
     }

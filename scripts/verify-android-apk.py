@@ -2,6 +2,7 @@
 """Inspect an Android test APK's manifest, native binaries and generated Java classes."""
 import argparse
 import hashlib
+import os
 import re
 import struct
 import subprocess
@@ -94,16 +95,64 @@ def load_toolchain_versions():
     return versions
 
 
-def default_ndk_dir(tools_root: Path, ndk_version: str) -> Path:
-    sdk_ndk_root = tools_root / 'android-sdk' / 'ndk'
+def _version_sort_key(name: str):
+    return tuple(int(part) if part.isdigit() else part.lower() for part in re.split(r'(\d+)', name))
+
+
+def default_sdk_dir(tools_root: Path, build_tools: str = '') -> Path:
+    aapt_name = 'aapt.exe' if os.name == 'nt' else 'aapt'
+    for env_var in ('ANDROID_SDK_ROOT', 'ANDROID_HOME'):
+        sdk_env = os.environ.get(env_var)
+        if sdk_env:
+            candidate = Path(sdk_env)
+            if build_tools:
+                if (candidate / 'build-tools' / build_tools / aapt_name).is_file():
+                    return candidate
+            elif (candidate / 'build-tools').is_dir() and (candidate / 'platforms').is_dir():
+                return candidate
+    return tools_root / 'android-sdk'
+
+
+def _ndk_revision_matches(ndk_dir: Path, major: str) -> bool:
+    props = ndk_dir / 'source.properties'
+    if not props.is_file():
+        return False
+    if not major:
+        return True
+    for line in props.read_text(encoding='utf-8', errors='replace').splitlines():
+        m = re.match(r'^Pkg\.Revision\s*=\s*(.+)$', line.strip())
+        if m:
+            return m.group(1).strip().startswith(f'{major}.')
+    return False
+
+
+def default_ndk_dir(tools_root: Path, ndk_version: str, build_tools: str = '') -> Path:
+    m = re.match(r'^[rR]?(\d+)', ndk_version)
+    major = m.group(1) if m else ''
+    env_candidates = []
+    for env_var in ('ANDROID_NDK_ROOT', 'ANDROID_NDK_HOME'):
+        ndk_env = os.environ.get(env_var)
+        if ndk_env:
+            p = Path(ndk_env)
+            if (p / 'source.properties').is_file():
+                if _ndk_revision_matches(p, major):
+                    return p
+                env_candidates.append(p)
+    sdk_ndk_root = default_sdk_dir(tools_root, build_tools) / 'ndk'
+    sdk_candidates = []
     if sdk_ndk_root.is_dir():
-        major = ndk_version.lstrip('rR')
-        candidates = [p for p in sdk_ndk_root.iterdir() if p.is_dir() and (p / 'source.properties').is_file()]
-        preferred = sorted([p for p in candidates if p.name.startswith(f'{major}.')], key=lambda p: p.name, reverse=True)
+        sdk_candidates = [p for p in sdk_ndk_root.iterdir() if p.is_dir() and (p / 'source.properties').is_file()]
+        preferred = sorted([p for p in sdk_candidates if _ndk_revision_matches(p, major)],
+                           key=lambda p: _version_sort_key(p.name), reverse=True)
         if preferred:
             return preferred[0]
-        if candidates:
-            return sorted(candidates, key=lambda p: p.name, reverse=True)[0]
+    legacy = tools_root / 'ndk' / f'android-ndk-{ndk_version}'
+    if (legacy / 'source.properties').is_file():
+        return legacy
+    if sdk_candidates:
+        return sorted(sdk_candidates, key=lambda p: _version_sort_key(p.name), reverse=True)[0]
+    if env_candidates:
+        return env_candidates[0]
     return sdk_ndk_root / ndk_version
 
 
@@ -119,9 +168,9 @@ def main():
     versions = load_toolchain_versions()
     build_tools = versions.get('BUILD_TOOLS_VERSION', '36.0.0')
     ndk_version = versions.get('NDK_VERSION', 'r30')
-    sdk = args.tools_root / 'android-sdk' / 'build-tools' / build_tools
+    sdk = default_sdk_dir(args.tools_root, build_tools) / 'build-tools' / build_tools
     aapt = args.aapt or sdk / 'aapt.exe'
-    readelf = args.readelf or default_ndk_dir(args.tools_root, ndk_version) / 'toolchains' / 'llvm' / 'prebuilt' / 'windows-x86_64' / 'bin' / 'llvm-readelf.exe'
+    readelf = args.readelf or default_ndk_dir(args.tools_root, ndk_version, build_tools) / 'toolchains' / 'llvm' / 'prebuilt' / 'windows-x86_64' / 'bin' / 'llvm-readelf.exe'
     errors = []
     try:
         print('APK SHA-256:', hashlib.sha256(args.apk.read_bytes()).hexdigest())

@@ -102,7 +102,16 @@ def main():
     versions = load_toolchain_versions()
     java = find_java_exe(args.tools_root, versions.get('JDK_VERSION', '21'))
     build_tools = versions.get('BUILD_TOOLS_VERSION', '36.0.0')
-    jar = args.tools_root / f'android-sdk/build-tools/{build_tools}/lib/apksigner.jar'
+    jar = None
+    for env_var in ('ANDROID_SDK_ROOT', 'ANDROID_HOME'):
+        sdk_env = os.environ.get(env_var)
+        if sdk_env:
+            candidate = Path(sdk_env) / f'build-tools/{build_tools}/lib/apksigner.jar'
+            if candidate.is_file():
+                jar = candidate
+                break
+    if jar is None:
+        jar = args.tools_root / f'android-sdk/build-tools/{build_tools}/lib/apksigner.jar'
     with tempfile.TemporaryDirectory(prefix='obs-release-sign-') as tmp:
         key = Path(tmp) / 'release.jks'
         key.write_bytes(store)
