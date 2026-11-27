@@ -40,6 +40,40 @@ build_uthash() {
   echo "       uthash 头文件已安装 (header-only)"
 }
 
+build_nlohmann_json() {
+  local s ver d
+  s=$(src_dir nlohmann-json)
+  ver=$(dep_version nlohmann-json)
+  mkdir -p "$PREFIX/include/nlohmann" "$PREFIX/share/cmake/nlohmann_json" || return 1
+  # json_fwd.hpp must ship alongside json.hpp (included by GoLiveAPI_CensoredJson.hpp).
+  cp -f "$s/single_include/nlohmann/json.hpp" "$s/single_include/nlohmann/json_fwd.hpp" \
+    "$PREFIX/include/nlohmann/" || return 1
+  d="$PREFIX/share/cmake/nlohmann_json"
+  cat > "$d/nlohmann_jsonConfig.cmake" <<'EOF' || return 1
+if(TARGET nlohmann_json::nlohmann_json)
+  return()
+endif()
+get_filename_component(_nlohmann_prefix "${CMAKE_CURRENT_LIST_FILE}/../../../.." ABSOLUTE)
+add_library(nlohmann_json::nlohmann_json INTERFACE IMPORTED)
+set_target_properties(nlohmann_json::nlohmann_json PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "${_nlohmann_prefix}/include")
+set(nlohmann_json_FOUND TRUE)
+EOF
+  printf 'set(nlohmann_json_VERSION "%s")\n' "$ver" >> "$d/nlohmann_jsonConfig.cmake" || return 1
+  cat > "$d/nlohmann_jsonConfigVersion.cmake" <<EOF || return 1
+set(PACKAGE_VERSION "$ver")
+if(PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION)
+  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+else()
+  set(PACKAGE_VERSION_COMPATIBLE TRUE)
+  if(PACKAGE_FIND_VERSION STREQUAL PACKAGE_VERSION)
+    set(PACKAGE_VERSION_EXACT TRUE)
+  endif()
+endif()
+EOF
+  echo "       nlohmann_json $ver 头文件与 CMake 包已安装 (header-only)"
+}
+
 # ---------------------------------------------------------------- cmake 系
 _run_cmake() {
   local s=$1; shift

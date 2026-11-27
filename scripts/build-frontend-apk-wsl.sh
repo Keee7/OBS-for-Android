@@ -17,14 +17,20 @@ ABI=arm64-v8a
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${OBS_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+while IFS='=' read -r _k _v; do
+  case "$_k" in ''|'#'*) continue ;; esac
+  [ -n "${!_k+x}" ] || export "$_k=$_v"
+done < "$SCRIPT_DIR/toolchain-versions.env"
+
 [ -f "$HOME/.obs-android-env.sh" ] && . "$HOME/.obs-android-env.sh"
 
 SDK="${ANDROID_SDK_ROOT:?缺 ANDROID_SDK_ROOT，先 source ~/.obs-android-env.sh}"
 QT="${QT_DIR:?缺 QT_DIR}"
 HOST="${QT_HOST_PATH:?缺 QT_HOST_PATH}"
 NDK="${NDK_ROOT:?缺 NDK_ROOT}"
-GRADLE_BIN="${GRADLE_BIN:-$HOME/toolchain/gradle-9.5.1/bin}"
-COMPILE_SDK_VERSION="${OBS_ANDROID_COMPILE_SDK_VERSION:-36}"
+GRADLE_BIN="${GRADLE_BIN:-$HOME/toolchain/gradle-$GRADLE_VERSION/bin}"
+COMPILE_SDK_VERSION="${OBS_ANDROID_COMPILE_SDK_VERSION:-$COMPILE_SDK_VERSION}"
+BUILD_TOOLS_VERSION="${BUILD_TOOLS_VERSION:-36.0.0}"
 case "$COMPILE_SDK_VERSION" in
   ''|*[!0-9]*) echo "FATAL: OBS_ANDROID_COMPILE_SDK_VERSION 必须为 SDK 平台版本号" >&2; exit 1 ;;
 esac
@@ -34,11 +40,16 @@ esac
 }
 
 export PATH="$HOME/.venv/bin:$GRADLE_BIN:$SDK/platform-tools:$PATH"
-export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"
+if [ -z "${JAVA_HOME:-}" ]; then
+  for _jvm in "/usr/lib/jvm/java-${JDK_VERSION}-openjdk-amd64" "/usr/lib/jvm/java-17-openjdk-amd64"; do
+    [ -x "$_jvm/bin/java" ] && { JAVA_HOME="$_jvm"; break; }
+  done
+  export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-${JDK_VERSION}-openjdk-amd64}"
+fi
 
 [ -d "$QT/android_arm64_v8a" ] || { echo "FATAL: 缺少 Qt for Android：$QT/android_arm64_v8a" >&2; exit 1; }
 [ -d "$NDK" ] || { echo "FATAL: 缺少 NDK：$NDK" >&2; exit 1; }
-[ -x "$JAVA_HOME/bin/java" ] || { echo "FATAL: 缺少 JDK 17：$JAVA_HOME" >&2; exit 1; }
+[ -x "$JAVA_HOME/bin/java" ] || { echo "FATAL: 缺少 JDK：$JAVA_HOME" >&2; exit 1; }
 [ -x "$GRADLE_BIN/gradle" ] || { echo "FATAL: 缺少 Gradle：$GRADLE_BIN" >&2; exit 1; }
 command -v cmake >/dev/null || { echo "FATAL: PATH 里没有 cmake（venv 没生效？）" >&2; exit 1; }
 
@@ -154,10 +165,10 @@ python3 "$SCRIPT_DIR/stage-qt-gradle-properties.py" \
     --output "$AB_DIR" \
     --android-platform "android-$COMPILE_SDK_VERSION" \
     --sdk "$SDK" \
-    --build-tools 36.0.0 || exit 1
+    --build-tools "$BUILD_TOOLS_VERSION" || exit 1
 
 python3 "$SCRIPT_DIR/qt-android-ime/patch-qt-android-jar.py" \
-    --qt-version 6.12.0 --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
+    --qt-version "$QT_VERSION" --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
     --qtbase-src "$BUILD_DIR/_deps/obs_qtbase_android-src" \
     --android-jar "$SDK/platforms/android-$COMPILE_SDK_VERSION/android.jar" \
     --javac "$JAVA_HOME/bin/javac" --output "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" || exit 1
@@ -181,7 +192,7 @@ APK=$(find "$BUILD_DIR" -path "*build/outputs/apk/release/*-unsigned.apk" 2>/dev
 python3 "$SCRIPT_DIR/qt-android-ime/verify-runtime-apk.py" "$APK" || exit 1
 python3 "$SCRIPT_DIR/android-plugin-bundle.py" verify "$APK" || exit 1
 
-APKSIGNER="$SDK/build-tools/36.0.0/apksigner"
+APKSIGNER="$SDK/build-tools/$BUILD_TOOLS_VERSION/apksigner"
 [ -f "$APKSIGNER" ] || APKSIGNER="$SDK/build-tools/34.0.0/apksigner"
 if ! "$APKSIGNER" verify "$APK" >/dev/null 2>&1; then
   echo "=== 签名 $(basename "$APK") ==="
@@ -199,7 +210,7 @@ echo "=== APK ==="
 ls -la "$APK"
 echo "=== APK 内的 native 库（$ABI）与清单 ==="
 unzip -l "$APK" | grep -c "lib/$ABI/" | xargs echo "lib/$ABI 条目数="
-AAPT2="$SDK/build-tools/36.0.0/aapt2"
+AAPT2="$SDK/build-tools/$BUILD_TOOLS_VERSION/aapt2"
 [ -f "$AAPT2" ] || AAPT2="$SDK/build-tools/34.0.0/aapt2"
 "$AAPT2" dump badging "$APK" 2>/dev/null | grep -E "^package:|application-label:|native-code"
 

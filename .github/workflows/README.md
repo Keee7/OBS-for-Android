@@ -55,6 +55,7 @@ bash scripts/generate-release-key.sh ~/obs-release.jks
 | push 到 `main`（commit 含 `[build-apk]`） | 构建；配了 Secrets 就签名（普通提交跳过，不消耗分钟数） |
 | push 一个 `v*` tag（如 `v0.1.19`） | 构建 + 签名 + **创建 GitHub Release** 并附件 APK（跳过重复 Artifact 上传） |
 | Pull Request（非 Draft） | 使用仓库中的公开开发密钥签名，产物可安装；与私有密钥签名的包不能直接覆盖安装 |
+| 每周一凌晨 `schedule`（`0 3 * * 1` UTC） | 自动刷新 `main` 上的 `obsdeps` / `obsqt` / `ccache` / Gradle 基线缓存，防止 7 天过期与 PR 冷编 |
 | 手动 `workflow_dispatch` | 可勾选"签名"与"发布 Release" |
 
 产物在 Actions 页面的 **Artifacts** 里（默认保留 3 天，Release 触发不额外占 Artifact 配额），文件名 `obs-android-apk-<commit sha>`。
@@ -85,17 +86,16 @@ git commit -m "fix(uvc): ... [build-apk]"
 | 首次（缓存全空） | **35–50 分钟** |
 | 依赖 + 工具链 + ccache 命中 | **6–10 分钟** |
 
-CI 复用 runner 上的 Android SDK、NDK 和 CMake，使用 JDK 17，通过 `setup-gradle` 安装 Gradle 9.5.1（开启 `--parallel`），OBS 主构建使用 `-O2 -g0 -DNDEBUG` 并关闭 IPO（最终 `.so` 都会被 strip，免去无谓的调试符号生成以提速并压小缓存）。缓存如下：
+CI 复用 runner 上的 Android SDK、NDK 和 CMake，使用 JDK 21（工具链版本号统一定义在 `scripts/toolchain-versions.env`），通过 `setup-gradle` 安装 Gradle 9.5.1（开启 `--parallel`），OBS 主构建使用 `-O2 -g0 -DNDEBUG` 并关闭 IPO（最终 `.so` 都会被 strip，免去无谓的调试符号生成以提速并压小缓存）。缓存如下：
 
 | 缓存 | 内容 | 失效条件 / 策略 |
 | --- | --- | --- |
-| `obsdeps-v2-…` | `deps-android/prebuilt`（仅预编产物，不含 `src/`） | `versions.sh`/`defs.sh`/`build.sh`/FFmpeg 补丁 的内容变了 |
-| `obsqt-v2-…` | `~/Qt`（Qt 宿主和 Android arm64 套件） | Qt 版本变了 |
+| `obsdeps-v3-…` | `deps-android/prebuilt`（仅预编产物，不含 `src/`） | `deps-android/*.sh` / `scripts/android-native-deps/*` / `relocate-android-pkgconfig.sh` 内容变了 |
+| `obsqt-v3-…` | `~/Qt`（Qt 宿主、Android arm64 套件与 `qtbase` 源码包） | Qt 版本变了 |
 | `obsccache-v2-…` | `~/.ccache`（仅缓存 OBS 主构建，上限 512M；PR 只读不回写） | 首选当前提交和构建次数，按 NDK 与 Qt 版本回退 |
 | `setup-gradle` | Gradle 用户目录中的缓存 | 由 `gradle/actions/setup-gradle` 管理，PR 只读 |
 
-> GitHub 的 Actions 缓存**约 7 天不用会被回收**，且仓库总量有配额。如果长时间没构建，
-> 下次会回落到"首次"耗时。想强制作废：改 `versions.sh` 或删缓存的 key 前缀。
+> GitHub 的 Actions 缓存**约 7 天不用会被回收**，且仓库总量有配额。每周一 `schedule` 会自动刷新 `main` 上的基线缓存。想强制作废：改 `deps-android/versions.sh` 或删缓存的 key 前缀。
 
 ---
 

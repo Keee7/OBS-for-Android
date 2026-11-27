@@ -92,6 +92,7 @@ export PREFIX
 
 # 解析依赖列表
 CLEAN=0
+FULL_BUILD=0
 TARGETS=""
 for a in "$@"; do
   case "$a" in
@@ -101,7 +102,10 @@ for a in "$@"; do
        else TARGETS="$TARGETS $a"; fi ;;
   esac
 done
-[ -z "${TARGETS// /}" ] && for b in $DEP_BATCHES; do TARGETS="$TARGETS $(batch_deps "$b")"; done
+if [ -z "${TARGETS// /}" ]; then
+  FULL_BUILD=1
+  for b in $DEP_BATCHES; do TARGETS="$TARGETS $(batch_deps "$b")"; done
+fi
 
 # Resolve shared dependencies before either network consumer, including targeted builds.
 case " $TARGETS " in
@@ -232,4 +236,14 @@ done
 echo "==================================================="
 echo "本次成功构建 $BUILT 个；失败:${FAILED:- 无}"
 [ -n "$FAILED" ] && exit 1
+if [ "$FULL_BUILD" = 1 ]; then
+  if [ "$BUILT" = 0 ] && [ ! -f "$EXPORT/.deps-complete" ]; then
+    export_to_windows
+  fi
+  {
+    for dep in $TARGETS; do
+      printf '%s=%s\n' "$dep" "$(dep_version "$dep")"
+    done
+  } > "$EXPORT/.deps-complete"
+fi
 exit 0
