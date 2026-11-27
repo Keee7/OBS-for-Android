@@ -8,8 +8,6 @@ docs/*
 !docs/tutorial/
 releases/
 prebuilt/
-scripts/setup-env.ps1
-scripts/build-frontend-apk.sh
 
 # 依赖的下载物与编译产物（由 deps-android/fetch.sh + build.sh 再生）
 deps-android/src/

@@ -157,11 +157,9 @@ check_qt() {
 
 # 宿主工具自检。**这是为了 fail fast**：宿主 uic/moc 缺共享库时，CMake 要到 AutoUic
 # 阶段才报错（那时已跑完依赖构建，几十分钟），而这里在工具链装配阶段就能撞出来（秒级）。
-# 前面两次 CI 失败都是"跑到一半才发现工具链缺件"，这个探针就是针对那类问题。
 #
 # 判据是**动态链接器能不能加载它**，不是退出码：这些工具对 --version/--help 的返回码
 # 并不统一（androiddeployqt --help 就返回 1），用 `|| exit 1` 会把能跑的工具判成坏的
-# ——我自己就踩过：uic/moc/rcc 全 OK，探针却因为 androiddeployqt 的退出码 1 让 CI 挂了。
 # 所以：**能加载 = 输出里有该工具自己的字样**；加载失败 = 输出里出现
 # "error while loading shared libraries" / "cannot open shared object"。
 probe_host_tools() {

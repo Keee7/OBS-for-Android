@@ -1,5 +1,5 @@
 #!/bin/bash
-# WSL 版前端 APK 构建（build-frontend-apk.sh 的 Linux 移植，arm64 专用）。
+# WSL 版前端 APK 构建（arm64 专用）。
 #
 #   bash scripts/build-frontend-apk-wsl.sh            构建 + 签名 + 校验
 #   bash scripts/build-frontend-apk-wsl.sh configure  只跑 CMake configure（快速验证 CMake 改动）
