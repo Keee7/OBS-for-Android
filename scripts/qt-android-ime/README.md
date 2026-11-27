@@ -7,12 +7,10 @@
 <a name="english"></a>
 ## English
 
-This directory contains targeted patches for Qt Android runtime Java components based on official Qt 6.12.0 sources:
-* `QtInputDelegate.java`: [Qt 6.12.0 upstream source](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java)
-* `QtRootLayout.java`: [Qt 6.12.0 upstream source](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java)
-* `QtWindowInsetsController.java`: [Qt 6.12.0 upstream source](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtWindowInsetsController.java)
-
-Original SPDX license headers (LGPL-3.0-only / GPL-2.0-only / GPL-3.0-only) are retained.
+This directory contains targeted `.patch` files for Qt Android runtime Java components, applied on top of the pinned Qt 6.12.0 `qtbase` source tree:
+* `qt-6.12.0-ime.patch`: patches [`QtInputDelegate.java`](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java)
+* `qt-6.12.0-root-layout.patch`: patches [`QtRootLayout.java`](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java)
+* `qt-6.12.0-window-insets.patch`: patches [`QtWindowInsetsController.java`](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtWindowInsetsController.java)
 
 ### Key Modifications
 
@@ -29,6 +27,7 @@ Original SPDX license headers (LGPL-3.0-only / GPL-2.0-only / GPL-3.0-only) are 
 ```sh
 python scripts/qt-android-ime/patch-qt-android-jar.py \
   --qt-version 6.12.0 --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
+  --qtbase-src "$BUILD/_deps/obs_qtbase_android-src" \
   --android-jar "$ANDROID_SDK_ROOT/platforms/android-36/android.jar" \
   --javac "$JAVA_HOME/bin/javac" --output "$BUILD/Qt6Android-patched.jar"
 ```
@@ -44,12 +43,10 @@ Set `OBS_ANDROID_IME_DIAGNOSTICS=1` or start OBS with `--android-ime-diagnostics
 <a name="简体中文"></a>
 ## 简体中文
 
-本目录包含针对 Qt 6.12.0 Android 运行时 Java 组件的专用补丁：
-* `QtInputDelegate.java`：基于 [Qt 6.12.0 官方源码](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java)；
-* `QtRootLayout.java`：基于 [Qt 6.12.0 官方源码](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java)；
-* `QtWindowInsetsController.java`：基于 [Qt 6.12.0 官方源码](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtWindowInsetsController.java)。
-
-完整保留上游 SPDX 开源许可证声明（LGPL-3.0 / GPL-2.0 / GPL-3.0）。
+本目录包含针对 Qt 6.12.0 Android 运行时 Java 组件的专用 `.patch` 补丁，构建时会自动应用到 SHA-256 校验过的 `qtbase` 源码树上：
+* `qt-6.12.0-ime.patch`：修补 [`QtInputDelegate.java`](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java)；
+* `qt-6.12.0-root-layout.patch`：修补 [`QtRootLayout.java`](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java)；
+* `qt-6.12.0-window-insets.patch`：修补 [`QtWindowInsetsController.java`](https://github.com/qt/qtbase/blob/v6.12.0/src/android/jar/src/org/qtproject/qt/android/QtWindowInsetsController.java)。
 
 ### 核心修改点
 
@@ -66,6 +63,7 @@ Set `OBS_ANDROID_IME_DIAGNOSTICS=1` or start OBS with `--android-ime-diagnostics
 ```sh
 python scripts/qt-android-ime/patch-qt-android-jar.py \
   --qt-version 6.12.0 --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
+  --qtbase-src "$BUILD/_deps/obs_qtbase_android-src" \
   --android-jar "$ANDROID_SDK_ROOT/platforms/android-36/android.jar" \
   --javac "$JAVA_HOME/bin/javac" --output "$BUILD/Qt6Android-patched.jar"
 ```

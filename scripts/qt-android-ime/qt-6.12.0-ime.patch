@@ -1,5 +1,7 @@
---- QtInputDelegate.java
-+++ QtInputDelegate.java
+diff --git a/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java b/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java
+index 32034f8..07a900f 100644
+--- a/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java
++++ b/src/android/jar/src/org/qtproject/qt/android/QtInputDelegate.java
 @@ -4,6 +4,7 @@
  package org.qtproject.qt.android;
  
@@ -8,7 +10,7 @@
  import android.app.Activity;
  import android.content.Context;
  import android.graphics.Rect;
-@@ -51,7 +52,19 @@
+@@ -51,7 +52,19 @@ class QtInputDelegate implements QtInputConnection.QtInputConnectionListener, Qt
      static native void handleLocationChanged(int id, int x, int y);
      // handle methods
  
@@ -29,7 +31,7 @@
      private InputMethodManager m_imm;
  
      // We can't rely on a hardcoded value, because screens have different resolutions.
-@@ -155,13 +168,30 @@
+@@ -155,13 +168,30 @@ class QtInputDelegate implements QtInputConnection.QtInputConnectionListener, Qt
          }
      }
  
@@ -61,7 +63,7 @@
              decorView.setWindowInsetsAnimationCallback(
                  new WindowInsetsAnimation.Callback(
                      WindowInsetsAnimation.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
-@@ -219,6 +249,7 @@
+@@ -219,6 +249,7 @@ class QtInputDelegate implements QtInputConnection.QtInputConnectionListener, Qt
          if (m_imm == null)
              return;
  
@@ -69,7 +71,7 @@
          QtNative.runAction(() -> {
              if (m_imm == null || m_currentEditText == null)
                  return;
-@@ -230,7 +261,7 @@
+@@ -230,7 +261,7 @@ class QtInputDelegate implements QtInputConnection.QtInputConnectionListener, Qt
              m_currentEditText.setLayoutParams(new QtLayout.LayoutParams(width, height, x, y));
              m_currentEditText.requestFocus();
              m_currentEditText.postDelayed(() -> {
@@ -78,7 +80,7 @@
                  if (m_currentEditText.m_optionsChanged) {
                      m_imm.restartInput(m_currentEditText);
                      m_currentEditText.m_optionsChanged = false;
-@@ -253,10 +284,35 @@
+@@ -253,12 +284,37 @@ class QtInputDelegate implements QtInputConnection.QtInputConnectionListener, Qt
      public void updateHandles(int mode, int editX, int editY, int editButtons,
                                int x1, int y1, int x2, int y2, boolean rtl)
      {
@@ -101,8 +103,8 @@
 +            }
 +            m_handleOwner.updateHandles(mode, editX, editY, editButtons, x1, y1, x2, y2, rtl);
          });
-+    }
-+
+     }
+ 
 +    private void dismissEditingHandles()
 +    {
 +        // A focus switch can change m_currentEditText before Qt sends Hidden.
@@ -113,10 +115,12 @@
 +        m_handleOwner = null;
 +        owner.removeOnAttachStateChangeListener(m_handleOwnerAttachment);
 +        owner.updateHandles(QtEditText.CursorHandleNotShown, 0, 0, 0, 0, 0, 0, 0, false);
-     }
- 
++    }
++
      @Override
-@@ -416,6 +472,7 @@
+     public QtInputConnection.QtInputConnectionListener getInputConnectionListener()
+     {
+@@ -416,6 +472,7 @@ class QtInputDelegate implements QtInputConnection.QtInputConnectionListener, Qt
          setKeyboardTransitionInProgress(visibility);
  
          if (!visibility) {
@@ -124,7 +128,7 @@
              // Hiding the keyboard clears the immersive mode, so we need to set it again.
              m_keyboardVisibilityListener.onKeyboardVisibilityChange();
              if (m_currentEditText != null)
-@@ -426,7 +483,17 @@
+@@ -426,7 +483,17 @@ class QtInputDelegate implements QtInputConnection.QtInputConnectionListener, Qt
      void setFocusedView(QtEditText currentEditText)
      {
          setKeyboardTransitionInProgress(false);
