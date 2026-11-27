@@ -356,9 +356,13 @@ static void showNdiOutputSettingsDialog(QWidget *parent)
 	QObject::connect(downloadBtn, &QPushButton::clicked, &dlg, [] { openNdiSdkDownloadPage(); });
 
 	QObject::connect(importBtn, &QPushButton::clicked, &dlg, [&dlg, userDir, refreshRuntimeStatus]() {
-		const QString picked = QFileDialog::getOpenFileName(
-			&dlg, QStringLiteral("选择官方 NDI SDK（.tar.gz / .sh）或 arm64-v8a libndi.so"), QString(),
+		const QUrl pickedUrl = QFileDialog::getOpenFileUrl(
+			&dlg, QStringLiteral("选择官方 NDI SDK（.tar.gz / .sh）或 arm64-v8a libndi.so"), QUrl(),
 			QStringLiteral("NDI SDK / Runtime (*.*)"));
+		if (pickedUrl.isEmpty())
+			return;
+		const QString picked =
+			pickedUrl.isLocalFile() ? pickedUrl.toLocalFile() : pickedUrl.toString(QUrl::FullyEncoded);
 		if (picked.isEmpty())
 			return;
 

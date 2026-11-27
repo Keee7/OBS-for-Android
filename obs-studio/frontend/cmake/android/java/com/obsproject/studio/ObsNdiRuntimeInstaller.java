@@ -172,7 +172,10 @@ public final class ObsNdiRuntimeInstaller {
             final Context ctx = ObsNdiHost.appContext();
             if (ctx == null)
                 throw new IOException("Android Context not initialized");
-            return ctx.getContentResolver().openInputStream(Uri.parse(sourceUriOrPath));
+            final Uri resolved = sourceUriOrPath.startsWith("content://")
+                    ? ObsStorageHost.resolveContentUri(ctx, sourceUriOrPath, false)
+                    : Uri.parse(sourceUriOrPath);
+            return ctx.getContentResolver().openInputStream(resolved);
         }
         return new FileInputStream(new File(sourceUriOrPath));
     }

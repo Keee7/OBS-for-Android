@@ -25,6 +25,9 @@
 #include <QDataStream>
 #include <QKeyEvent>
 #include <QFileDialog>
+#ifdef __ANDROID__
+#include <QUrl>
+#endif
 #include <QStandardItemModel>
 #include <QLabel>
 #include <QPushButton>
@@ -355,33 +358,83 @@ void setClasses(QWidget *widget, const QString &newClasses)
 	}
 }
 
+#ifdef __ANDROID__
+static QUrl androidStartUrl(const QString &path)
+{
+	if (path.isEmpty())
+		return {};
+	if (path.startsWith(QLatin1String("content://")) || path.startsWith(QLatin1String("file://")))
+		return QUrl(path);
+	return QUrl::fromLocalFile(path);
+}
+
+static QString androidUrlToPath(const QUrl &url)
+{
+	if (url.isEmpty())
+		return {};
+	if (url.isLocalFile())
+		return url.toLocalFile();
+	/* Preserve exact percent-encoding for Android content:// URIs so
+	 * ContentResolver URI permission checks match the granted Uri. */
+	return url.toString(QUrl::FullyEncoded);
+}
+#endif
+
 QString SelectDirectory(QWidget *parent, QString title, QString path)
 {
+#ifdef __ANDROID__
+	const QUrl dir = QFileDialog::getExistingDirectoryUrl(
+		parent, title, androidStartUrl(path), QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+	return androidUrlToPath(dir);
+#else
 	QString dir = QFileDialog::getExistingDirectory(parent, title, path,
 							QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
 
 	return dir;
+#endif
 }
 
 QString SaveFile(QWidget *parent, QString title, QString path, QString extensions)
 {
+#ifdef __ANDROID__
+	const QUrl file = QFileDialog::getSaveFileUrl(parent, title, androidStartUrl(path), extensions);
+	return androidUrlToPath(file);
+#else
 	QString file = QFileDialog::getSaveFileName(parent, title, path, extensions);
 
 	return file;
+#endif
 }
 
 QString OpenFile(QWidget *parent, QString title, QString path, QString extensions)
 {
+#ifdef __ANDROID__
+	const QUrl file = QFileDialog::getOpenFileUrl(parent, title, androidStartUrl(path), extensions);
+	return androidUrlToPath(file);
+#else
 	QString file = QFileDialog::getOpenFileName(parent, title, path, extensions);
 
 	return file;
+#endif
 }
 
 QStringList OpenFiles(QWidget *parent, QString title, QString path, QString extensions)
 {
+#ifdef __ANDROID__
+	const QList<QUrl> urls = QFileDialog::getOpenFileUrls(parent, title, androidStartUrl(path), extensions);
+	QStringList files;
+	files.reserve(urls.size());
+	for (const QUrl &url : urls) {
+		const QString p = androidUrlToPath(url);
+		if (!p.isEmpty())
+			files.append(p);
+	}
+	return files;
+#else
 	QStringList files = QFileDialog::getOpenFileNames(parent, title, path, extensions);
 
 	return files;
+#endif
 }
 
 static void SetLabelText(QLabel *label, const QString &newText)

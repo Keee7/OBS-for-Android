@@ -18,6 +18,7 @@
 #include "OBSMissingFiles.hpp"
 
 #include <OBSApp.hpp>
+#include <qt-wrappers.hpp>
 #include <utility/MissingFilesModel.hpp>
 #include <utility/MissingFilesPathItemDelegate.hpp>
 
@@ -110,8 +111,7 @@ void OBSMissingFiles::saveFiles()
 
 void OBSMissingFiles::browseFolders()
 {
-	QString dir = QFileDialog::getExistingDirectory(this, QTStr("MissingFiles.SelectDir"), "",
-							QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+	QString dir = SelectDirectory(this, QTStr("MissingFiles.SelectDir"), QString());
 
 	if (dir != "") {
 		dir += "/";

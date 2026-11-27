@@ -47,10 +47,105 @@ public final class ObsStorageHost {
         return null;
     }
     public static boolean managed(String path) { return path != null && (path.startsWith("content://") || relative(path) != null); }
+    private static boolean hasUriPermission(Context context, Uri uri, boolean requireWrite) {
+        if (context == null || uri == null)
+            return false;
+        final int pid = android.os.Process.myPid();
+        final int uid = android.os.Process.myUid();
+        final int flag = requireWrite
+                ? android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                : android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION;
+        if (context.checkUriPermission(uri, pid, uid, flag)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return true;
+        }
+        try {
+            if (DocumentsContract.isTreeUri(uri)) {
+                Uri doc = DocumentsContract.buildDocumentUriUsingTree(uri, DocumentsContract.getTreeDocumentId(uri));
+                return context.checkUriPermission(doc, pid, uid, flag)
+                        == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    static String reencodeContentUri(String uriString) {
+        if (uriString == null || !uriString.startsWith("content://"))
+            return uriString;
+        final int schemeEnd = uriString.indexOf("://");
+        final int pathStart = uriString.indexOf('/', schemeEnd + 3);
+        if (pathStart < 0)
+            return uriString;
+        final String prefix = uriString.substring(0, pathStart);
+        final String rest = uriString.substring(pathStart);
+        // Preserve URI path/query structural delimiters and existing %XX escapes, while encoding
+        // spaces, non-ASCII, brackets, hashes, etc. that QUrl::PrettyDecoded may have decoded.
+        final StringBuilder out = new StringBuilder(uriString.length() + 16);
+        out.append(prefix);
+        for (int i = 0; i < rest.length(); i++) {
+            final char ch = rest.charAt(i);
+            if (ch == '%' && i + 2 < rest.length()
+                    && isHexDigit(rest.charAt(i + 1)) && isHexDigit(rest.charAt(i + 2))) {
+                out.append(ch).append(rest.charAt(i + 1)).append(rest.charAt(i + 2));
+                i += 2;
+            } else if (isAllowedUriRestChar(ch)) {
+                out.append(ch);
+            } else {
+                out.append(Uri.encode(String.valueOf(ch)));
+            }
+        }
+        return out.toString();
+    }
+
+    private static boolean isHexDigit(char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    }
+
+    private static boolean isAllowedUriRestChar(char c) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+            return true;
+        return c == '/' || c == '-' || c == '.' || c == '_' || c == '~'
+                || c == ':' || c == '@' || c == '!' || c == '$' || c == '&'
+                || c == '\'' || c == '(' || c == ')' || c == '*' || c == '+'
+                || c == ',' || c == ';' || c == '=' || c == '?';
+    }
+
+    public static Uri resolveContentUri(Context context, String path, boolean requireWrite) {
+        Uri raw = Uri.parse(path);
+        if (context == null || path == null || !path.startsWith("content://"))
+            return raw;
+        if (hasUriPermission(context, raw, requireWrite))
+            return raw;
+        // Fallback 1: match against persisted URI permissions by decoded string so legacy saved
+        // URIs decoded by QFileDialog::getOpenFileName/getExistingDirectory recover the exact grant.
+        final String targetDecoded = Uri.decode(path);
+        try {
+            for (android.content.UriPermission perm : context.getContentResolver().getPersistedUriPermissions()) {
+                if (requireWrite ? !perm.isWritePermission() : !perm.isReadPermission())
+                    continue;
+                Uri candidate = perm.getUri();
+                if (candidate != null && targetDecoded.equals(Uri.decode(candidate.toString()))) {
+                    return candidate;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        // Fallback 2: re-encode raw spaces / non-ASCII / brackets / hashes for non-persisted grants.
+        final String reencoded = reencodeContentUri(path);
+        if (!reencoded.equals(path)) {
+            Uri candidate = Uri.parse(reencoded);
+            if (hasUriPermission(context, candidate, requireWrite)) {
+                return candidate;
+            }
+        }
+        return raw;
+    }
+
     public static boolean writable(Context context, String path) {
         if (relative(path) != null) return true;
         try {
-            Uri tree = Uri.parse(path);
+            Uri tree = resolveContentUri(context, path, true);
             Uri doc = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree));
             try (Cursor c = context.getContentResolver().query(doc,
                     new String[]{DocumentsContract.Document.COLUMN_FLAGS}, null, null, null)) {
@@ -78,7 +173,7 @@ public final class ObsStorageHost {
                     name.endsWith(".mkv") ? "video/x-matroska" : "video/mp4";
             Uri result;
             if (path.startsWith("content://")) {
-                Uri tree = Uri.parse(path);
+                Uri tree = resolveContentUri(context, path, true);
                 try {
                     context.getContentResolver().takePersistableUriPermission(tree,
                         android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION | android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
@@ -141,7 +236,7 @@ public final class ObsStorageHost {
         ContentResolver resolver = context.getContentResolver();
         Uri folder = null;
         try {
-            Uri tree = Uri.parse(treePath);
+            Uri tree = resolveContentUri(context, treePath, true);
             Uri parent = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree));
             File source = new File(sourcePath);
             if (!new File(source, "basic.ini").isFile()) throw new IOException("Profile has no basic.ini");
@@ -174,7 +269,7 @@ public final class ObsStorageHost {
     public static String importProfile(Context context, String treePath, String destinationPath, String[] files) {
         ContentResolver resolver = context.getContentResolver();
         try {
-            Uri tree = Uri.parse(treePath);
+            Uri tree = resolveContentUri(context, treePath, false);
             String id = DocumentsContract.getTreeDocumentId(tree);
             Uri folder = DocumentsContract.buildDocumentUriUsingTree(tree, id);
             String directoryName;
@@ -264,19 +359,24 @@ public final class ObsStorageHost {
     }
 
     public static int open(Context context, String path, String mode) {
-        try (ParcelFileDescriptor fd = context.getContentResolver().openFileDescriptor(Uri.parse(path),
-                mode.startsWith("w") ? "rwt" : mode.startsWith("a") ? "wa" : "r")) {
+        final String pfdMode = mode.startsWith("w") ? "rwt" : mode.startsWith("a") ? "wa" : "r";
+        final boolean writeMode = !"r".equals(pfdMode);
+        final Uri uri = resolveContentUri(context, path, writeMode);
+        try (ParcelFileDescriptor fd = context.getContentResolver().openFileDescriptor(uri, pfdMode)) {
             if (fd == null) return -1;
-            // MP4 finalisation seeks. Reject pipe/cloud providers before recording.
-            android.system.Os.lseek(fd.getFileDescriptor(), 0, android.system.OsConstants.SEEK_CUR);
+            // MP4 finalisation seeks. Reject pipe/cloud providers before recording, but allow
+            // sequential/pipe providers when opening read-only media/images/text documents.
+            if (writeMode) {
+                android.system.Os.lseek(fd.getFileDescriptor(), 0, android.system.OsConstants.SEEK_CUR);
+            }
             return fd.detachFd(); // fclose in libobs owns this descriptor.
-        } catch (Exception e) { Log.e(TAG, "Cannot open seekable recording document", e); return -1; }
+        } catch (Exception e) { Log.e(TAG, "Cannot open document (" + pfdMode + ")", e); return -1; }
     }
     public static long space(Context context, String path) {
         try {
             if (relative(path) != null) return new StatFs(Environment.getExternalStorageDirectory().getAbsolutePath()).getAvailableBytes();
             if (path.startsWith("content://")) {
-                Uri tree = Uri.parse(path);
+                Uri tree = resolveContentUri(context, path, false);
                 if (!"com.android.externalstorage.documents".equals(tree.getAuthority())) return -1;
                 String id = DocumentsContract.getTreeDocumentId(tree);
                 int separator = id.indexOf(':');

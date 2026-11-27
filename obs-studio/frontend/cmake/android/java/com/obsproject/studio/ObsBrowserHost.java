@@ -315,8 +315,8 @@ public final class ObsBrowserHost {
         this.fitWidth = fitWidth;
         this.readerMode = id == 0;
         if (cleanUrl.regionMatches(true, 0, "content://", 0, 10)) {
-            this.localContentUri = Uri.parse(cleanUrl);
-            this.localVirtualHost = localHostForUri(cleanUrl);
+            this.localContentUri = ObsStorageHost.resolveContentUri(this.context, cleanUrl, false);
+            this.localVirtualHost = localHostForUri(this.localContentUri.toString());
             this.allowFileAccess = false;
         } else if (cleanUrl.regionMatches(true, 0, "file://", 0, 7)) {
             this.localContentUri = null;

@@ -18,6 +18,7 @@
 #include "MissingFilesPathItemDelegate.hpp"
 
 #include <OBSApp.hpp>
+#include <qt-wrappers.hpp>
 
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -134,8 +135,7 @@ void MissingFilesPathItemDelegate::handleBrowse(QWidget *container)
 
 	bool isSet = false;
 
-	QString newPath =
-		QFileDialog::getOpenFileName(container, QTStr("MissingFiles.SelectFile"), currentPath, nullptr);
+	QString newPath = OpenFile(container, QTStr("MissingFiles.SelectFile"), currentPath, QString());
 
 #ifdef __APPLE__
 	// TODO: Revisit when QTBUG-42661 is fixed
