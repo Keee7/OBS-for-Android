@@ -94,6 +94,19 @@ def load_toolchain_versions():
     return versions
 
 
+def default_ndk_dir(tools_root: Path, ndk_version: str) -> Path:
+    sdk_ndk_root = tools_root / 'android-sdk' / 'ndk'
+    if sdk_ndk_root.is_dir():
+        major = ndk_version.lstrip('rR')
+        candidates = [p for p in sdk_ndk_root.iterdir() if p.is_dir() and (p / 'source.properties').is_file()]
+        preferred = sorted([p for p in candidates if p.name.startswith(f'{major}.')], key=lambda p: p.name, reverse=True)
+        if preferred:
+            return preferred[0]
+        if candidates:
+            return sorted(candidates, key=lambda p: p.name, reverse=True)[0]
+    return sdk_ndk_root / ndk_version
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('apk', type=Path)
@@ -108,7 +121,7 @@ def main():
     ndk_version = versions.get('NDK_VERSION', 'r30')
     sdk = args.tools_root / 'android-sdk' / 'build-tools' / build_tools
     aapt = args.aapt or sdk / 'aapt.exe'
-    readelf = args.readelf or args.tools_root / 'ndk' / f'android-ndk-{ndk_version}' / 'toolchains' / 'llvm' / 'prebuilt' / 'windows-x86_64' / 'bin' / 'llvm-readelf.exe'
+    readelf = args.readelf or default_ndk_dir(args.tools_root, ndk_version) / 'toolchains' / 'llvm' / 'prebuilt' / 'windows-x86_64' / 'bin' / 'llvm-readelf.exe'
     errors = []
     try:
         print('APK SHA-256:', hashlib.sha256(args.apk.read_bytes()).hexdigest())

@@ -1,16 +1,46 @@
 ﻿param(
     [ValidateSet('configure','build','package','all')][string]$Action = 'all',
     [string]$ToolsRoot = (Join-Path (Split-Path $PSScriptRoot -Parent | Split-Path -Parent) 'build-tools'),
-    [int]$Jobs = 8,
+    [int]$Jobs = [Environment]::ProcessorCount,
     [string]$NativeDeps,
     [string]$QtVersion = '',
     [string]$GradleVersion = '',
     [int]$CompileSdkVersion = 0,
     [string]$SigningConfigFile = $env:OBS_ANDROID_SIGNING_CONFIG,
     [switch]$DebugSigning,
-    [switch]$AntutuPackage
+    [switch]$AntutuPackage,
+    [switch]$SkipVerify
 )
 $ErrorActionPreference = 'Stop'
+
+function Resolve-Tool([string]$Name, [string]$EnvVar, [string[]]$Commands, [string]$FallbackPath, [switch]$Optional) {
+    if ($EnvVar) {
+        $val = [Environment]::GetEnvironmentVariable($EnvVar)
+        if ($val -and (Test-Path -LiteralPath $val -PathType Leaf)) { return [IO.Path]::GetFullPath($val) }
+    }
+    foreach ($cmd in $Commands) {
+        $hit = Get-Command $cmd -All -ErrorAction SilentlyContinue |
+            Where-Object { $_.Source -notlike '*\WindowsApps\*' } | Select-Object -First 1
+        if ($hit) { return $hit.Source }
+    }
+    if ($FallbackPath -and (Test-Path -LiteralPath $FallbackPath -PathType Leaf)) {
+        return [IO.Path]::GetFullPath($FallbackPath)
+    }
+    if ($Optional) { return $null }
+    throw "Required tool '$Name' not found in environment/PATH or '$FallbackPath'."
+}
+
+function Resolve-Dir([string]$Name, [string[]]$EnvVars, [string]$MarkerRel, [string]$FallbackPath) {
+    foreach ($v in $EnvVars) {
+        $val = [Environment]::GetEnvironmentVariable($v)
+        if ($val -and (Test-Path -LiteralPath (Join-Path $val $MarkerRel))) { return [IO.Path]::GetFullPath($val) }
+    }
+    if ($FallbackPath -and (Test-Path -LiteralPath (Join-Path $FallbackPath $MarkerRel))) {
+        return [IO.Path]::GetFullPath($FallbackPath)
+    }
+    throw "Required directory '$Name' not found in environment or '$FallbackPath'."
+}
+
 $toolchain = @{}
 foreach ($line in (Get-Content -LiteralPath "$PSScriptRoot/toolchain-versions.env")) {
     $trimmed = $line.Trim()
@@ -32,33 +62,35 @@ $repo = Split-Path $PSScriptRoot -Parent
 $tools = [IO.Path]::GetFullPath($ToolsRoot)
 $build = Join-Path $tools ('build-obs33-arm64-qt' + $QtVersion.Replace('.', ''))
 $logs = Join-Path $tools 'build-logs'
-$cmake = Join-Path $tools 'cmake/cmake-3.31.6-windows-x86_64/bin/cmake.exe'
-$ninja = Join-Path $tools 'ninja/ninja.exe'
-$ndk = Join-Path $tools "ndk/android-ndk-$NdkVersion"
+
+$sdk = Resolve-Dir 'Android SDK' @('ANDROID_SDK_ROOT','ANDROID_HOME') "platforms/android-$CompileSdkVersion/android.jar" (Join-Path $tools 'android-sdk')
+
+$ndkMajor = $NdkVersion -replace '^[rR]', ''
+$sdkNdkDir = Get-ChildItem -Path (Join-Path $sdk 'ndk') -Directory -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'source.properties') } |
+    Sort-Object @{ Expression = { $_.Name.StartsWith("$ndkMajor.") }; Descending = $true }, Name -Descending |
+    Select-Object -First 1
+$ndk = Resolve-Dir "Android NDK ($NdkVersion)" @('ANDROID_NDK_ROOT','ANDROID_NDK_HOME') 'source.properties' $(if ($sdkNdkDir) { $sdkNdkDir.FullName } else { '' })
+
+$jdkDir = Get-ChildItem -Path $tools -Directory -Filter "jdk-$JdkVersion*" -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'bin/javac.exe') } |
+    Sort-Object Name -Descending | Select-Object -First 1
+$javaHome = Resolve-Dir "JDK $JdkVersion" @('JAVA_HOME') 'bin/javac.exe' $(if ($jdkDir) { $jdkDir.FullName } else { '' })
+
+$cmakeDir = Get-ChildItem -Path (Join-Path $tools 'cmake') -Directory -Filter 'cmake-*' -ErrorAction SilentlyContinue |
+    Sort-Object Name -Descending | Select-Object -First 1
+$cmakeFallback = if ($cmakeDir) { Join-Path $cmakeDir.FullName 'bin/cmake.exe' } else { '' }
+$cmake = Resolve-Tool 'CMake' '' @('cmake') $cmakeFallback
+$ninja = Resolve-Tool 'Ninja' '' @('ninja') (Join-Path $tools 'ninja/ninja.exe')
+$gradle = Resolve-Tool 'Gradle' '' @('gradle') (Join-Path $tools "gradle/gradle-$GradleVersion/bin/gradle.bat")
+$python = Resolve-Tool 'Python' 'PYTHON' @('python','py') (Join-Path $tools 'python/python.exe')
+$ccache = Resolve-Tool 'ccache' '' @('ccache') (Join-Path $tools 'ccache/ccache.exe') -Optional
+
 $qt = Join-Path $tools "Qt/$QtVersion/android_arm64_v8a"
 $hostQt = Join-Path $tools "Qt/$QtVersion/msvc2022_64"
 $prefix = if ($NativeDeps) { [IO.Path]::GetFullPath($NativeDeps) } else { Join-Path $tools 'android-deps-ffmpeg8/arm64-v8a' }
-$sdk = Join-Path $tools 'android-sdk'
-$useAmbientJava = $false
-if ($env:JAVA_HOME -and (Test-Path -LiteralPath "$($env:JAVA_HOME)/bin/javac.exe")) {
-    $releaseFile = Join-Path $env:JAVA_HOME 'release'
-    if (Test-Path -LiteralPath $releaseFile) {
-        $verLine = Get-Content -LiteralPath $releaseFile -ErrorAction SilentlyContinue |
-            Where-Object { $_ -match '^JAVA_VERSION="(\d+)' } | Select-Object -First 1
-        if ($verLine -match '^JAVA_VERSION="(\d+)' -and ([int]$Matches[1] -in @([int]$JdkVersion, 17))) {
-            $useAmbientJava = $true
-        }
-    } else {
-        $useAmbientJava = $true
-    }
-}
-if (!$useAmbientJava) {
-    $jdkDir = @("jdk-$JdkVersion*", 'jdk-17*') | ForEach-Object {
-        Get-ChildItem -Path $tools -Directory -Filter $_ -ErrorAction SilentlyContinue |
-            Sort-Object Name -Descending | Select-Object -First 1
-    } | Where-Object { $_ } | Select-Object -First 1
-    $env:JAVA_HOME = if ($jdkDir) { $jdkDir.FullName } else { Join-Path $tools "jdk-$JdkVersion" }
-}
+
+$env:JAVA_HOME = $javaHome
 $env:ANDROID_SDK_ROOT = $sdk
 $env:ANDROID_HOME = $sdk
 $env:ANDROID_NDK_ROOT = $ndk
@@ -68,10 +100,10 @@ $env:GRADLE_USER_HOME = Join-Path $tools 'gradle-cache'
 # Qt invokes Gradle internally. A persistent daemon can retain this script's
 # redirected output handle after a successful build and block the pipeline.
 $env:GRADLE_OPTS = ($env:GRADLE_OPTS + ' -Dorg.gradle.daemon=false').Trim()
-$env:PATH = "$tools/gradle/gradle-$GradleVersion/bin;$env:JAVA_HOME/bin;$hostQt/bin;$tools/ninja;$env:PATH"
+$env:PATH = "$(Split-Path $gradle -Parent);$javaHome/bin;$hostQt/bin;$(Split-Path $ninja -Parent);$env:PATH"
 New-Item -ItemType Directory -Force -Path $build,$logs,$env:ANDROID_USER_HOME | Out-Null
-$packageId = 'com.obsproject.studio'
-if ($AntutuPackage) { $packageId = 'com.antutu.ABenchMark' }
+
+$packageId = if ($AntutuPackage) { 'com.antutu.ABenchMark' } else { 'com.obsproject.studio' }
 $packageSource = Join-Path $build 'android-package-source'
 $sourcePackage = Join-Path $repo 'obs-studio/frontend/cmake/android'
 $buildFullPath = [IO.Path]::GetFullPath($build).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
@@ -93,12 +125,7 @@ $servicePath = Join-Path $packageSource 'java/com/obsproject/studio/ObsForegroun
 $serviceText = [IO.File]::ReadAllText($servicePath)
 $serviceText = ([regex]'import com\.(?:obsproject\.studio|antutu\.ABenchMark)\.R;').Replace($serviceText, "import $packageId.R;", 1)
 [IO.File]::WriteAllText($servicePath, $serviceText, [Text.UTF8Encoding]::new($false))
-$revision = ((Get-Content -LiteralPath "$ndk/source.properties" | Where-Object { $_ -match '^Pkg.Revision\s*=' }) -split '=',2)[1].Trim()
-$sdkNdk = Join-Path $sdk "ndk/$revision"
-if (!(Test-Path -LiteralPath $sdkNdk)) {
-    New-Item -ItemType Directory -Force -Path (Split-Path $sdkNdk -Parent) | Out-Null
-    New-Item -ItemType Junction -Path $sdkNdk -Target $ndk | Out-Null
-}
+
 function Invoke-BuildTool([string]$Program, [string[]]$Arguments, [string]$LogName) {
     # Gradle daemons can retain inherited log handles after a successful build.
     $log = Join-Path $logs ([IO.Path]::GetFileNameWithoutExtension($LogName) + '-' +
@@ -118,7 +145,16 @@ function Invoke-BuildTool([string]$Program, [string[]]$Arguments, [string]$LogNa
     }
     Get-Content -LiteralPath $log -Tail 8 | Write-Host
 }
-if ($Action -in @('configure','build','package','all')) {
+
+if ($ccache) {
+    if (!$env:CCACHE_DIR) { $env:CCACHE_DIR = Join-Path $tools 'ccache-cache' }
+    if (!$env:CCACHE_MAXSIZE) { $env:CCACHE_MAXSIZE = '2G' }
+    if (!$env:CCACHE_SLOPPINESS) { $env:CCACHE_SLOPPINESS = 'pch_defines,time_macros,locale' }
+    New-Item -ItemType Directory -Force -Path $env:CCACHE_DIR | Out-Null
+}
+
+$needConfigure = $Action -in @('configure','all') -or !(Test-Path -LiteralPath (Join-Path $build 'CMakeCache.txt'))
+if ($needConfigure) {
     $argsConfigure = @('-S', "$repo/obs-studio", '-B', $build, '-G', 'Ninja',
         "-DCMAKE_MAKE_PROGRAM=$ninja", "-DCMAKE_TOOLCHAIN_FILE=$ndk/build/cmake/android.toolchain.cmake",
         '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=android-29', '-DANDROID_STL=c++_shared',
@@ -127,10 +163,16 @@ if ($Action -in @('configure','build','package','all')) {
         '-DENABLE_SCRIPTING=OFF', '-DENABLE_HEVC=ON', "-DANDROID_SDK_ROOT=$sdk", "-DCMAKE_INSTALL_PREFIX=$build/install")
     $argsConfigure += "-DOBS_ANDROID_COMPILE_SDK_VERSION=$CompileSdkVersion"
     $argsConfigure += "-DOBS_ANDROID_PACKAGE_NAME=$packageId", "-DOBS_ANDROID_PACKAGE_SOURCE_DIR=$($packageSource.Replace('\','/'))"
+    if ($ccache) {
+        $ccachePath = $ccache.Replace('\', '/')
+        $argsConfigure += "-DCMAKE_C_COMPILER_LAUNCHER=$ccachePath", "-DCMAKE_CXX_COMPILER_LAUNCHER=$ccachePath"
+        Write-Host "Using ccache: $ccachePath (CCACHE_DIR=$env:CCACHE_DIR)"
+    }
     Invoke-BuildTool $cmake $argsConfigure 'configure.log'
 }
 if ($Action -in @('build','package','all')) {
     Invoke-BuildTool $cmake @('--build', $build, '--parallel', "$Jobs") 'native-build.log'
+    if ($ccache -and $Action -in @('build','all')) { & $ccache -s | Write-Host }
 }
 if ($Action -in @('package','all')) {
     $modules = @(Get-ChildItem -Path "$build/rundir" -Recurse -File -Filter '*.so' |
@@ -150,28 +192,30 @@ if ($Action -in @('package','all')) {
             & $stripExe --strip-unneeded $module.FullName 2>$null | Out-Null
         }
     }
-    Invoke-BuildTool 'python' @("$PSScriptRoot/android-plugin-bundle.py", 'generate', $packageAssets) 'plugin-bundle.log'
+    Invoke-BuildTool $python @("$PSScriptRoot/android-plugin-bundle.py", 'generate', $packageAssets) 'plugin-bundle.log'
     $androidBuild = Join-Path $build 'frontend/android-build'
     $deploy = Join-Path $hostQt 'bin/androiddeployqt.exe'
     $unsigned = Join-Path $androidBuild 'obs-studio-test.apk'
     Invoke-BuildTool $deploy @('--input', "$build/frontend/android-obs-studio-deployment-settings.json",
         '--output', $androidBuild, '--apk', $unsigned, '--android-platform', "android-$CompileSdkVersion", '--release', '--aux-mode') 'android-stage.log'
-    Invoke-BuildTool 'python' @("$PSScriptRoot/stage-qt-gradle-properties.py",
+    Invoke-BuildTool $python @("$PSScriptRoot/stage-qt-gradle-properties.py",
         '--deployment-settings', "$build/frontend/android-obs-studio-deployment-settings.json",
         '--output', $androidBuild, '--android-platform', "android-$CompileSdkVersion",
         '--sdk', $sdk, '--build-tools', $BuildToolsVersion) 'gradle-props.log'
     # Patch the staged runtime only. A second androiddeployqt invocation would
     # overwrite it with the pristine SDK jar, so build directly with Gradle.
     $patchedQtJar = Join-Path $build 'qt-ime-patched/Qt6Android.jar'
-    Invoke-BuildTool 'python' @("$PSScriptRoot/qt-android-ime/patch-qt-android-jar.py",
+    Invoke-BuildTool $python @("$PSScriptRoot/qt-android-ime/patch-qt-android-jar.py",
         '--qt-version', $QtVersion, '--jar', "$qt/jar/Qt6Android.jar",
         '--qtbase-src', "$build/_deps/obs_qtbase_android-src",
         '--android-jar', "$sdk/platforms/android-$CompileSdkVersion/android.jar",
-        '--javac', "$env:JAVA_HOME/bin/javac.exe", '--output', $patchedQtJar) 'qt-ime-runtime.log'
+        '--javac', "$javaHome/bin/javac.exe", '--output', $patchedQtJar) 'qt-ime-runtime.log'
     Copy-Item -LiteralPath $patchedQtJar -Destination "$androidBuild/libs/Qt6Android.jar" -Force
     Copy-Item -LiteralPath "$build/qt-android-platform/libplugins_platforms_qtforandroid_arm64-v8a.so" `
         -Destination "$androidBuild/libs/arm64-v8a/libplugins_platforms_qtforandroid_arm64-v8a.so" -Force
-    Invoke-BuildTool "$tools/gradle/gradle-$GradleVersion/bin/gradle.bat" @('--no-daemon', '-p', $androidBuild, 'assembleRelease') 'android-package.log'
+    $gradleArgs = @('--no-daemon', '-p', $androidBuild, 'assembleRelease')
+    if ($SkipVerify) { $gradleArgs += @('-x', 'lintVitalRelease') }
+    Invoke-BuildTool $gradle $gradleArgs 'android-package.log'
     $apk = Get-ChildItem -Path $androidBuild -Recurse -File -Filter '*unsigned.apk' |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (!$apk) { $apk = Get-Item -LiteralPath $unsigned -ErrorAction Stop }
@@ -187,15 +231,17 @@ if ($Action -in @('package','all')) {
     } else {
         if (!$SigningConfigFile) { $SigningConfigFile = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'release key.txt' }
         if (!(Test-Path -LiteralPath $SigningConfigFile)) { throw 'Release signing configuration missing; pass -SigningConfigFile or explicitly choose -DebugSigning.' }
-        Invoke-BuildTool 'python' @("$PSScriptRoot/sign-android-apk.py", '--config', $SigningConfigFile,
+        Invoke-BuildTool $python @("$PSScriptRoot/sign-android-apk.py", '--config', $SigningConfigFile,
             '--input', $aligned, '--output', $signed, '--tools-root', $tools) 'sign.log'
     }
-    Invoke-BuildTool "$sdk/build-tools/$BuildToolsVersion/apksigner.bat" @('verify','--verbose',$signed) 'verify-signature.log'
-    Invoke-BuildTool "$sdk/build-tools/$BuildToolsVersion/zipalign.exe" @('-c','-P','16','-v','4',$signed) 'verify-alignment.log'
-    Invoke-BuildTool 'python' @("$PSScriptRoot/verify-android-apk.py", $signed, '--tools-root', $tools,
-        '--native-dir', $build, '--expected-package', $packageId) 'strict-apk-check.log'
-    Invoke-BuildTool 'python' @("$PSScriptRoot/qt-android-ime/verify-runtime-apk.py", $signed) 'qt-runtime-apk-check.log'
-    Invoke-BuildTool 'python' @("$PSScriptRoot/android-plugin-bundle.py", 'verify', $signed) 'plugin-bundle-apk.log'
+    if (!$SkipVerify) {
+        Invoke-BuildTool "$sdk/build-tools/$BuildToolsVersion/apksigner.bat" @('verify','--verbose',$signed) 'verify-signature.log'
+        Invoke-BuildTool "$sdk/build-tools/$BuildToolsVersion/zipalign.exe" @('-c','-P','16','-v','4',$signed) 'verify-alignment.log'
+        Invoke-BuildTool $python @("$PSScriptRoot/verify-android-apk.py", $signed, '--tools-root', $tools,
+            '--native-dir', $build, '--expected-package', $packageId) 'strict-apk-check.log'
+        Invoke-BuildTool $python @("$PSScriptRoot/qt-android-ime/verify-runtime-apk.py", $signed) 'qt-runtime-apk-check.log'
+        Invoke-BuildTool $python @("$PSScriptRoot/android-plugin-bundle.py", 'verify', $signed) 'plugin-bundle-apk.log'
+    }
     Get-FileHash -Algorithm SHA256 -LiteralPath $signed
     Write-Host "Test APK: $signed"
 }
