@@ -4,8 +4,11 @@ name: Build Android APK
 #   push tag v*                      → 必定构建 + 签名 + 创建 GitHub Release
 #   workflow_dispatch                → 手动触发，可勾"签名 / 发布 Release"
 #   pull_request（非 Draft）         → 使用公开开发密钥签名
+#   schedule（每周一）               → 刷新 main 上 deps/Qt/ccache/Gradle 基线缓存，防止 7 天过期与 PR 冷编
 #   push 到 main（提交含 [build-apk]） → 显式请求构建（普通代码/文档 push 跳过不计费）
 on:
+  schedule:
+    - cron: '0 3 * * 1'
   push:
     branches: [main]
     tags: ['v*']
@@ -69,9 +72,10 @@ jobs:
     if: |
       startsWith(github.ref, 'refs/tags/v') ||
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
       (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-apk]'))
-    # Ubuntu 24.04：自带 JDK 17、NDK r30、Android SDK (36/36.0.0) 与 CMake 3.31.6。
+    # Ubuntu 24.04：自带 NDK r30、Android SDK (36/36.0.0) 与 CMake 3.31.6。
     runs-on: ubuntu-24.04
     timeout-minutes: 90
 
@@ -80,45 +84,48 @@ jobs:
       contents: write
 
     env:
-      NDK_VERSION: r30
-      QT_VERSION: 6.12.0
-      GRADLE_VERSION: '9.5.1'
-      BUILD_TOOLS: 36.0.0
-      PLATFORM: android-36
       DL_ROOT: ${{ github.workspace }}/../obs-dl
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
+
+      - name: Load toolchain versions
+        run: |
+          set -euo pipefail
+          while IFS='=' read -r k v; do
+            case "$k" in ''|'#'*) continue ;; esac
+            echo "$k=$v" >> "$GITHUB_ENV"
+          done < scripts/toolchain-versions.env
+          source scripts/toolchain-versions.env
+          echo "PLATFORM=android-$COMPILE_SDK_VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_TOOLS=$BUILD_TOOLS_VERSION" >> "$GITHUB_ENV"
 
       # ---- 先恢复预编依赖缓存，据此决定需要安装哪些宿主包 ----
       - name: Compute dependency cache key
         id: depkey
         run: |
           set -euo pipefail
-          HASH="$(cat deps-android/versions.sh deps-android/defs.sh deps-android/build.sh \
-                  scripts/android-native-deps/ffmpeg-8.0.3-mediacodec-android.patch \
-                  scripts/android-native-deps/ffmpeg-8.0.3-android-tls.patch \
-                  scripts/android-native-deps/ffmpeg-8.0.3-srt-rendezvous.patch \
-                  scripts/android-native-deps/build-librist.sh \
-                  scripts/android-native-deps/x265-3.6-android-asm-target.patch \
-                  scripts/relocate-android-pkgconfig.sh | sha256sum | cut -c1-16)"
+          HASH="$( { find deps-android -maxdepth 1 -type f -name '*.sh'; \
+                     find scripts/android-native-deps -maxdepth 1 -type f; \
+                     echo scripts/relocate-android-pkgconfig.sh; } \
+                   | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-16 )"
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
           echo "依赖缓存键哈希=$HASH"
 
       - name: Cache prebuilt dependencies
         id: deps_cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: deps-android/prebuilt
-          key: obsdeps-v2-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-${{ steps.depkey.outputs.hash }}
+          key: obsdeps-v3-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-${{ steps.depkey.outputs.hash }}
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: ${{ env.JDK_VERSION }}
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -170,31 +177,35 @@ jobs:
           fi
 
       - name: Cache Qt toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/Qt
-          key: obsqt-v2-${{ runner.os }}-qt${{ env.QT_VERSION }}
+          key: obsqt-v3-${{ runner.os }}-qt${{ env.QT_VERSION }}
 
       - name: Install Qt toolchain
         run: |
           set -euo pipefail
           QT_DIR="$HOME/Qt/$QT_VERSION"
-          if [ -x "$QT_DIR/gcc_64/bin/androiddeployqt" ]; then
-            echo "Qt 已就位：$QT_DIR"
-            exit 0
+          if [ ! -x "$QT_DIR/gcc_64/bin/androiddeployqt" ] || [ ! -d "$QT_DIR/android_arm64_v8a" ]; then
+            pip install --quiet aqtinstall
+            mkdir -p "$HOME/Qt"
+            aqt install-qt all_os android "$QT_VERSION" android_arm64_v8a -O "$HOME/Qt"
+            aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O "$HOME/Qt"
           fi
-          pip install --quiet aqtinstall
-          mkdir -p "$HOME/Qt"
-          aqt install-qt all_os android "$QT_VERSION" android_arm64_v8a -O "$HOME/Qt"
-          aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O "$HOME/Qt"
-          [ -x "$QT_DIR/gcc_64/bin/androiddeployqt" ] || {
-            echo "FATAL: Qt 宿主缺 androiddeployqt（aqt 安装不完整？）" >&2
+          [ -x "$QT_DIR/gcc_64/bin/androiddeployqt" ] && [ -d "$QT_DIR/android_arm64_v8a" ] || {
+            echo "FATAL: Qt $QT_VERSION 工具链不完整（$QT_DIR）" >&2
             exit 1
           }
+          QTBASE_ARCHIVE="$QT_DIR/qtbase-v$QT_VERSION.tar.gz"
+          if [ ! -s "$QTBASE_ARCHIVE" ]; then
+            curl -fL --retry 3 --retry-delay 5 -o "$QTBASE_ARCHIVE.tmp" \
+              "https://codeload.github.com/qt/qtbase/tar.gz/refs/tags/v$QT_VERSION"
+            mv "$QTBASE_ARCHIVE.tmp" "$QTBASE_ARCHIVE"
+          fi
 
       # ---- ccache：仅缓存 OBS 主构建（≤512M）；PR 只读不回写，防挤爆 10 GB 配额淘汰 deps/Qt ----
       - name: Restore ccache objects
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ~/.ccache
           key: obsccache-v2-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-${{ github.sha }}-${{ github.run_attempt }}
@@ -206,6 +217,7 @@ jobs:
         id: keystore
         if: |
           github.event_name != 'pull_request' &&
+          github.event_name != 'schedule' &&
           (github.event_name != 'workflow_dispatch' || inputs.sign)
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -230,15 +242,15 @@ jobs:
 
       - name: Build APK
         env:
-          SIGN_KEYSTORE: ${{ github.event_name == 'pull_request' && format('{0}/scripts/signing/debug.keystore', github.workspace) || (steps.keystore.outputs.available == 'true' && format('{0}/release.jks', runner.temp) || '') }}
-          SIGN_KEY_ALIAS: ${{ github.event_name == 'pull_request' && 'androiddebugkey' || secrets.ANDROID_KEY_ALIAS }}
-          SIGN_STORE_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEYSTORE_PASSWORD }}
-          SIGN_KEY_PASS: ${{ github.event_name == 'pull_request' && 'android' || secrets.ANDROID_KEY_PASSWORD }}
+          SIGN_KEYSTORE: ${{ (github.event_name == 'pull_request' || github.event_name == 'schedule') && format('{0}/scripts/signing/debug.keystore', github.workspace) || (steps.keystore.outputs.available == 'true' && format('{0}/release.jks', runner.temp) || '') }}
+          SIGN_KEY_ALIAS: ${{ (github.event_name == 'pull_request' || github.event_name == 'schedule') && 'androiddebugkey' || secrets.ANDROID_KEY_ALIAS }}
+          SIGN_STORE_PASS: ${{ (github.event_name == 'pull_request' || github.event_name == 'schedule') && 'android' || secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SIGN_KEY_PASS: ${{ (github.event_name == 'pull_request' || github.event_name == 'schedule') && 'android' || secrets.ANDROID_KEY_PASSWORD }}
         run: bash scripts/ci-build-android.sh
 
       - name: Save ccache objects
         if: github.event_name != 'pull_request'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ~/.ccache
           key: obsccache-v2-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-qt${{ env.QT_VERSION }}-${{ github.sha }}-${{ github.run_attempt }}
@@ -280,9 +292,10 @@ jobs:
             echo "| ABI / API | arm64-v8a / minSdk 29 |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Release 资产不计入 Actions Artifact 500 MB 存储配额，发版时跳过重复的 artifact 上传。
+      # Release 资产不计入 Actions Artifact 500 MB 存储配额，发版及定时缓存预热均跳过重复的 artifact 上传。
       - name: Upload APK artifact
         if: |
+          github.event_name != 'schedule' &&
           !(steps.apk.outputs.signed == 'yes' &&
             (startsWith(github.ref, 'refs/tags/v') ||
              (github.event_name == 'workflow_dispatch' && inputs.create_release)))

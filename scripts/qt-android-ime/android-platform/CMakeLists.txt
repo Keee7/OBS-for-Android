@@ -1,9 +1,13 @@
 # Build the patched QPA plugin against the same Qt used by androiddeployqt.
 include(FetchContent)
 find_package(Qt6 6.12.0 EXACT CONFIG REQUIRED COMPONENTS CorePrivate GuiPrivate)
+set(_obs_qtbase_url "https://codeload.github.com/qt/qtbase/tar.gz/refs/tags/v6.12.0")
+if(DEFINED OBS_QTBASE_ARCHIVE AND EXISTS "${OBS_QTBASE_ARCHIVE}")
+  set(_obs_qtbase_url "${OBS_QTBASE_ARCHIVE}")
+endif()
 FetchContent_Declare(
   obs_qtbase_android
-  URL https://codeload.github.com/qt/qtbase/tar.gz/refs/tags/v6.12.0
+  URL "${_obs_qtbase_url}"
   URL_HASH SHA256=dff6570582c272cbe744d2e460700318262af505460f4215276459970ae31b46
   SOURCE_SUBDIR obs-no-cmake
 )

@@ -3,26 +3,49 @@
     [string]$ToolsRoot = (Join-Path (Split-Path $PSScriptRoot -Parent | Split-Path -Parent) 'build-tools'),
     [int]$Jobs = 8,
     [string]$NativeDeps,
-    [ValidateSet('6.12.0')][string]$QtVersion = '6.12.0',
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$GradleVersion = '9.5.1',
-    [ValidateRange(36, 99)][int]$CompileSdkVersion = 36,
+    [string]$QtVersion = '',
+    [string]$GradleVersion = '',
+    [int]$CompileSdkVersion = 0,
     [string]$SigningConfigFile = $env:OBS_ANDROID_SIGNING_CONFIG,
     [switch]$DebugSigning,
     [switch]$AntutuPackage
 )
 $ErrorActionPreference = 'Stop'
+$toolchain = @{}
+foreach ($line in (Get-Content -LiteralPath "$PSScriptRoot/toolchain-versions.env")) {
+    $trimmed = $line.Trim()
+    if (!$trimmed -or $trimmed.StartsWith('#')) { continue }
+    $pair = $trimmed -split '=', 2
+    if ($pair.Count -eq 2) { $toolchain[$pair[0].Trim()] = $pair[1].Trim() }
+}
+if (!$QtVersion) { $QtVersion = $toolchain['QT_VERSION'] }
+if (!$GradleVersion) { $GradleVersion = $toolchain['GRADLE_VERSION'] }
+if ($CompileSdkVersion -le 0) { $CompileSdkVersion = [int]$toolchain['COMPILE_SDK_VERSION'] }
+$NdkVersion = $toolchain['NDK_VERSION']
+$BuildToolsVersion = $toolchain['BUILD_TOOLS_VERSION']
+$JdkVersion = $toolchain['JDK_VERSION']
+if ($QtVersion -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid QtVersion: $QtVersion" }
+if ($GradleVersion -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid GradleVersion: $GradleVersion" }
+if ($CompileSdkVersion -lt 36) { throw "Invalid CompileSdkVersion: $CompileSdkVersion" }
+
 $repo = Split-Path $PSScriptRoot -Parent
 $tools = [IO.Path]::GetFullPath($ToolsRoot)
 $build = Join-Path $tools ('build-obs33-arm64-qt' + $QtVersion.Replace('.', ''))
 $logs = Join-Path $tools 'build-logs'
 $cmake = Join-Path $tools 'cmake/cmake-3.31.6-windows-x86_64/bin/cmake.exe'
 $ninja = Join-Path $tools 'ninja/ninja.exe'
-$ndk = Join-Path $tools 'ndk/android-ndk-r30'
+$ndk = Join-Path $tools "ndk/android-ndk-$NdkVersion"
 $qt = Join-Path $tools "Qt/$QtVersion/android_arm64_v8a"
 $hostQt = Join-Path $tools "Qt/$QtVersion/msvc2022_64"
 $prefix = if ($NativeDeps) { [IO.Path]::GetFullPath($NativeDeps) } else { Join-Path $tools 'android-deps-ffmpeg8/arm64-v8a' }
 $sdk = Join-Path $tools 'android-sdk'
-$env:JAVA_HOME = Join-Path $tools 'jdk-17.0.12'
+if (!($env:JAVA_HOME) -or !(Test-Path -LiteralPath "$($env:JAVA_HOME)/bin/javac.exe")) {
+    $jdkDir = @("jdk-$JdkVersion*", 'jdk-17*') | ForEach-Object {
+        Get-ChildItem -Path $tools -Directory -Filter $_ -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending | Select-Object -First 1
+    } | Where-Object { $_ } | Select-Object -First 1
+    $env:JAVA_HOME = if ($jdkDir) { $jdkDir.FullName } else { Join-Path $tools "jdk-$JdkVersion" }
+}
 $env:ANDROID_SDK_ROOT = $sdk
 $env:ANDROID_HOME = $sdk
 $env:ANDROID_NDK_ROOT = $ndk
@@ -123,7 +146,7 @@ if ($Action -in @('package','all')) {
     Invoke-BuildTool 'python' @("$PSScriptRoot/stage-qt-gradle-properties.py",
         '--deployment-settings', "$build/frontend/android-obs-studio-deployment-settings.json",
         '--output', $androidBuild, '--android-platform', "android-$CompileSdkVersion",
-        '--sdk', $sdk, '--build-tools', '36.0.0') 'gradle-props.log'
+        '--sdk', $sdk, '--build-tools', $BuildToolsVersion) 'gradle-props.log'
     # Patch the staged runtime only. A second androiddeployqt invocation would
     # overwrite it with the pristine SDK jar, so build directly with Gradle.
     $patchedQtJar = Join-Path $build 'qt-ime-patched/Qt6Android.jar'
@@ -144,9 +167,9 @@ if ($Action -in @('package','all')) {
     $aligned = Join-Path $build 'obs-test-aligned.apk'
     $modeName = if ($AntutuPackage) { 'antutu' } else { 'obs' }
     $signed = Join-Path $releases ('OBS-Android-arm64-' + $modeName + '-hwcodec-browser-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.apk')
-    Invoke-BuildTool "$sdk/build-tools/36.0.0/zipalign.exe" @('-f', '-P', '16', '4', $apk.FullName, $aligned) 'zipalign.log'
+    Invoke-BuildTool "$sdk/build-tools/$BuildToolsVersion/zipalign.exe" @('-f', '-P', '16', '4', $apk.FullName, $aligned) 'zipalign.log'
     if ($DebugSigning) {
-        Invoke-BuildTool "$sdk/build-tools/36.0.0/apksigner.bat" @('sign','--ks',"$PSScriptRoot/signing/debug.keystore",
+        Invoke-BuildTool "$sdk/build-tools/$BuildToolsVersion/apksigner.bat" @('sign','--ks',"$PSScriptRoot/signing/debug.keystore",
             '--ks-key-alias','androiddebugkey','--ks-pass','pass:android','--key-pass','pass:android','--out',$signed,$aligned) 'sign.log'
     } else {
         if (!$SigningConfigFile) { $SigningConfigFile = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'release key.txt' }
@@ -154,8 +177,8 @@ if ($Action -in @('package','all')) {
         Invoke-BuildTool 'python' @("$PSScriptRoot/sign-android-apk.py", '--config', $SigningConfigFile,
             '--input', $aligned, '--output', $signed, '--tools-root', $tools) 'sign.log'
     }
-    Invoke-BuildTool "$sdk/build-tools/36.0.0/apksigner.bat" @('verify','--verbose',$signed) 'verify-signature.log'
-    Invoke-BuildTool "$sdk/build-tools/36.0.0/zipalign.exe" @('-c','-P','16','-v','4',$signed) 'verify-alignment.log'
+    Invoke-BuildTool "$sdk/build-tools/$BuildToolsVersion/apksigner.bat" @('verify','--verbose',$signed) 'verify-signature.log'
+    Invoke-BuildTool "$sdk/build-tools/$BuildToolsVersion/zipalign.exe" @('-c','-P','16','-v','4',$signed) 'verify-alignment.log'
     Invoke-BuildTool 'python' @("$PSScriptRoot/verify-android-apk.py", $signed, '--tools-root', $tools,
         '--native-dir', $build, '--expected-package', $packageId) 'strict-apk-check.log'
     Invoke-BuildTool 'python' @("$PSScriptRoot/qt-android-ime/verify-runtime-apk.py", $signed) 'qt-runtime-apk-check.log'

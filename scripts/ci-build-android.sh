@@ -7,15 +7,15 @@
 # 与 scripts/build-frontend-apk-wsl.sh 的分工：那个读 ~/.obs-android-env.sh，给本地开发机用；
 # 本脚本假设环境已由 workflow（或宿主）准备好，不再自带兜底下载逻辑，缺工具时直接失败退出。
 #
-# 环境变量（都有默认值）：
-#   NDK_VERSION     默认 r30（校验已有 NDK 的 Pkg.ReleaseName）
-#   QT_VERSION      默认 6.12.0
+# 环境变量（默认值来自 scripts/toolchain-versions.env）：
+#   NDK_VERSION     校验已有 NDK 的 Pkg.ReleaseName
+#   QT_VERSION      Qt 版本
 #   GRADLE_VERSION  默认 system（或指定版本号；也可直接传 GRADLE_BIN）
-#   BUILD_TOOLS     默认 36.0.0
-#   PLATFORM        默认 android-36
+#   BUILD_TOOLS     Android build-tools 版本
+#   PLATFORM        Android SDK platform（如 android-36）
 #   JOBS            默认 nproc
 #   QT_ROOT         Qt 安装位置，默认 $HOME/Qt
-#   DL_ROOT         依赖源码/nlohmann_json 临时下载位置（不缓存），默认 $ROOT/../obs-dl
+#   DL_ROOT         依赖源码临时下载位置（不缓存），默认 $ROOT/../obs-dl
 #   SIGN_KEYSTORE   给了且文件存在就签名；否则只出未签名包
 #   SIGN_KEY_ALIAS / SIGN_STORE_PASS / SIGN_KEY_PASS  签名三件套
 set -euo pipefail
@@ -27,11 +27,17 @@ API="${API:-29}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${OBS_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+while IFS='=' read -r _k _v; do
+    case "$_k" in ''|'#'*) continue ;; esac
+    [ -n "${!_k+x}" ] || export "$_k=$_v"
+done < "$SCRIPT_DIR/toolchain-versions.env"
+
 NDK_VERSION="${NDK_VERSION:-r30}"
 QT_VERSION="${QT_VERSION:-6.12.0}"
 GRADLE_VERSION="${GRADLE_VERSION:-system}"
-BUILD_TOOLS="${BUILD_TOOLS:-36.0.0}"
-PLATFORM="${PLATFORM:-android-36}"
+BUILD_TOOLS="${BUILD_TOOLS:-${BUILD_TOOLS_VERSION:-36.0.0}}"
+PLATFORM="${PLATFORM:-android-${COMPILE_SDK_VERSION:-36}}"
+JDK_VERSION="${JDK_VERSION:-21}"
 JOBS="${JOBS:-$(nproc)}"
 QT_ROOT="${QT_ROOT:-$HOME/Qt}"
 DL_ROOT="${DL_ROOT:-$ROOT/../obs-dl}"
@@ -94,11 +100,15 @@ export ANDROID_NDK_ROOT="$NDK"
 export ANDROID_NDK_HOME="$NDK"
 export ANDROID_NDK="$NDK"
 if [ -z "${JAVA_HOME:-}" ]; then
-    for _jvm in /usr/lib/jvm/temurin-17-jdk-amd64 /usr/lib/jvm/java-17-openjdk-amd64; do
+    for _jvm in \
+        "/usr/lib/jvm/temurin-${JDK_VERSION}-jdk-amd64" \
+        "/usr/lib/jvm/java-${JDK_VERSION}-openjdk-amd64" \
+        /usr/lib/jvm/temurin-17-jdk-amd64 \
+        /usr/lib/jvm/java-17-openjdk-amd64; do
         [ -d "$_jvm" ] && { JAVA_HOME="$_jvm"; break; }
     done
 fi
-export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"
+export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-${JDK_VERSION}-openjdk-amd64}"
 # 尊重调用方或 setup-gradle 管理的标准 ~/.gradle。
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$HOME/.gradle}"
 export PATH="$SDK/platform-tools:$SDK/cmdline-tools/latest/bin:$JAVA_HOME/bin:$PATH"
@@ -231,86 +241,24 @@ check_gradle() {
 
 # ---------------------------------------------------------------- 依赖
 
+verify_deps_complete() {
+    [ -f "$PREFIX/.deps-complete" ] &&
+    [ -f "$PREFIX/lib/libavcodec.a" ] &&
+    [ -f "$PREFIX/lib/libusb-1.0.a" ] &&
+    [ -f "$PREFIX/lib/libturbojpeg.a" ] &&
+    [ -f "$PREFIX/share/cmake/nlohmann_json/nlohmann_jsonConfig.cmake" ]
+}
+
 build_deps() {
-    # 两个哨兵：FFmpeg（core 批次尾部）与 libusb（usb 批次）。
-    # 缺任何一个都说明缓存不完整，重新构建（deps 脚本自己会按依赖名跳过已完成的）。
-    if [ -f "$PREFIX/lib/libavcodec.a" ] && [ -f "$PREFIX/lib/libusb-1.0.a" ]; then
+    if verify_deps_complete; then
         echo "依赖产物已在位：$PREFIX（缓存命中，跳过源码构建）"
-        install_nlohmann_json
         return
     fi
     log "拉取依赖源码"
     ( cd "$ROOT/deps-android" && bash fetch.sh )
     log "交叉编译依赖（含 FFmpeg/x264，最慢的一环）"
     ( cd "$ROOT/deps-android" && NDK="$NDK" API="$API" JOBS="$JOBS" USE_CCACHE=0 bash build.sh "$ABI" )
-    for lib in libavcodec.a libusb-1.0.a libturbojpeg.a; do
-        [ -f "$PREFIX/lib/$lib" ] || { echo "FATAL: 依赖缺失：$PREFIX/lib/$lib" >&2; exit 1; }
-    done
-    install_nlohmann_json
-}
-
-# frontend/CMakeLists.txt:73 会**无条件** include feature-plugin-manager.cmake，
-# 而那里面第一行就是 find_package(nlohmann_json 3.11 REQUIRED)。
-# 它不是 deps-android 清单里的包（那份清单是给 libobs/插件的），所以早期 CI 会在这里失败：
-#   CMake Error ... Could not find a package configuration file provided by "nlohmann_json"
-# 本仓的 Windows 构建之所以没暴露这个问题，是因为开发机上**恰好**装了 conda 的 nlohmann_json
-#（CMakeCache 里 nlohmann_json_DIR 指向 miniconda3）。这种"靠机器上的偶发条件"不能在 CI 复现，
-# 所以这里显式装一份：官方 release 的 header-only 包 + CMake config，装进依赖前缀
-#（$PREFIX 已经在一个 CMAKE_PREFIX_PATH 里，find_package 自然找得到）。
-install_nlohmann_json() {
-    local ver=3.11.3
-    if [ -f "$PREFIX/share/cmake/nlohmann_json/nlohmann_jsonConfig.cmake" ]; then
-        echo "nlohmann_json 已就位（$PREFIX/share/cmake/nlohmann_json）"
-        return
-    fi
-    log "安装 nlohmann_json $ver（前端 find_package 需要，header-only）"
-    mkdir -p "$DL_ROOT"
-    local tb="$DL_ROOT/json.tar.xz"
-    [ -s "$tb" ] || curl -fL --retry 3 --retry-delay 5 -o "$tb" \
-        "https://github.com/nlohmann/json/releases/download/v$ver/json.tar.xz"
-    local tmp="$DL_ROOT/json-extract"
-    rm -rf "$tmp"; mkdir -p "$tmp"
-    tar -xJf "$tb" -C "$tmp"
-    [ -d "$tmp/json" ] || { echo "FATAL: json.tar.xz 解包后没有 json/ 目录" >&2; exit 1; }
-    # 头文件 → $PREFIX/include；CMake 包 → $PREFIX/share/cmake（官方布局）
-    mkdir -p "$PREFIX/include/nlohmann" "$PREFIX/share/cmake"
-    # json_fwd.hpp must ship alongside json.hpp: GoLiveAPI_CensoredJson.hpp includes
-    # only the former, and its absence is exactly what broke frontend target 345/457.
-    for _h in json.hpp json_fwd.hpp; do
-        cp -f "$tmp/json/single_include/nlohmann/$_h" "$PREFIX/include/nlohmann/"
-    done
-    rm -rf "$PREFIX/share/cmake/nlohmann_json"
-    cp -r "$tmp/json/cmake" "$PREFIX/share/cmake/nlohmann_json" 2>/dev/null || true
-    # 官方 release 里带的是 *.in 模板（给 install 用的），find_package 需要的是生成好的
-    # Config + ConfigVersion + Targets 三件。这里手写一份最小可用的（header-only 目标）——
-    # 比拉起 CMake 的 install 快得多，且行为等价：一个 INTERFACE 目标 + include 目录。
-    local d="$PREFIX/share/cmake/nlohmann_json"
-    mkdir -p "$d"
-    cat > "$d/nlohmann_jsonConfig.cmake" <<EOF
-# 最小可用的 nlohmann_json 包配置（header-only）。由 scripts/ci-build-android.sh 生成。
-if(TARGET nlohmann_json::nlohmann_json)
-  return()
-endif()
-add_library(nlohmann_json::nlohmann_json INTERFACE IMPORTED)
-set_target_properties(nlohmann_json::nlohmann_json PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "$PREFIX/include")
-set(nlohmann_json_VERSION "$ver")
-set(nlohmann_json_FOUND TRUE)
-EOF
-    cat > "$d/nlohmann_jsonConfigVersion.cmake" <<EOF
-set(PACKAGE_VERSION "$ver")
-if(PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION)
-  set(PACKAGE_VERSION_COMPATIBLE FALSE)
-else()
-  set(PACKAGE_VERSION_COMPATIBLE TRUE)
-  if(PACKAGE_FIND_VERSION STREQUAL PACKAGE_VERSION)
-    set(PACKAGE_VERSION_EXACT TRUE)
-  endif()
-endif()
-EOF
-    rm -rf "$tmp"
-    [ -f "$d/nlohmann_jsonConfig.cmake" ] || { echo "FATAL: nlohmann_json 配置没写成" >&2; exit 1; }
-    echo "  已安装：$PREFIX/include/nlohmann/json.hpp + $d"
+    verify_deps_complete || { echo "FATAL: 依赖产物不完整：$PREFIX" >&2; exit 1; }
 }
 
 # ---------------------------------------------------------------- OBS
@@ -321,6 +269,10 @@ configure_obs() {
     local -a cc_launcher=()
     if [ "${USE_CCACHE:-0}" = "1" ] && command -v ccache >/dev/null 2>&1; then
         cc_launcher=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+    fi
+    local -a qtbase_args=()
+    if [ -s "$QT/qtbase-v$QT_VERSION.tar.gz" ]; then
+        qtbase_args=(-DOBS_QTBASE_ARCHIVE="$QT/qtbase-v$QT_VERSION.tar.gz")
     fi
     cmake -S "$ROOT/obs-studio" -B "$BUILD_DIR" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
@@ -341,6 +293,7 @@ configure_obs() {
         -DANDROID_SDK_ROOT="$SDK" \
         -DOBS_ANDROID_COMPILE_SDK_VERSION="${PLATFORM#android-}" \
         -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/install" \
+        "${qtbase_args[@]}" \
         "${cc_launcher[@]}"
 }
 

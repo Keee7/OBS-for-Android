@@ -27,7 +27,7 @@ This guide describes how to build OBS for Android on Ubuntu / WSL, via GitHub Ac
 * **Android SDK**: Build-Tools `36.0.0`, Platform `android-36`, Platform-Tools (ADB)
 * **Android NDK**: `r30` (30.0.16248370)
 * **Qt**: `6.12.0` (Android arm64 package + matching host Qt with `androiddeployqt`)
-* **Java**: JDK 17
+* **Java**: JDK 21 (shared defaults in [scripts/toolchain-versions.env](scripts/toolchain-versions.env))
 * **Build System**: CMake 3.31+ and Ninja
 * **Gradle**: 9.5.1
 * **Host Tools**: Python 3; MSYS2 (for compiling specific native dependencies on Windows)
@@ -42,12 +42,12 @@ On Ubuntu 24.04 or WSL2, first install the [Android SDK command-line tools](http
 ```sh
 sudo apt-get update
 sudo apt-get install -y 7zip ninja-build meson build-essential curl unzip zip ca-certificates \
-  patch pkg-config dpkg-dev autoconf automake libtool nasm yasm python3-venv openjdk-17-jdk \
+  patch pkg-config dpkg-dev autoconf automake libtool nasm yasm python3-venv openjdk-21-jdk \
   libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev
 
 python3 -m venv "$HOME/.venvs/obs-android"
 source "$HOME/.venvs/obs-android/bin/activate"
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
 export QT_ROOT="$HOME/Qt"
 export GRADLE_VERSION=9.5.1
@@ -79,7 +79,7 @@ export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
 export NDK_ROOT="$ANDROID_SDK_ROOT/ndk/30.0.16248370"
 export QT_DIR="$HOME/Qt/6.12.0"
 export QT_HOST_PATH="$QT_DIR/gcc_64"
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 export GRADLE_BIN="$HOME/toolchain/gradle-9.5.1/bin"
 
 bash deps-android/fetch.sh
@@ -104,7 +104,7 @@ build-tools/
   ndk/android-ndk-r30/           # Windows NDK r30
   Qt/6.12.0/android_arm64_v8a/  # Qt Android ARM64
   Qt/6.12.0/msvc2022_64/        # Host Qt with bin/androiddeployqt.exe
-  jdk-17.0.12/                  # JDK 17
+  jdk-21/                       # JDK 21 (or jdk-21.x; falls back to jdk-17*)
   gradle/gradle-9.5.1/          # Gradle
   cmake/cmake-3.31.6-windows-x86_64/
   ninja/                        # ninja.exe
@@ -163,7 +163,7 @@ Pass `-AntutuPackage` to stage the alternate application ID `com.antutu.ABenchMa
 * **Android SDK**：Build-Tools `36.0.0`，Platform `android-36`，Platform-Tools (ADB)
 * **Android NDK**：`r30` (30.0.16248370)
 * **Qt**：`6.12.0` (Android arm64 预编译包 + 对应宿主工具，包含 `androiddeployqt`)
-* **Java**：JDK 17
+* **Java**：JDK 21（版本号统一定义在 [scripts/toolchain-versions.env](scripts/toolchain-versions.env)）
 * **构建系统**：CMake 3.31+ 与 Ninja
 * **Gradle**：9.5.1
 * **宿主依赖库**：Python 3，MSYS2 环境（用于 Windows 下编译部分 C/C++ 原生依赖）
@@ -172,7 +172,7 @@ Pass `-AntutuPackage` to stage the alternate application ID `com.antutu.ABenchMa
 
 ### Ubuntu / WSL 快速构建
 
-在 Ubuntu 24.04 或 WSL2 上，先按[工具链安装步骤](#ci-toolchain-setup)准备 JDK 17、CMake、Gradle 9.5.1、Android SDK（含 API 36、Build-Tools 36.0.0、ADB 和 NDK r30）以及 Qt 6.12.0 的宿主和 arm64 套件。按安装位置设置 `JAVA_HOME`、`ANDROID_SDK_ROOT`、`QT_ROOT` 和 `PATH`。
+在 Ubuntu 24.04 或 WSL2 上，先按[工具链安装步骤](#ci-toolchain-setup)准备 JDK 21、CMake、Gradle 9.5.1、Android SDK（含 API 36、Build-Tools 36.0.0、ADB 和 NDK r30）以及 Qt 6.12.0 的宿主和 arm64 套件。按安装位置设置 `JAVA_HOME`、`ANDROID_SDK_ROOT`、`QT_ROOT` 和 `PATH`。
 
 在同一终端进入仓库根目录。脚本会编译原生依赖并打包 APK。
 
@@ -200,7 +200,7 @@ build-tools/
   ndk/android-ndk-r30/           # Windows 版 NDK r30
   Qt/6.12.0/android_arm64_v8a/  # Qt Android ARM64
   Qt/6.12.0/msvc2022_64/        # Qt 宿主工具 (含 androiddeployqt.exe)
-  jdk-17.0.12/                  # JDK 17
+  jdk-21/                       # JDK 21（或 jdk-21.x；兼容回退到 jdk-17*）
   gradle/gradle-9.5.1/          # Gradle
   cmake/cmake-3.31.6-windows-x86_64/
   ninja/                        # ninja.exe

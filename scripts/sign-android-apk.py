@@ -19,6 +19,31 @@ KEYS = ('ANDROID_KEYSTORE_BASE64', 'ANDROID_KEY_ALIAS',
         'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_PASSWORD')
 
 
+def load_toolchain_versions():
+    env_file = Path(__file__).with_name('toolchain-versions.env')
+    versions = {}
+    if env_file.is_file():
+        for raw in env_file.read_text(encoding='utf-8').splitlines():
+            line = raw.strip()
+            if line and not line.startswith('#') and '=' in line:
+                k, v = line.split('=', 1)
+                versions[k.strip()] = v.strip()
+    return versions
+
+
+def find_java_exe(tools_root, jdk_version):
+    java_home = os.environ.get('JAVA_HOME')
+    if java_home:
+        candidate = Path(java_home) / 'bin/java.exe'
+        if candidate.is_file():
+            return candidate
+    for pattern in (f'jdk-{jdk_version}*/bin/java.exe', 'jdk-17*/bin/java.exe'):
+        matches = sorted(tools_root.glob(pattern), reverse=True)
+        if matches:
+            return matches[0]
+    return tools_root / f'jdk-{jdk_version}/bin/java.exe'
+
+
 def read_config(path):
     text = Path(path).read_text(encoding='utf-8-sig')
     if text.lstrip().startswith('{'):
@@ -61,8 +86,10 @@ def main():
     env = os.environ.copy()
     env['OBS_APK_STORE_PASS'] = store_pass
     env['OBS_APK_KEY_PASS'] = key_pass
-    java = args.tools_root / 'jdk-17.0.12/bin/java.exe'
-    jar = args.tools_root / 'android-sdk/build-tools/36.0.0/lib/apksigner.jar'
+    versions = load_toolchain_versions()
+    java = find_java_exe(args.tools_root, versions.get('JDK_VERSION', '21'))
+    build_tools = versions.get('BUILD_TOOLS_VERSION', '36.0.0')
+    jar = args.tools_root / f'android-sdk/build-tools/{build_tools}/lib/apksigner.jar'
     with tempfile.TemporaryDirectory(prefix='obs-release-sign-') as tmp:
         key = Path(tmp) / 'release.jks'
         key.write_bytes(store)
