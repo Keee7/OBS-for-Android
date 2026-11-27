@@ -25,8 +25,8 @@
     1) 权限多一条 FOREGROUND_SERVICE_MEDIA_PROJECTION；
     2) 那个 <service> 的类型从 specialUse 扩成 specialUse|mediaProjection（一个服务带两档，
        不起第二个服务、不加第二条常驻通知）；
-    3) 多一个透明代理 Activity com.obsproject.studio.ObsProjectionHost，专门收
-       MediaProjection 的 onActivityResult —— 逐条理由写在它自己那段注释与那个 .java 的头注释里。
+    3) 多一个透明代理 Activity com.obsproject.studio.ObsProjectionConsentActivity，专门收
+       MediaProjection 的 onActivityResult，结果交回 ObsProjectionHost —— 逐条理由写在它自己那段注释与 ObsProjectionHost.java 的头注释里。
   这一轮只接"授权与类型"这一条腿：还没有任何代码建 VirtualDisplay，所以装机后能验到的是
   同意框起不起、令牌收不收得到、startForeground 换档时系统点不点头，验不到"屏幕画面进预览"。
 
@@ -123,9 +123,10 @@
                 android:value="OBS Studio foreground service for encoding and streaming/recording" />
         </service>
 
-        <!-- P-18-a：屏幕采集同意的透明代理 Activity（见 ObsProjectionHost.java 头注释：MediaProjection
-             是一次性 token、没有可查状态，所以必须真有一个收得到 onActivityResult 的地方，
-             而不能照抄 ObsPermissionHost 那套"只弹框、结果靠现读"）。
+        <!-- P-18-a：屏幕采集同意的透明代理 Activity（见 ObsProjectionConsentActivity.java /
+             ObsProjectionHost.java 头注释：MediaProjection 是一次性 token、没有可查状态，
+             所以必须真有一个收得到 onActivityResult 的地方，而不能照抄 ObsPermissionHost 那套
+             "只弹框、结果靠现读"）。
              exported=false —— 只由本进程 startActivity 拉起；人工冒烟时 root 的 am start 照样能起。
              Translucent.NoTitleBar：它自己一帧都不画，同意框是系统的那个 Activity。
              excludeFromRecents：代理活动不该出现在最近任务里（用户只见 OBS 一个入口）。
@@ -133,7 +134,7 @@
              变成要靠运气，而每条路径都已经自己 finish() 了，收益为零、风险不为零 ⇒ 去掉。
              screenOrientation 跟着主界面钉成 sensorLandscape（人工定的口径：只做横屏）。 -->
         <activity
-            android:name="com.obsproject.studio.ObsProjectionHost"
+            android:name="com.obsproject.studio.ObsProjectionConsentActivity"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:exported="false"
             android:excludeFromRecents="true"

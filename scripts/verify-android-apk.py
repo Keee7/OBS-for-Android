@@ -43,7 +43,9 @@ PERMISSIONS = {'android.permission.INTERNET', 'android.permission.RECORD_AUDIO',
                'android.permission.FOREGROUND_SERVICE', 'android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION'}
 CLASSES = (b'Lcom/obsproject/studio/ObsCodecCapabilities;', b'Lcom/obsproject/studio/ObsBrowserHost;',
            b'Lcom/obsproject/studio/ObsStorageHost;', b'Lcom/obsproject/studio/ObsProjectionHost;',
-           b'Lcom/obsproject/studio/ObsProjectionSession;', b'Lcom/obsproject/studio/ObsScreenGpuHost;')
+           b'Lcom/obsproject/studio/ObsProjectionConsentActivity;', b'Lcom/obsproject/studio/ObsProjectionAudio;',
+           b'Lcom/obsproject/studio/ObsProjectionSession;', b'Lcom/obsproject/studio/ObsScreenGpuHost;',
+           b'Lcom/obsproject/studio/ObsNdiRuntimeInstaller;', b'Lcom/obsproject/studio/ObsUsbAudioMatcher;')
 
 
 def run_tool(argv):
