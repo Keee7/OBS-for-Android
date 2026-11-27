@@ -14,18 +14,15 @@ static inline int obs_android_hevc_main10_profile(bool pq)
 	return pq ? 4096 : 2;
 }
 
-/* Android 无 root 的 USB / 音频设备通路（plan.md 第四节 阶段 2）。
+/* Android 无 root 的 USB / 音频设备通路。
  *
  * 约束：插件是纯 C 的 .so，只链 libobs，拿不到 Qt 也没有 JavaVM；而 USB 设备只能
  * 由 Java 侧 UsbManager 打开（openDevice → getFileDescriptor）才有 fd，音频输入清单
  * 只能由 Java 侧 AudioManager 读到（且 Android 10 起读输入设备属性要 RECORD_AUDIO）。
  * 所以中间需要一条总线：App 启动时把一组回调注册进 libobs，插件通过 libobs 调用它们。
  *
- * 为什么放在 libobs 而不是让插件自己反向找宿主：实测到的是插件 .so 的 NEEDED 只有
- * libc/libdl/libm/liblibobs（A3 用 llvm-readobj 核过），即 libobs 是插件唯一的公共依赖；
- * "插件 dlsym(RTLD_DEFAULT) 够不到壳主 .so 的符号"则是按 Android 的加载语义推的
- * （没做反查实验）。本方案只依赖前半句 —— 走 libobs 是链接期就能解析的，
- * .qoder/check-m3-syms.sh 能静态查到，因此不需要成立后半句。
+ * 为什么放在 libobs 而不是让插件自己反向找宿主：libobs 是插件唯一的公共依赖，
+ * 由 libobs 转接在链接期就能解析，不依赖运行期符号查找。
  *
  * 线程约定：get_devices 可能在 libobs 的视频线程（源的 update/activate）或
  * UI 线程（obs_get_source_properties）上被调，实现方必须自己保证线程安全，并且
@@ -78,7 +75,7 @@ EXPORT int obs_android_usb_open(const char *name);
 EXPORT void obs_android_usb_close(int fd);
 
 /* ------------------------------------------------------------------------- */
-/* A4：Android 音频输入设备总线（与 USB 总线同构，但少两条腿）                  */
+/* Android 音频输入设备总线（与 USB 总线同构，但少两条腿）                  */
 /* ------------------------------------------------------------------------- */
 
 /* 为什么音频也要一条总线：AAudio 是纯 C 的 API，能"用哪台设备"只有一个 int deviceId，
@@ -153,7 +150,7 @@ EXPORT void obs_android_audio_add_route_callback(obs_android_audio_route_cb cb, 
 EXPORT void obs_android_audio_remove_route_callback(obs_android_audio_route_cb cb, void *param);
 
 /* ------------------------------------------------------------------------- */
-/* P-17：内置摄像头（Camera2 NDK）的权限总线                                    */
+/* 内置摄像头（Camera2 NDK）的权限总线                                    */
 /* ------------------------------------------------------------------------- */
 
 /* 相机总线过两格：**权限**（CAMERA 授予态）与**此刻该不该持有设备**（前后台）。除此之外
@@ -203,7 +200,7 @@ EXPORT int obs_android_camera_request_permission(void);
 EXPORT bool obs_android_camera_capture_allowed(void);
 
 /* ------------------------------------------------------------------------- */
-/* P-18-a/b/d：屏幕采集（MediaProjection）总线：问、要、还、量、接、收          */
+/* 屏幕采集（MediaProjection）总线：问、要、还、量、接、收          */
 /* ------------------------------------------------------------------------- */
 
 /* 这一条比其余三条都窄 —— 它没有 fd、没有设备清单，但有**一块目标面**。
@@ -246,7 +243,7 @@ struct obs_android_screen_host {
 	 *  切场景/临时停用只该场面（令牌留着，切回来立刻能采，不必再问用户一次），
 	 *  而**最后一颗采集源被删掉、或应用退出**时必须连令牌一起交回去，
 	 *  否则进程还活着的时候系统一直以为在被录（常驻"停止共享"通知 + 前台服务白占
-	 *  mediaProjection 那一档 —— 就是 P-18-a 那条"陈旧回调擦格子"实测到的那种自相矛盾态）。
+	 *  mediaProjection 那一档，形成自相矛盾态）。
 	 *  必须幂等：交还两次不该报错。 */
 	void (*release_consent)(void *param);
 
@@ -266,7 +263,7 @@ struct obs_android_screen_host {
 	 *  而"没在采的时候收面"不能报错也不崩。没有返回值就是因为没有可报的失败。 */
 	void (*stop_display)(void *param);
 
-	/* ---- P-18-e：系统内录（AudioPlaybackCapture）三条腿 ----
+	/* ---- 系统内录（AudioPlaybackCapture）三条腿 ----
 	 *
 	 * 方向仍然全是"native 问、Java 答"。这一路本来最顺手的形状是让 Java 的采集线程
 	 * 直接往回推 PCM（那要在前端开第一条 Java→native 的 JNI 导出），这里刻意不走它：
@@ -382,8 +379,6 @@ EXPORT bool obs_android_finish_replay_document(const char *uri, bool publish);
 /* Android process VM, set by the frontend before loading modules. */
 EXPORT void obs_android_set_java_vm(void *vm);
 EXPORT void *obs_android_get_java_vm(void);
-EXPORT void obs_android_set_decoder_query(bool (*query)(const char *, char *, size_t));
-EXPORT bool obs_android_find_hardware_decoder(const char *mime, char *out, size_t size);
 #ifdef __cplusplus
 }
 #endif
