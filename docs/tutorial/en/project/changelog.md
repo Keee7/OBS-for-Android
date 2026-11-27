@@ -2,7 +2,16 @@
 
 Highlights compiled from major repository releases and commit milestones (full history on [GitHub Commits](https://github.com/Keee7/OBS-for-Android/commits/main) and [Releases](https://github.com/Keee7/OBS-for-Android/releases)).
 
-## v0.2.9 (Current Baseline)
+## v0.2.10 (Current Baseline)
+
+* **MediaCodec Hardware Encoder Compatibility**: Added relaxed hardware fallback probing via real `configure()` for devices with quirky capability declarations, detailed capability logs, and clearer per-cause error messages.
+* **MediaCodec Surface Decoding Fixes**: Fixed EGLImage import, acquire-fence handling, and GL texture/FBO cleanup on Android; added a MediaCodec Surface zero-copy toggle and staged diagnostic logs for media sources.
+* **NDI®|HX Hardware Decoding & Safety**: Added MediaCodec hardware decoding for NDI®|HX, fixed IME input for extra IPs, and restricted NDI runtime loading to app-private storage.
+* **Browser, Screen Capture & Streaming Defaults**: Added Back/Refresh buttons and touch gestures to browser Interact, fixed landscape screen-capture sizing and consent error handling, and defaulted streaming service to Custom.
+* **Studio Mode Stacked Layout**: Added an "Enable portrait/vertical layout" toggle to the Studio Mode transition `⋮` menu (synced with General Settings) so tablets can switch to a compact top/bottom layout for larger 16:9 previews, and fixed a Qt focus crash when switching back to side-by-side.
+* **Code & CI Maintenance**: Modularized Android frontend and Java host classes, unified JNI context and manifest versioning, and updated CI toolchains to JDK 21.
+
+## v0.2.9
 
 * **UVC Low-Latency Smoothing**: Added time-budgeted buffering with automatic backlog recovery and upgraded batch timestamp smoothing, significantly improving capture smoothness and stall recovery.
 * **UVC Controls & Safe USB Eject**: Split UVC settings into cascading Format → Resolution → Frame Rate selectors, aligned `libuvc` frame-rate locking with the native engine, filtered non-video USB devices on auto-select, and added Safe Eject / Reconnect for UVC and Nikon USB sources while fixing repeated USB permission prompts.

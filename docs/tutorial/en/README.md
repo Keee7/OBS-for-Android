@@ -44,6 +44,6 @@ Welcome to **OBS for Android**! This community port brings OBS Studio v33 to And
 * [Logs & Bug Reporting](troubleshooting/logs-and-feedback.md) — In-app logs, `adb logcat`, and Plugin Manager diagnostics
 
 ### Project
-* [Changelog](project/changelog.md) — Summary of v0.2.5, v0.2.6, v0.2.7, v0.2.8, and v0.2.9 milestones
+* [Changelog](project/changelog.md) — Summary of v0.2.5, v0.2.6, v0.2.7, v0.2.8, v0.2.9, and v0.2.10 milestones
 * [Contributing](project/contributing.md) — Bug report checklist, PR rules, and log sanitization
 * [Licenses & Notices](project/license.md) — GPL-2.0-or-later, third-party dependencies, and trademark notices

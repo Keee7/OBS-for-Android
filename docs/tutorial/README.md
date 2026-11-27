@@ -44,6 +44,6 @@
 * [日志收集与问题反馈](troubleshooting/logs-and-feedback.md) — 应用内日志、`adb logcat` 与插件管理器排查
 
 ### 项目相关
-* [更新日志](project/changelog.md) — v0.2.5 / v0.2.6 / v0.2.7 / v0.2.8 / v0.2.9 版本演进摘要
+* [更新日志](project/changelog.md) — v0.2.5 / v0.2.6 / v0.2.7 / v0.2.8 / v0.2.9 / v0.2.10 版本演进摘要
 * [参与贡献](project/contributing.md) — Issue 反馈模板、PR 规范与脱敏提醒
 * [开源许可证与声明](project/license.md) — GPL-2.0-or-later、第三方依赖与商标声明
