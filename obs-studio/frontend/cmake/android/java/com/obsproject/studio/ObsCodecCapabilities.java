@@ -11,17 +11,56 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 
-/** Strict candidates only: Surface/YUV input, real hardware, requested size/rate and mode. */
+/** Strict candidates first, with controlled relaxed hardware fallback for vendor capability quirks. */
 public final class ObsCodecCapabilities {
     private static final String TAG = "ObsCodecCapabilities";
     private ObsCodecCapabilities() {}
-    private static final LinkedHashMap<String, String[]> cache = new LinkedHashMap<>();
+    private static final LinkedHashMap<String, QueryResult> cache = new LinkedHashMap<>();
     private static final LinkedHashMap<String, Boolean> fullRangeCache = new LinkedHashMap<>();
     private static MediaCodecInfo[] codecs;
     private static final int COLOR_FORMAT_YUV_P010 = 54;
     private static final int PROBE_REJECTED = 0;
     private static final int PROBE_ACCEPTED = 1;
     private static final int PROBE_TRANSIENT = 2;
+
+    static final int REJECT_HW_FOUND = 1 << 0;
+    static final int REJECT_PROFILE_OR_CF = 1 << 1;
+    static final int REJECT_MODE = 1 << 2;
+    static final int REJECT_SIZE_RATE = 1 << 3;
+    static final int REJECT_BITRATE = 1 << 4;
+    static final int REJECT_FORMAT = 1 << 5;
+
+    private static final class QueryResult {
+        final String[] strictNames;
+        final String[] candidateEntries;
+        final int rejectFlags;
+        final String diagnostics;
+
+        QueryResult(String[] strictNames, String[] candidateEntries, int rejectFlags, String diagnostics) {
+            this.strictNames = strictNames;
+            this.candidateEntries = candidateEntries;
+            this.rejectFlags = rejectFlags;
+            this.diagnostics = diagnostics;
+        }
+    }
+
+    private static String modeName(int mode) {
+        switch (mode) {
+        case MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ: return "CQ";
+        case MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR: return "VBR";
+        case MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR: return "CBR";
+        default: return "mode" + mode;
+        }
+    }
+
+    private static String formatSupportedModes(MediaCodecInfo.EncoderCapabilities enc) {
+        if (enc == null) return "none";
+        ArrayList<String> modes = new ArrayList<>(3);
+        if (enc.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ)) modes.add("CQ");
+        if (enc.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)) modes.add("VBR");
+        if (enc.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)) modes.add("CBR");
+        return modes.isEmpty() ? "none" : String.join("/", modes);
+    }
 
     private static int encoderProfile(String mime) {
         switch (mime) {
@@ -95,47 +134,164 @@ public final class ObsCodecCapabilities {
             int bitrate, int mode, int requestedProfile, boolean p010) {
         return findEncodersProfile(mime, width, height, fps, bitrate, mode, requestedProfile, p010, false);
     }
-    public static synchronized String[] findEncodersProfile(String mime, int width, int height, double fps,
+    private static QueryResult queryEncoders(String mime, int width, int height, double fps,
             int bitrate, int mode, int requestedProfile, boolean p010, boolean allowByteBuffer) {
-        ArrayList<String> result = new ArrayList<>();
         int profile = requestedProfile > 0 ? requestedProfile : encoderProfile(mime);
         if (Build.VERSION.SDK_INT < 29 || width <= 0 || height <= 0 || !Double.isFinite(fps) || fps <= 0
                 || bitrate < 0 || mode < 0 || mode > 2 || profile < 0 || (p010 && Build.VERSION.SDK_INT < 33))
-            return new String[0];
+            return new QueryResult(new String[0], new String[0], 0, "invalid-query-params");
         String key = mime + ":" + width + ":" + height + ":" + fps + ":" + bitrate + ":" + mode + ":" + profile + ":" + p010 + ":" + allowByteBuffer;
-        if (cache.containsKey(key)) return cache.get(key).clone();
+        QueryResult cached = cache.get(key);
+        if (cached != null) return cached;
         if (codecs == null) codecs = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
+        ArrayList<String> strictNames = new ArrayList<>();
+        ArrayList<String> strictEntries = new ArrayList<>();
+        ArrayList<String> relaxedEntries = new ArrayList<>();
+        ArrayList<String> relaxedModeEntries = new ArrayList<>();
+        ArrayList<String> diagEntries = new ArrayList<>();
+        int rejectFlags = 0;
         for (MediaCodecInfo info : codecs) {
             try {
                 if (!info.isEncoder() || !info.isHardwareAccelerated() || info.isSoftwareOnly() || info.isAlias()) continue;
                 for (String type : info.getSupportedTypes()) {
                     if (!mime.equalsIgnoreCase(type)) continue;
+                    rejectFlags |= REJECT_HW_FOUND;
                     MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(type);
                     MediaCodecInfo.VideoCapabilities video = caps.getVideoCapabilities();
                     MediaCodecInfo.EncoderCapabilities enc = caps.getEncoderCapabilities();
-                    boolean supported = supportsEncoderProfile(caps, profile, p010, allowByteBuffer)
-                        && (mode == 0 || bitrate == 0 || video.getBitrateRange().contains(bitrate))
-                        && video.areSizeAndRateSupported(width, height, fps)
-                        && enc.isBitrateModeSupported(mode);
-                    if (supported && profile > 0) {
+                    boolean profileOk = supportsEncoderProfile(caps, profile, p010, allowByteBuffer);
+                    if (video == null || enc == null) {
+                        rejectFlags |= REJECT_PROFILE_OR_CF;
+                        diagEntries.add(info.getName() + "[tier=rejected missing-caps]");
+                        continue;
+                    }
+                    android.util.Range<Integer> bitrateRange = video.getBitrateRange();
+                    android.util.Range<Integer> widths = video.getSupportedWidths();
+                    android.util.Range<Integer> heights = video.getSupportedHeights();
+                    int wAlign = Math.max(1, video.getWidthAlignment());
+                    int hAlign = Math.max(1, video.getHeightAlignment());
+                    boolean bitrateOk = (mode == 0 || bitrate == 0 || bitrateRange.contains(bitrate));
+                    boolean sizeOk = video.isSizeSupported(width, height);
+                    boolean alignOk = (width % wAlign == 0) && (height % hAlign == 0);
+                    boolean boundsOk = (widths.contains(width) && heights.contains(height))
+                        || (widths.contains(height) && heights.contains(width));
+                    boolean sizeRateOk = video.areSizeAndRateSupported(width, height, fps);
+                    boolean modeOk = enc.isBitrateModeSupported(mode);
+                    boolean formatOk = true;
+                    if (profile > 0 && profileOk) {
                         MediaFormat f = MediaFormat.createVideoFormat(mime, width, height);
                         f.setInteger(MediaFormat.KEY_PROFILE, profile);
                         f.setFloat(MediaFormat.KEY_FRAME_RATE, (float)fps);
                         if (bitrate > 0) f.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
-                        supported = caps.isFormatSupported(f);
+                        formatOk = caps.isFormatSupported(f);
                     }
+                    String fpsRangeStr;
+                    try {
+                        fpsRangeStr = sizeOk
+                            ? video.getSupportedFrameRatesFor(width, height).toString()
+                            : video.getSupportedFrameRates().toString();
+                    } catch (IllegalArgumentException e) {
+                        fpsRangeStr = video.getSupportedFrameRates().toString();
+                    }
+                    String supportedModes = formatSupportedModes(enc);
+                    ArrayList<String> mismatches = new ArrayList<>();
+                    if (!profileOk) {
+                        rejectFlags |= REJECT_PROFILE_OR_CF;
+                        mismatches.add("profile_or_cf");
+                    }
+                    if (!modeOk) {
+                        rejectFlags |= REJECT_MODE;
+                        mismatches.add("mode(" + modeName(mode) + ";supported=" + supportedModes + ")");
+                    }
+                    if (!bitrateOk) {
+                        rejectFlags |= REJECT_BITRATE;
+                        mismatches.add("bitrate(" + bitrate + "!=" + bitrateRange + ")");
+                    }
+                    if (!sizeRateOk) {
+                        rejectFlags |= REJECT_SIZE_RATE;
+                        if (!boundsOk) mismatches.add("bounds(" + widths + "x" + heights + ")");
+                        else if (!alignOk) mismatches.add("align(" + wAlign + "x" + hAlign + ")");
+                        else if (!sizeOk) mismatches.add("size(" + widths + "x" + heights + ")");
+                        else mismatches.add("rate(fps=" + fpsRangeStr + ")");
+                    }
+                    if (profile > 0 && profileOk && !formatOk) {
+                        rejectFlags |= REJECT_FORMAT;
+                        mismatches.add("format");
+                    }
+
+                    boolean strict = profileOk && modeOk && bitrateOk && sizeRateOk && formatOk;
+                    String mismatchCsv = String.join(",", mismatches);
+                    String tier;
+                    if (strict) {
+                        tier = "strict";
+                        strictNames.add(info.getName());
+                        strictEntries.add("strict|" + info.getName() + "|");
+                    } else if (profileOk && boundsOk && modeOk) {
+                        // Basic HW capability matches (codec, profile, color format, bounds, rate mode),
+                        // only strict XML alignment/rate/bitrate/format declaration differed: allow configure() probe.
+                        tier = "relaxed";
+                        relaxedEntries.add("relaxed|" + info.getName() + "|" + mismatchCsv);
+                    } else if (profileOk && boundsOk && mode != MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ) {
+                        // Vendor XML omitted CBR/VBR support: allow lowest-priority configure() probe
+                        // when Automatic quality is selected so real driver acceptance decides.
+                        tier = "relaxed_mode";
+                        relaxedModeEntries.add("relaxed_mode|" + info.getName() + "|" + mismatchCsv);
+                    } else {
+                        tier = "rejected";
+                    }
+
+                    String detail = info.getName() + "[tier=" + tier + " align=" + wAlign + "x" + hAlign
+                        + " size=" + widths + "x" + heights + " fps=" + fpsRangeStr
+                        + " br=" + bitrateRange + " modes=" + supportedModes
+                        + (mismatchCsv.isEmpty() ? "" : " mismatch=" + mismatchCsv) + "]";
+                    diagEntries.add(detail);
                     Log.i(TAG, info.getName() + " " + mime + " " + width + "x" + height + "@" + fps
-                        + " bitrate=" + bitrate + " hardware=true software=false raw=" + allowByteBuffer + " eligible=" + supported);
-                    if (supported) result.add(info.getName());
+                        + " bitrate=" + bitrate + " mode=" + modeName(mode) + " profile=" + profile
+                        + " raw=" + allowByteBuffer + " tier=" + tier
+                        + (mismatchCsv.isEmpty() ? "" : " mismatch=" + mismatchCsv));
                 }
             } catch (IllegalArgumentException | SecurityException e) {
                 Log.w(TAG, "Ignoring codec " + info.getName(), e);
+                diagEntries.add(info.getName() + "[tier=error err=" + e.getClass().getSimpleName() + "]");
             }
         }
-        String[] names = result.toArray(new String[0]);
+        ArrayList<String> allEntries = new ArrayList<>(strictEntries.size() + relaxedEntries.size() + relaxedModeEntries.size());
+        allEntries.addAll(strictEntries);
+        allEntries.addAll(relaxedEntries);
+        allEntries.addAll(relaxedModeEntries);
+        String diagnostics = diagEntries.isEmpty() ? "no-hardware-encoders-for-" + mime : String.join("; ", diagEntries);
+        QueryResult qr = new QueryResult(
+            strictNames.toArray(new String[0]),
+            allEntries.toArray(new String[0]),
+            rejectFlags,
+            diagnostics);
         if (cache.size() >= 32) cache.remove(cache.keySet().iterator().next());
-        cache.put(key, names);
-        return names.clone();
+        cache.put(key, qr);
+        return qr;
+    }
+
+    public static synchronized String[] findEncodersProfile(String mime, int width, int height, double fps,
+            int bitrate, int mode, int requestedProfile, boolean p010, boolean allowByteBuffer) {
+        return queryEncoders(mime, width, height, fps, bitrate, mode, requestedProfile, p010, allowByteBuffer)
+            .strictNames.clone();
+    }
+
+    public static synchronized String[] findEncoderCandidates(String mime, int width, int height, double fps,
+            int bitrate, int mode, int requestedProfile, boolean p010, boolean allowByteBuffer) {
+        return queryEncoders(mime, width, height, fps, bitrate, mode, requestedProfile, p010, allowByteBuffer)
+            .candidateEntries.clone();
+    }
+
+    public static synchronized int queryEncoderRejectFlags(String mime, int width, int height, double fps,
+            int bitrate, int mode, int requestedProfile, boolean p010, boolean allowByteBuffer) {
+        return queryEncoders(mime, width, height, fps, bitrate, mode, requestedProfile, p010, allowByteBuffer)
+            .rejectFlags;
+    }
+
+    public static synchronized String describeEncoderQuery(String mime, int width, int height, double fps,
+            int bitrate, int mode, int requestedProfile, boolean p010, boolean allowByteBuffer) {
+        return queryEncoders(mime, width, height, fps, bitrate, mode, requestedProfile, p010, allowByteBuffer)
+            .diagnostics;
     }
 
     private static int alignProbeDimension(int preferred, android.util.Range<Integer> range, int alignment) {

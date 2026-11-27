@@ -6,6 +6,7 @@
 #include <QJniEnvironment>
 #include <QJniObject>
 #include <QByteArray>
+#include <QStringList>
 
 static QByteArray findCodec(const char *mime, uint32_t width, uint32_t height, uint32_t num, uint32_t den,
 			   uint32_t index = 0, uint32_t bitrate = 0, int mode = 2, int profile = 0, bool p010 = false,
@@ -42,6 +43,96 @@ static QByteArray findCodec(const char *mime, uint32_t width, uint32_t height, u
 	QJniObject name(item);
 	env->DeleteLocalRef(item);
 	return name.toString().toUtf8();
+}
+
+struct CodecCandidateEntry {
+	QByteArray tier;
+	QByteArray name;
+	QByteArray mismatch;
+};
+
+static const char *rateModeLabel(int64_t mode)
+{
+	switch (mode) {
+	case 0:
+		return "CQ";
+	case 1:
+		return "VBR";
+	case 2:
+		return "CBR";
+	default:
+		return "unknown";
+	}
+}
+
+static bool findCodecCandidate(const char *mime, uint32_t width, uint32_t height, uint32_t num, uint32_t den,
+			       uint32_t index, uint32_t bitrate, int mode, int profile, bool p010,
+			       bool allowByteBuffer, CodecCandidateEntry &entry, int &rejectFlags,
+			       QByteArray &diagnostics)
+{
+	entry = {};
+	rejectFlags = 0;
+	diagnostics.clear();
+	if (!width || !height || !num || !den)
+		return false;
+	QJniEnvironment env;
+	if (!env.isValid())
+		return false;
+	auto type = QJniObject::fromString(QString::fromUtf8(mime));
+	const jdouble fps = jdouble(num) / double(den);
+	const QJniObject list = QJniObject::callStaticObjectMethod(
+		"com/obsproject/studio/ObsCodecCapabilities", "findEncoderCandidates",
+		"(Ljava/lang/String;IIDIIIZZ)[Ljava/lang/String;", type.object<jstring>(), jint(width), jint(height),
+		fps, jint(bitrate), jint(mode), jint(profile), jboolean(p010), jboolean(allowByteBuffer));
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return false;
+	}
+	rejectFlags = int(QJniObject::callStaticMethod<jint>(
+		"com/obsproject/studio/ObsCodecCapabilities", "queryEncoderRejectFlags",
+		"(Ljava/lang/String;IIDIIIZZ)I", type.object<jstring>(), jint(width), jint(height), fps,
+		jint(bitrate), jint(mode), jint(profile), jboolean(p010), jboolean(allowByteBuffer)));
+	if (env->ExceptionCheck()) {
+		env->ExceptionClear();
+		rejectFlags = 0;
+	}
+	if (index == 0) {
+		const QJniObject diag = QJniObject::callStaticObjectMethod(
+			"com/obsproject/studio/ObsCodecCapabilities", "describeEncoderQuery",
+			"(Ljava/lang/String;IIDIIIZZ)Ljava/lang/String;", type.object<jstring>(), jint(width),
+			jint(height), fps, jint(bitrate), jint(mode), jint(profile), jboolean(p010),
+			jboolean(allowByteBuffer));
+		if (env->ExceptionCheck())
+			env->ExceptionClear();
+		else if (diag.isValid())
+			diagnostics = diag.toString().toUtf8();
+	}
+	if (!list.isValid())
+		return false;
+	auto array = list.object<jobjectArray>();
+	if (index >= uint32_t(env->GetArrayLength(array)))
+		return false;
+	auto item = static_cast<jstring>(env->GetObjectArrayElement(array, jsize(index)));
+	if (env->ExceptionCheck()) {
+		env->ExceptionClear();
+		return false;
+	}
+	if (!item)
+		return false;
+	QJniObject raw(item);
+	env->DeleteLocalRef(item);
+	const QStringList parts = raw.toString().split(QLatin1Char('|'));
+	if (parts.size() >= 2) {
+		entry.tier = parts[0].toUtf8();
+		entry.name = parts[1].toUtf8();
+		if (parts.size() >= 3)
+			entry.mismatch = parts.mid(2).join(QLatin1Char('|')).toUtf8();
+	} else {
+		entry.tier = "strict";
+		entry.name = raw.toString().toUtf8();
+	}
+	return !entry.name.isEmpty();
 }
 
 bool OBSAndroidAvcAvailable(uint32_t width, uint32_t height, uint32_t num, uint32_t den)
@@ -262,17 +353,45 @@ static void queryCodecInternal(calldata_t *cd, bool allowByteBuffer)
 	const auto profile = calldata_int(cd, "profile");
 	const bool p010 = calldata_bool(cd, "p010");
 	const char *mime = calldata_string(cd, "mime");
-	QByteArray name;
+	CodecCandidateEntry entry;
+	int rejectFlags = 0;
+	QByteArray diagnostics;
 	if (width > 0 && height > 0 && num > 0 && den > 0 &&
 	    width <= INT32_MAX && height <= INT32_MAX && num <= INT32_MAX && den <= INT32_MAX &&
 	    index >= 0 && index <= INT32_MAX && bitrate >= 0 && bitrate <= INT32_MAX &&
 	    profile >= 0 && profile <= INT32_MAX && mode >= 0 && mode <= 2 && mime)
-		name = findCodec(mime, uint32_t(width), uint32_t(height), uint32_t(num), uint32_t(den), uint32_t(index),
-				 uint32_t(bitrate), int(mode), int(profile), p010, allowByteBuffer);
-	calldata_set_string(cd, "name", name.constData());
-	blog(LOG_INFO, "MediaCodec %s %lldx%lld %lld/%lld bitrate=%lld index=%lld raw=%d: %s",
-	     mime ? mime : "unknown", width, height, num, den, bitrate, index, allowByteBuffer ? 1 : 0,
-	     name.isEmpty() ? "end of compatible hardware candidates" : name.constData());
+		findCodecCandidate(mime, uint32_t(width), uint32_t(height), uint32_t(num), uint32_t(den),
+				   uint32_t(index), uint32_t(bitrate), int(mode), int(profile), p010, allowByteBuffer,
+				   entry, rejectFlags, diagnostics);
+	const bool relaxed = !entry.tier.isEmpty() && entry.tier != "strict";
+	const bool relaxedMode = entry.tier == "relaxed_mode";
+	calldata_set_string(cd, "name", entry.name.constData());
+	calldata_set_bool(cd, "relaxed", relaxed);
+	calldata_set_bool(cd, "relaxed_mode", relaxedMode);
+	calldata_set_string(cd, "mismatch", entry.mismatch.constData());
+	calldata_set_int(cd, "reject_flags", rejectFlags);
+	if (entry.name.isEmpty()) {
+		blog(LOG_INFO,
+		     "MediaCodec %s %lldx%lld %lld/%lld bitrate=%lld mode=%lld(%s) profile=%lld p010=%d index=%lld raw=%d: end of compatible hardware candidates (reject_flags=0x%x)",
+		     mime ? mime : "unknown", width, height, num, den, bitrate, mode, rateModeLabel(mode), profile,
+		     p010 ? 1 : 0, index, allowByteBuffer ? 1 : 0, rejectFlags);
+	} else if (relaxed) {
+		blog(LOG_WARNING,
+		     "MediaCodec %s %lldx%lld %lld/%lld bitrate=%lld mode=%lld(%s) profile=%lld p010=%d index=%lld raw=%d: %s (tier=%s mismatch=%s)",
+		     mime ? mime : "unknown", width, height, num, den, bitrate, mode, rateModeLabel(mode), profile,
+		     p010 ? 1 : 0, index, allowByteBuffer ? 1 : 0, entry.name.constData(), entry.tier.constData(),
+		     entry.mismatch.isEmpty() ? "none" : entry.mismatch.constData());
+	} else {
+		blog(LOG_INFO,
+		     "MediaCodec %s %lldx%lld %lld/%lld bitrate=%lld mode=%lld(%s) profile=%lld p010=%d index=%lld raw=%d: %s (tier=strict)",
+		     mime ? mime : "unknown", width, height, num, den, bitrate, mode, rateModeLabel(mode), profile,
+		     p010 ? 1 : 0, index, allowByteBuffer ? 1 : 0, entry.name.constData());
+	}
+	if (index == 0 && !diagnostics.isEmpty() && (entry.name.isEmpty() || relaxed)) {
+		blog(LOG_WARNING, "MediaCodec capabilities (%s %lldx%lld %lld/%lld mode=%s raw=%d): %s",
+		     mime ? mime : "unknown", width, height, num, den, rateModeLabel(mode), allowByteBuffer ? 1 : 0,
+		     diagnostics.constData());
+	}
 }
 
 static void queryCodec(void *, calldata_t *cd)
@@ -326,9 +445,9 @@ void OBSAndroidRegisterCodecQuery()
 		"void android_mediacodec_query_controls(string name, string mime, int mode, out bool supported, out int complexity_min, out int complexity_max, out int quality_min, out int quality_max)",
 		queryControls, nullptr);
 	proc_handler_add(obs_get_proc_handler(),
-		"void android_mediacodec_query_component(string mime, int width, int height, int fps_num, int fps_den, int bitrate, int mode, int index, int profile, bool p010, out string name)",
+		"void android_mediacodec_query_component(string mime, int width, int height, int fps_num, int fps_den, int bitrate, int mode, int index, int profile, bool p010, out string name, out bool relaxed, out bool relaxed_mode, out string mismatch, out int reject_flags)",
 		queryCodec, nullptr);
 	proc_handler_add(obs_get_proc_handler(),
-		"void android_mediacodec_query_raw_component(string mime, int width, int height, int fps_num, int fps_den, int bitrate, int mode, int index, int profile, bool p010, out string name)",
+		"void android_mediacodec_query_raw_component(string mime, int width, int height, int fps_num, int fps_den, int bitrate, int mode, int index, int profile, bool p010, out string name, out bool relaxed, out bool relaxed_mode, out string mismatch, out int reject_flags)",
 		queryRawCodec, nullptr);
 }
