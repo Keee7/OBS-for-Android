@@ -146,9 +146,11 @@ _extract() {
 
 export_to_windows() {
   echo "   -> 同步到 $EXPORT"
-  mkdir -p "$EXPORT"
-  ( cd "$PREFIX" && tar -cf - . ) | ( cd "$EXPORT" && tar -xf - ) \
-    || echo "   ! 同步失败（Windows 侧 prebuilt 可能不完整）"
+  mkdir -p "$EXPORT" || return 1
+  if ! ( cd "$PREFIX" && tar -cf - . ) | ( cd "$EXPORT" && tar -xf - ); then
+    echo "   ! 同步失败（Windows 侧 prebuilt 可能不完整）" >&2
+    return 1
+  fi
   _relocate_cmake_package "$EXPORT"
   bash "$HERE/../scripts/relocate-android-pkgconfig.sh" "$EXPORT/lib/pkgconfig"
 }
@@ -188,6 +190,9 @@ _audit_arch() {
 
 FAILED=""
 BUILT=0
+if [ "$FULL_BUILD" = 1 ] && [ "$CLEAN" = 1 ]; then
+  rm -f "$EXPORT/.deps-complete"
+fi
 for dep in $TARGETS; do
   fn="build_$(echo "$dep" | tr '-' '_')"
   if ! declare -f "$fn" >/dev/null; then
@@ -226,7 +231,10 @@ for dep in $TARGETS; do
     fi
     echo "[$dep] 成功（${dur}s）"
     BUILT=$((BUILT+1))
-    export_to_windows
+    if ! export_to_windows; then
+      echo "[$dep] 导出到 $EXPORT 失败" >&2
+      FAILED="$FAILED $dep"
+    fi
   else
     echo "[$dep] 失败"
     FAILED="$FAILED $dep"
@@ -238,7 +246,7 @@ echo "本次成功构建 $BUILT 个；失败:${FAILED:- 无}"
 [ -n "$FAILED" ] && exit 1
 if [ "$FULL_BUILD" = 1 ]; then
   if [ "$BUILT" = 0 ] && [ ! -f "$EXPORT/.deps-complete" ]; then
-    export_to_windows
+    export_to_windows || exit 1
   fi
   {
     for dep in $TARGETS; do

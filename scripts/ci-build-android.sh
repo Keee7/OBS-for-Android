@@ -10,7 +10,7 @@
 # 环境变量（默认值来自 scripts/toolchain-versions.env）：
 #   NDK_VERSION     校验已有 NDK 的 Pkg.ReleaseName
 #   QT_VERSION      Qt 版本
-#   GRADLE_VERSION  默认 system（或指定版本号；也可直接传 GRADLE_BIN）
+#   GRADLE_VERSION  Gradle 版本（默认读 toolchain-versions.env；传 system 可接受 PATH 上 >=9.0 的任意版本；也可直接传 GRADLE_BIN）
 #   BUILD_TOOLS     Android build-tools 版本
 #   PLATFORM        Android SDK platform（如 android-36）
 #   JOBS            默认 nproc
@@ -27,14 +27,14 @@ API="${API:-29}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${OBS_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-while IFS='=' read -r _k _v; do
+while IFS='=' read -r _k _v || [ -n "$_k" ]; do
     case "$_k" in ''|'#'*) continue ;; esac
     [ -n "${!_k+x}" ] || export "$_k=$_v"
 done < "$SCRIPT_DIR/toolchain-versions.env"
 
 NDK_VERSION="${NDK_VERSION:-r30}"
 QT_VERSION="${QT_VERSION:-6.12.0}"
-GRADLE_VERSION="${GRADLE_VERSION:-system}"
+GRADLE_VERSION="${GRADLE_VERSION:-9.5.1}"
 BUILD_TOOLS="${BUILD_TOOLS:-${BUILD_TOOLS_VERSION:-36.0.0}}"
 PLATFORM="${PLATFORM:-android-${COMPILE_SDK_VERSION:-36}}"
 JDK_VERSION="${JDK_VERSION:-21}"

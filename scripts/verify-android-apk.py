@@ -80,6 +80,18 @@ def check_elf_header(data):
     return len(data) >= 20 and data[:4] == b'\x7fELF' and data[4] == 2 and data[5] == 1 and struct.unpack_from('<H', data, 18)[0] == 183
 
 
+def load_toolchain_versions():
+    env_file = Path(__file__).with_name('toolchain-versions.env')
+    versions = {}
+    if env_file.is_file():
+        for raw in env_file.read_text(encoding='utf-8').splitlines():
+            line = raw.strip()
+            if line and not line.startswith('#') and '=' in line:
+                k, v = line.split('=', 1)
+                versions[k.strip()] = v.strip()
+    return versions
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('apk', type=Path)
@@ -89,9 +101,12 @@ def main():
     parser.add_argument('--aapt', type=Path, help='path to the Android SDK aapt executable')
     parser.add_argument('--readelf', type=Path, help='path to the NDK llvm-readelf executable')
     args = parser.parse_args()
-    sdk = args.tools_root / 'android-sdk' / 'build-tools' / '36.0.0'
+    versions = load_toolchain_versions()
+    build_tools = versions.get('BUILD_TOOLS_VERSION', '36.0.0')
+    ndk_version = versions.get('NDK_VERSION', 'r30')
+    sdk = args.tools_root / 'android-sdk' / 'build-tools' / build_tools
     aapt = args.aapt or sdk / 'aapt.exe'
-    readelf = args.readelf or args.tools_root / 'ndk' / 'android-ndk-r30' / 'toolchains' / 'llvm' / 'prebuilt' / 'windows-x86_64' / 'bin' / 'llvm-readelf.exe'
+    readelf = args.readelf or args.tools_root / 'ndk' / f'android-ndk-{ndk_version}' / 'toolchains' / 'llvm' / 'prebuilt' / 'windows-x86_64' / 'bin' / 'llvm-readelf.exe'
     errors = []
     try:
         print('APK SHA-256:', hashlib.sha256(args.apk.read_bytes()).hexdigest())

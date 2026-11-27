@@ -131,7 +131,7 @@ bash scripts/ci-build-android.sh
 | `NDK_VERSION` | `r30` | 与仓库 Windows 构建一致 |
 | `QT_VERSION` | `6.12.0` | 由 aqt 按版本解析官方仓库 |
 | `ANDROID_SDK_ROOT` | 自动查找 | 指向已安装的 SDK，脚本也检查 `ANDROID_HOME` 和 runner 的 SDK 目录 |
-| `GRADLE_VERSION` | `system` | 校验 `PATH` 中的 Gradle，工作流指定 `9.5.1` |
+| `GRADLE_VERSION` | `9.5.1`（来自 `toolchain-versions.env`） | 校验 `PATH` 中的 Gradle 版本；传 `system` 可放宽为 `>= 9.0` |
 | `GRADLE_BIN` | `PATH` 中的 `gradle` | 可显式指定 Gradle 可执行文件的完整路径 |
 | `BUILD_TOOLS` | `36.0.0` | 也用于 zipalign / apksigner |
 | `PLATFORM` | `android-36` | Qt 6.12.0 的 Gradle 模板要 platform 36 |
@@ -162,7 +162,7 @@ bash scripts/ci-build-android.sh
 | `autoreconf: not found` | 装 `autoconf automake libtool` |
 | `CMake 版本过低` | 安装 CMake 3.31.6，并确保在 `PATH` 中能找到它。脚本检查的最低版本为 3.28 |
 | `Unrecognized named-value: 'runner'` | job 级 `env` 里用了 `runner.*`。`runner` 上下文只在 step 级可用；job 级改用 `github.*` |
-| `Could not find ... nlohmann_json` | 前端 `CMakeLists.txt:73` 无条件要它，但它不在 `deps-android` 清单里。脚本的 `install_nlohmann_json()` 会装；若报错看该函数日志 |
+| `Could not find ... nlohmann_json` | 前端 `CMakeLists.txt:73` 无条件需要它，现已纳入 `deps-android` 清单（`defs.sh` 的 `build_nlohmann_json`）并由 `verify_deps_complete()` 校验；若报错可清依赖缓存重建 |
 | `uic: error while loading shared libraries: libicui18n.so.73` / `AutoUic subprocess error` / exit 127 | **旧版 6.9.3 手工解包**漏了独立的 ICU 73 运行时包（Ubuntu 24.04 自带 74）。现在用 aqt 装完整 Qt 6.12.0 宿主包，不再缺 ICU；若换回 6.9.x 手工解包才需要重新处理 |
 | `Host tool ... 跑不起来` / 工具自检 FATAL | 宿主 Qt 工具缺共享库。脚本的 `probe_host_tools()` 在装配阶段就会撞出来（秒级），不必等构建 |
 | 签名步骤报口令错 | Secrets 里的四项要来自**同一次** `generate-release-key.sh` 输出 |

@@ -94,7 +94,7 @@ jobs:
       - name: Load toolchain versions
         run: |
           set -euo pipefail
-          while IFS='=' read -r k v; do
+          while IFS='=' read -r k v || [ -n "$k" ]; do
             case "$k" in ''|'#'*) continue ;; esac
             echo "$k=$v" >> "$GITHUB_ENV"
           done < scripts/toolchain-versions.env
@@ -138,7 +138,7 @@ jobs:
         env:
           DEPS_CACHE_HIT: ${{ steps.deps_cache.outputs.cache-hit }}
         run: |
-          # 命中 obsdeps-v2 时无需构建第三方依赖，只装 OBS 主构建与 Qt 打包所需的最小工具集；
+          # 命中 obsdeps-v3 时无需构建第三方依赖，只装 OBS 主构建与 Qt 打包所需的最小工具集；
           # 并先检查 dpkg 状态，若全部已存在则跳过 apt-get update。
           host_packages=(
             ninja-build ccache

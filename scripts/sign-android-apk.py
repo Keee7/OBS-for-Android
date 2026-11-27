@@ -31,12 +31,25 @@ def load_toolchain_versions():
     return versions
 
 
+def java_major_version(java_home):
+    release_file = Path(java_home) / 'release'
+    if not release_file.is_file():
+        return None
+    for line in release_file.read_text(encoding='utf-8', errors='replace').splitlines():
+        m = re.match(r'^JAVA_VERSION="(\d+)', line.strip())
+        if m:
+            return m.group(1)
+    return None
+
+
 def find_java_exe(tools_root, jdk_version):
     java_home = os.environ.get('JAVA_HOME')
     if java_home:
         candidate = Path(java_home) / 'bin/java.exe'
         if candidate.is_file():
-            return candidate
+            major = java_major_version(java_home)
+            if major is None or major in (str(jdk_version), '17'):
+                return candidate
     for pattern in (f'jdk-{jdk_version}*/bin/java.exe', 'jdk-17*/bin/java.exe'):
         matches = sorted(tools_root.glob(pattern), reverse=True)
         if matches:

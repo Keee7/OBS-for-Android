@@ -17,7 +17,7 @@ ABI=arm64-v8a
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${OBS_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-while IFS='=' read -r _k _v; do
+while IFS='=' read -r _k _v || [ -n "$_k" ]; do
   case "$_k" in ''|'#'*) continue ;; esac
   [ -n "${!_k+x}" ] || export "$_k=$_v"
 done < "$SCRIPT_DIR/toolchain-versions.env"

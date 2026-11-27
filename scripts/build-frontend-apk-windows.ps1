@@ -39,7 +39,20 @@ $qt = Join-Path $tools "Qt/$QtVersion/android_arm64_v8a"
 $hostQt = Join-Path $tools "Qt/$QtVersion/msvc2022_64"
 $prefix = if ($NativeDeps) { [IO.Path]::GetFullPath($NativeDeps) } else { Join-Path $tools 'android-deps-ffmpeg8/arm64-v8a' }
 $sdk = Join-Path $tools 'android-sdk'
-if (!($env:JAVA_HOME) -or !(Test-Path -LiteralPath "$($env:JAVA_HOME)/bin/javac.exe")) {
+$useAmbientJava = $false
+if ($env:JAVA_HOME -and (Test-Path -LiteralPath "$($env:JAVA_HOME)/bin/javac.exe")) {
+    $releaseFile = Join-Path $env:JAVA_HOME 'release'
+    if (Test-Path -LiteralPath $releaseFile) {
+        $verLine = Get-Content -LiteralPath $releaseFile -ErrorAction SilentlyContinue |
+            Where-Object { $_ -match '^JAVA_VERSION="(\d+)' } | Select-Object -First 1
+        if ($verLine -match '^JAVA_VERSION="(\d+)' -and ([int]$Matches[1] -in @([int]$JdkVersion, 17))) {
+            $useAmbientJava = $true
+        }
+    } else {
+        $useAmbientJava = $true
+    }
+}
+if (!$useAmbientJava) {
     $jdkDir = @("jdk-$JdkVersion*", 'jdk-17*') | ForEach-Object {
         Get-ChildItem -Path $tools -Directory -Filter $_ -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending | Select-Object -First 1
