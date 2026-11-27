@@ -75,6 +75,7 @@ struct ffmpeg_source {
 	obs_hotkey_pair_id play_pause_hotkey;
 	obs_hotkey_id stop_hotkey;
 #ifdef __ANDROID__
+	bool hw_decode_surface;
 	pthread_mutex_t gpu_mx;
 	AImageReader *gpu_reader;
 	ANativeWindow *gpu_window;
@@ -92,6 +93,31 @@ struct ffmpeg_source {
 	volatile bool gpu_reopening;
 	volatile long cpu_width;
 	volatile long cpu_height;
+	volatile long diag_cpu_frames;
+	struct {
+		uint64_t last_log_ns;
+		uint64_t last_logged_total;
+		uint64_t gpu_submits;
+		uint64_t acq_ok;
+		uint64_t acq_no_buf;
+		uint64_t acq_err;
+		uint64_t import_ok;
+		uint64_t import_fail;
+		uint64_t tex_recreates;
+		uint64_t render_ok;
+		uint64_t render_fail;
+		uint64_t draw_gpu;
+		uint64_t draw_held;
+		uint64_t draw_async;
+		uint64_t draw_skipped_cleared;
+		uint64_t draw_skipped_null;
+		int32_t last_buf_w;
+		int32_t last_buf_h;
+		AImageCropRect last_crop;
+		uint32_t last_draw_w;
+		uint32_t last_draw_h;
+		int last_draw_state;
+	} diag;
 #endif
 };
 
@@ -143,11 +169,24 @@ static bool is_local_file_modified(obs_properties_t *props, obs_property_t *prop
 	return true;
 }
 
+#ifdef __ANDROID__
+static bool hw_decode_modified(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(prop);
+	bool enabled = obs_data_get_bool(settings, "hw_decode");
+	obs_property_t *surface = obs_properties_get(props, "hw_decode_surface");
+	if (surface)
+		obs_property_set_visible(surface, enabled);
+	return true;
+}
+#endif
+
 static void ffmpeg_source_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_bool(settings, "is_local_file", true);
 #ifdef __ANDROID__
 	obs_data_set_default_bool(settings, "hw_decode", true);
+	obs_data_set_default_bool(settings, "hw_decode_surface", true);
 #endif
 	obs_data_set_default_bool(settings, "looping", false);
 	obs_data_set_default_bool(settings, "clear_on_media_end", true);
@@ -222,6 +261,9 @@ static obs_properties_t *ffmpeg_source_getproperties(void *data)
 	prop = obs_properties_add_bool(props, "hw_decode", obs_module_text("HardwareDecode"));
 #ifdef __ANDROID__
 	obs_property_set_long_description(prop, obs_module_text("HardwareDecode.ToolTip.Android"));
+	obs_property_set_modified_callback(prop, hw_decode_modified);
+	prop = obs_properties_add_bool(props, "hw_decode_surface", obs_module_text("HardwareDecodeSurface.Android"));
+	obs_property_set_long_description(prop, obs_module_text("HardwareDecodeSurface.ToolTip.Android"));
 #endif
 
 	obs_properties_add_bool(props, "clear_on_media_end", obs_module_text("ClearOnMediaEnd"));
@@ -307,6 +349,9 @@ static void dump_source_info(struct ffmpeg_source *s, const char *input, const c
 		"\tis_looping:              %s\n"
 		"\tis_linear_alpha:         %s\n"
 		"\tis_hw_decoding:          %s\n"
+#ifdef __ANDROID__
+		"\thw_decode_surface:       %s\n"
+#endif
 		"\tis_clear_on_media_end:   %s\n"
 		"\trestart_on_activate:     %s\n"
 		"\tclose_when_inactive:     %s\n"
@@ -314,6 +359,9 @@ static void dump_source_info(struct ffmpeg_source *s, const char *input, const c
 		"\tffmpeg_options:          %s",
 		safe_input.array ? safe_input.array : "(null)", input_format ? input_format : "(null)", s->speed_percent,
 		s->is_looping ? "yes" : "no", s->is_linear_alpha ? "yes" : "no", s->is_hw_decoding ? "yes" : "no",
+#ifdef __ANDROID__
+		s->hw_decode_surface ? "yes" : "no",
+#endif
 		s->is_clear_on_media_end ? "yes" : "no", s->restart_on_activate ? "yes" : "no",
 		s->close_when_inactive ? "yes" : "no", s->full_decode ? "yes" : "no", safe_options);
 	dstr_free(&safe_input);
@@ -348,6 +396,159 @@ static inline void clear_video_output(struct ffmpeg_source *s)
 }
 
 #ifdef __ANDROID__
+enum android_diag_draw_state {
+	ANDROID_DRAW_INIT = 0,
+	ANDROID_DRAW_GPU = 1,
+	ANDROID_DRAW_HELD = 2,
+	ANDROID_DRAW_ASYNC = 3,
+	ANDROID_DRAW_CLEARED = 4,
+	ANDROID_DRAW_NULL = 5,
+};
+
+#define ANDROID_DIAG_LOG_INTERVAL_NS UINT64_C(5000000000)
+
+static const char *android_draw_state_name(int state)
+{
+	switch (state) {
+	case ANDROID_DRAW_GPU:
+		return "gpu";
+	case ANDROID_DRAW_HELD:
+		return "held";
+	case ANDROID_DRAW_ASYNC:
+		return "async";
+	case ANDROID_DRAW_CLEARED:
+		return "cleared";
+	case ANDROID_DRAW_NULL:
+		return "null";
+	default:
+		return "init";
+	}
+}
+
+static void android_diag_reset_locked(struct ffmpeg_source *s)
+{
+	memset(&s->diag, 0, sizeof(s->diag));
+	os_atomic_set_long(&s->diag_cpu_frames, 0);
+}
+
+static void android_diag_maybe_log(struct ffmpeg_source *s, uint64_t now_ns, int draw_state, uint32_t draw_w,
+				   uint32_t draw_h, const char *force_reason)
+{
+	bool should_log = false;
+	const char *tag = force_reason;
+	struct {
+		uint64_t gpu_submits;
+		long cpu_frames;
+		uint64_t acq_ok;
+		uint64_t acq_no_buf;
+		uint64_t acq_err;
+		uint64_t import_ok;
+		uint64_t import_fail;
+		uint64_t tex_recreates;
+		uint64_t render_ok;
+		uint64_t render_fail;
+		uint64_t draw_gpu;
+		uint64_t draw_held;
+		uint64_t draw_async;
+		uint64_t draw_skipped_cleared;
+		uint64_t draw_skipped_null;
+		uint32_t decode_w;
+		uint32_t decode_h;
+		int32_t buf_w;
+		int32_t buf_h;
+		AImageCropRect crop;
+		int prev_state;
+		enum obs_media_state media_state;
+		const char *path;
+		const char *req_mode;
+	} snap;
+
+	pthread_mutex_lock(&s->gpu_mx);
+	const long cpu_frames = os_atomic_load_long(&s->diag_cpu_frames);
+	const uint64_t total = s->diag.gpu_submits + (uint64_t)(cpu_frames > 0 ? cpu_frames : 0) + s->diag.acq_ok +
+			       s->diag.acq_err + s->diag.import_fail + s->diag.render_fail + s->diag.draw_gpu +
+			       s->diag.draw_held + s->diag.draw_async + s->diag.draw_skipped_cleared +
+			       s->diag.draw_skipped_null;
+	const bool state_changed = (draw_state != s->diag.last_draw_state);
+	const bool size_changed = (draw_w > 0 && draw_h > 0) &&
+				  (draw_w != s->diag.last_draw_w || draw_h != s->diag.last_draw_h);
+	const bool interval_elapsed =
+		(s->diag.last_log_ns == 0) || now_ns < s->diag.last_log_ns ||
+		((now_ns - s->diag.last_log_ns) >= ANDROID_DIAG_LOG_INTERVAL_NS && total != s->diag.last_logged_total);
+
+	if (force_reason || state_changed || size_changed || interval_elapsed) {
+		if (!tag) {
+			if (state_changed)
+				tag = "state";
+			else if (size_changed)
+				tag = "resize";
+			else
+				tag = "periodic";
+		}
+		snap.prev_state = s->diag.last_draw_state;
+		s->diag.last_draw_state = draw_state;
+		if (draw_w > 0 && draw_h > 0) {
+			s->diag.last_draw_w = draw_w;
+			s->diag.last_draw_h = draw_h;
+		}
+		s->diag.last_log_ns = now_ns;
+		s->diag.last_logged_total = total;
+
+		snap.gpu_submits = s->diag.gpu_submits;
+		snap.cpu_frames = cpu_frames;
+		snap.acq_ok = s->diag.acq_ok;
+		snap.acq_no_buf = s->diag.acq_no_buf;
+		snap.acq_err = s->diag.acq_err;
+		snap.import_ok = s->diag.import_ok;
+		snap.import_fail = s->diag.import_fail;
+		snap.tex_recreates = s->diag.tex_recreates;
+		snap.render_ok = s->diag.render_ok;
+		snap.render_fail = s->diag.render_fail;
+		snap.draw_gpu = s->diag.draw_gpu;
+		snap.draw_held = s->diag.draw_held;
+		snap.draw_async = s->diag.draw_async;
+		snap.draw_skipped_cleared = s->diag.draw_skipped_cleared;
+		snap.draw_skipped_null = s->diag.draw_skipped_null;
+		snap.buf_w = s->diag.last_buf_w;
+		snap.buf_h = s->diag.last_buf_h;
+		snap.crop = s->diag.last_crop;
+		snap.media_state = s->state;
+		snap.req_mode = !s->is_hw_decoding
+					? "software"
+					: ((s->hw_decode_surface && !os_atomic_load_long(&s->gpu_surface_disabled))
+						   ? "surface"
+						   : "hw-buffer");
+		if (os_atomic_load_long(&s->gpu_active)) {
+			snap.path = "surface";
+			snap.decode_w = s->gpu_width;
+			snap.decode_h = s->gpu_height;
+		} else {
+			snap.path = "async";
+			snap.decode_w = (uint32_t)os_atomic_load_long(&s->cpu_width);
+			snap.decode_h = (uint32_t)os_atomic_load_long(&s->cpu_height);
+		}
+		should_log = true;
+	}
+	pthread_mutex_unlock(&s->gpu_mx);
+
+	if (should_log) {
+		FF_BLOG(LOG_INFO,
+			"Android video diag (%s): path=%s req=%s media=%d decode(gpu=%" PRIu64 " cpu=%ld %ux%u) "
+			"acq(ok=%" PRIu64 " nobuf=%" PRIu64 " err=%" PRIu64 ") "
+			"import(ok=%" PRIu64 " fail=%" PRIu64 ") "
+			"tex(ok=%" PRIu64 " fail=%" PRIu64 " recreate=%" PRIu64 ") "
+			"draw(%s->%s gpu=%" PRIu64 " held=%" PRIu64 " async=%" PRIu64 " cleared=%" PRIu64
+			" null=%" PRIu64 " %ux%u) buf=%dx%d crop=%d,%d,%d,%d",
+			tag, snap.path, snap.req_mode, (int)snap.media_state, snap.gpu_submits, snap.cpu_frames,
+			snap.decode_w, snap.decode_h, snap.acq_ok, snap.acq_no_buf, snap.acq_err, snap.import_ok,
+			snap.import_fail, snap.render_ok, snap.render_fail, snap.tex_recreates,
+			android_draw_state_name(snap.prev_state), android_draw_state_name(draw_state), snap.draw_gpu,
+			snap.draw_held, snap.draw_async, snap.draw_skipped_cleared, snap.draw_skipped_null, draw_w,
+			draw_h, snap.buf_w, snap.buf_h, snap.crop.left, snap.crop.top, snap.crop.right,
+			snap.crop.bottom);
+	}
+}
+
 static void destroy_android_gpu_surface(struct ffmpeg_source *s)
 {
 	os_atomic_set_long(&s->gpu_active, 0);
@@ -373,6 +574,7 @@ static void destroy_android_gpu_surface(struct ffmpeg_source *s)
 	s->gpu_height = 0;
 	s->gpu_cleared = false;
 	android_surface_health_reset(&s->gpu_health);
+	android_diag_reset_locked(s);
 	pthread_mutex_unlock(&s->gpu_mx);
 }
 
@@ -441,6 +643,7 @@ static void on_android_gpu_frame(void *opaque, uint32_t width, uint32_t height, 
 	s->gpu_width = width;
 	s->gpu_height = height;
 	s->gpu_cleared = false;
+	s->diag.gpu_submits++;
 	android_surface_health_on_submit(&s->gpu_health, os_gettime_ns());
 	pthread_mutex_unlock(&s->gpu_mx);
 
@@ -541,6 +744,10 @@ static void get_frame(void *opaque, struct obs_source_frame *f)
 {
 	struct ffmpeg_source *s = opaque;
 	set_cpu_video_size(s, f);
+#ifdef __ANDROID__
+	if (f)
+		os_atomic_inc_long(&s->diag_cpu_frames);
+#endif
 	obs_source_output_video(s->source, f);
 }
 
@@ -551,6 +758,10 @@ static void preload_frame(void *opaque, struct obs_source_frame *f)
 		return;
 
 	set_cpu_video_size(s, f);
+#ifdef __ANDROID__
+	if (f)
+		os_atomic_inc_long(&s->diag_cpu_frames);
+#endif
 	if (s->is_clear_on_media_end || s->is_looping)
 		obs_source_preload_video(s->source, f);
 
@@ -562,6 +773,10 @@ static void seek_frame(void *opaque, struct obs_source_frame *f)
 {
 	struct ffmpeg_source *s = opaque;
 	set_cpu_video_size(s, f);
+#ifdef __ANDROID__
+	if (f)
+		os_atomic_inc_long(&s->diag_cpu_frames);
+#endif
 	obs_source_set_video_frame(s->source, f);
 }
 
@@ -598,11 +813,20 @@ static void ffmpeg_source_open_internal(struct ffmpeg_source *s, bool allow_gpu_
 {
 	if (s->input && *s->input) {
 #ifdef __ANDROID__
-		const bool use_gpu_surface = allow_gpu_surface && !os_atomic_load_long(&s->gpu_surface_disabled) &&
-					     !s->full_decode && !s->is_stinger && !s->is_track_matte &&
-					     !s->is_linear_alpha && s->range == VIDEO_RANGE_DEFAULT &&
+		const bool use_gpu_surface = allow_gpu_surface && s->is_hw_decoding && s->hw_decode_surface &&
+					     !os_atomic_load_long(&s->gpu_surface_disabled) && !s->full_decode &&
+					     !s->is_stinger && !s->is_track_matte && !s->is_linear_alpha &&
+					     s->range == VIDEO_RANGE_DEFAULT &&
 					     !has_active_async_video_filter(s->source) &&
 					     android_gpu_surface_supported();
+		pthread_mutex_lock(&s->gpu_mx);
+		android_diag_reset_locked(s);
+		pthread_mutex_unlock(&s->gpu_mx);
+		FF_BLOG(LOG_INFO,
+			"Android decode path: %s (hw=%s surface_opt=%s allow_surface=%s disabled=%ld range=%d)",
+			!s->is_hw_decoding ? "software" : (use_gpu_surface ? "mediacodec-surface" : "mediacodec-buffer"),
+			s->is_hw_decoding ? "yes" : "no", s->hw_decode_surface ? "yes" : "no",
+			allow_gpu_surface ? "yes" : "no", os_atomic_load_long(&s->gpu_surface_disabled), (int)s->range);
 #endif
 		struct mp_media_info info = {
 			.opaque = s,
@@ -892,6 +1116,9 @@ static void ffmpeg_source_update(void *data, obs_data_t *settings)
 	stop_reconnect_thread(s);
 
 	is_hw_decoding = obs_data_get_bool(settings, "hw_decode");
+#ifdef __ANDROID__
+	bool hw_decode_surface = obs_data_get_bool(settings, "hw_decode_surface");
+#endif
 	range = obs_data_get_int(settings, "color_range");
 	speed_percent = (int)obs_data_get_int(settings, "speed_percent");
 	if (speed_percent < 1 || speed_percent > 200)
@@ -899,7 +1126,11 @@ static void ffmpeg_source_update(void *data, obs_data_t *settings)
 	ffmpeg_options = obs_data_get_string(settings, "ffmpeg_options");
 
 	/* Restart media source if these properties are changed */
-	if (s->is_hw_decoding != is_hw_decoding || s->range != range || s->speed_percent != speed_percent ||
+	if (s->is_hw_decoding != is_hw_decoding ||
+#ifdef __ANDROID__
+	    s->hw_decode_surface != hw_decode_surface ||
+#endif
+	    s->range != range || s->speed_percent != speed_percent ||
 	    (s->ffmpeg_options && strcmp(s->ffmpeg_options, ffmpeg_options) != 0))
 		should_restart_media = true;
 
@@ -918,6 +1149,9 @@ static void ffmpeg_source_update(void *data, obs_data_t *settings)
 	s->input = input ? bstrdup(input) : NULL;
 	s->input_format = input_format ? bstrdup(input_format) : NULL;
 	s->is_hw_decoding = is_hw_decoding;
+#ifdef __ANDROID__
+	s->hw_decode_surface = hw_decode_surface;
+#endif
 	s->full_decode = obs_data_get_bool(settings, "full_decode");
 	s->is_clear_on_media_end = obs_data_get_bool(settings, "clear_on_media_end");
 	const bool is_rist = !is_local_file && input && !astrcmpi_n(input, RIST_PROTO, sizeof(RIST_PROTO) - 1);
@@ -1315,8 +1549,11 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
 	struct ffmpeg_source *s = data;
+	const uint64_t now_ns = os_gettime_ns();
 	if (!os_atomic_load_long(&s->gpu_active)) {
-		if (os_atomic_load_long(&s->cpu_width)) {
+		const uint32_t cpu_w = (uint32_t)os_atomic_load_long(&s->cpu_width);
+		const uint32_t cpu_h = (uint32_t)os_atomic_load_long(&s->cpu_height);
+		if (cpu_w) {
 			pthread_mutex_lock(&s->gpu_mx);
 			gs_android_external_texture_t *stale_ext = (!s->gpu_reader) ? s->gpu_external : NULL;
 			if (stale_ext) {
@@ -1325,6 +1562,7 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 				s->gpu_tex_width = 0;
 				s->gpu_tex_height = 0;
 			}
+			s->diag.draw_async++;
 			pthread_mutex_unlock(&s->gpu_mx);
 			if (stale_ext)
 				gs_android_external_texture_destroy(stale_ext);
@@ -1333,6 +1571,10 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 			gs_texture_t *held = (!s->gpu_cleared && s->gpu_image) ? s->gpu_image : NULL;
 			const uint32_t held_w = s->gpu_tex_width;
 			const uint32_t held_h = s->gpu_tex_height;
+			if (held && held_w && held_h)
+				s->diag.draw_held++;
+			else
+				s->diag.draw_async++;
 			pthread_mutex_unlock(&s->gpu_mx);
 			if (held && held_w && held_h) {
 				const bool prev_linear = gs_set_linear_srgb(false);
@@ -1340,18 +1582,21 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 				while (gs_effect_loop(draw, "Draw"))
 					obs_source_draw(held, 0, 0, held_w, held_h, false);
 				gs_set_linear_srgb(prev_linear);
+				android_diag_maybe_log(s, now_ns, ANDROID_DRAW_HELD, held_w, held_h, NULL);
 				return;
 			}
 		}
 		obs_source_draw_async_frame(s->source);
+		android_diag_maybe_log(s, now_ns, ANDROID_DRAW_ASYNC, cpu_w, cpu_h, NULL);
 		return;
 	}
 
-	const uint64_t now_ns = os_gettime_ns();
 	pthread_mutex_lock(&s->gpu_mx);
 	if (s->gpu_cleared) {
 		s->gpu_image = NULL;
+		s->diag.draw_skipped_cleared++;
 		pthread_mutex_unlock(&s->gpu_mx);
+		android_diag_maybe_log(s, now_ns, ANDROID_DRAW_CLEARED, 0, 0, NULL);
 		return;
 	}
 
@@ -1359,6 +1604,7 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 	AImage *new_img = NULL;
 	int acquire_fence_fd = -1;
 	bool gpu_failed = false;
+	const char *fail_reason = NULL;
 	if (reader) {
 		const media_status_t acq = AImageReader_acquireLatestImageAsync(reader, &new_img, &acquire_fence_fd);
 		if (acq != AMEDIA_OK || !new_img) {
@@ -1368,6 +1614,7 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 			}
 			new_img = NULL;
 			if (acq == AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE) {
+				s->diag.acq_no_buf++;
 				const bool playing = s->state == OBS_MEDIA_STATE_PLAYING;
 				if (android_surface_health_on_no_buffer(&s->gpu_health, now_ns, playing)) {
 					FF_BLOG(LOG_WARNING,
@@ -1377,11 +1624,16 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 						s->gpu_health.acquired_seq,
 						s->gpu_health.has_acquired_frame ? "yes" : "no");
 					gpu_failed = true;
+					fail_reason = "surface-stall";
 				}
 			} else {
+				s->diag.acq_err++;
 				FF_BLOG(LOG_WARNING, "AImageReader_acquireLatestImageAsync failed (%d)", (int)acq);
 				gpu_failed = true;
+				fail_reason = "acquire-error";
 			}
+		} else {
+			s->diag.acq_ok++;
 		}
 	}
 
@@ -1404,6 +1656,9 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 						      ? (int32_t)s->gpu_height
 						      : ih;
 			}
+			s->diag.last_buf_w = iw;
+			s->diag.last_buf_h = ih;
+			s->diag.last_crop = crop;
 			const uint32_t vis_w = (uint32_t)(crop.right - crop.left);
 			const uint32_t vis_h = (uint32_t)(crop.bottom - crop.top);
 			if (s->gpu_external && (s->gpu_tex_width != vis_w || s->gpu_tex_height != vis_h)) {
@@ -1415,17 +1670,31 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 					s->gpu_image = NULL;
 					s->gpu_tex_width = vis_w;
 					s->gpu_tex_height = vis_h;
+					s->diag.tex_recreates++;
 				} else {
+					FF_BLOG(LOG_WARNING,
+						"Android GPU external texture resize create(%ux%u) failed", vis_w,
+						vis_h);
 					gpu_failed = true;
+					fail_reason = "tex-resize-fail";
 				}
 			}
 			if (!gpu_failed && !s->gpu_external) {
 				s->gpu_external = gs_android_external_texture_create(vis_w, vis_h);
 				s->gpu_tex_width = s->gpu_external ? vis_w : 0;
 				s->gpu_tex_height = s->gpu_external ? vis_h : 0;
+				if (s->gpu_external) {
+					s->diag.tex_recreates++;
+				} else {
+					FF_BLOG(LOG_WARNING, "Android GPU external texture create(%ux%u) failed", vis_w,
+						vis_h);
+					gpu_failed = true;
+					fail_reason = "tex-create-fail";
+				}
 			}
 			if (!gpu_failed && s->gpu_external &&
 			    gs_android_external_texture_set_buffer(s->gpu_external, hb)) {
+				s->diag.import_ok++;
 				const float u0 = (float)crop.left / (float)iw;
 				const float du = (float)vis_w / (float)iw;
 				const float v0 = (float)crop.top / (float)ih;
@@ -1443,17 +1712,32 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 					s->gpu_external, matrix, in_fence, &release_fence_fd);
 				if (rendered) {
 					s->gpu_image = rendered;
+					s->diag.render_ok++;
 					android_surface_health_on_acquire(&s->gpu_health, now_ns, true);
 				} else {
+					s->diag.render_fail++;
+					FF_BLOG(LOG_WARNING,
+						"Android GPU OES->2D render failed (buf=%dx%d vis=%ux%u had_fence=%s)",
+						iw, ih, vis_w, vis_h, in_fence >= 0 ? "yes" : "no");
 					gpu_failed = true;
+					fail_reason = "tex-render-fail";
 				}
 				AImage_deleteAsync(new_img, release_fence_fd);
 				new_img = NULL;
-			} else {
+			} else if (!gpu_failed) {
+				s->diag.import_fail++;
+				FF_BLOG(LOG_WARNING,
+					"Android GPU buffer import failed (buf=%dx%d vis=%ux%u crop=%d,%d,%d,%d)", iw,
+					ih, vis_w, vis_h, crop.left, crop.top, crop.right, crop.bottom);
 				gpu_failed = true;
+				fail_reason = "import-fail";
 			}
 		} else {
+			s->diag.import_fail++;
+			FF_BLOG(LOG_WARNING, "Android GPU AImage metadata/buffer query failed (iw=%d ih=%d hb=%p)", iw,
+				ih, (void *)hb);
 			gpu_failed = true;
+			fail_reason = "aimage-query-fail";
 		}
 		if (new_img) {
 			AImage_deleteAsync(new_img, acquire_fence_fd);
@@ -1470,15 +1754,21 @@ static void ffmpeg_source_render(void *data, gs_effect_t *effect)
 	gs_texture_t *tex = s->gpu_image;
 	uint32_t draw_w = s->gpu_tex_width;
 	uint32_t draw_h = s->gpu_tex_height;
+	const bool can_draw = (tex && draw_w && draw_h);
+	if (can_draw)
+		s->diag.draw_gpu++;
+	else
+		s->diag.draw_skipped_null++;
 	pthread_mutex_unlock(&s->gpu_mx);
 
-	if (tex && draw_w && draw_h) {
+	if (can_draw) {
 		const bool prev_linear = gs_set_linear_srgb(false);
 		gs_effect_t *draw = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 		while (gs_effect_loop(draw, "Draw"))
 			obs_source_draw(tex, 0, 0, draw_w, draw_h, false);
 		gs_set_linear_srgb(prev_linear);
 	}
+	android_diag_maybe_log(s, now_ns, can_draw ? ANDROID_DRAW_GPU : ANDROID_DRAW_NULL, draw_w, draw_h, fail_reason);
 }
 #endif
 

@@ -10,6 +10,7 @@
 #include <poll.h>
 #include <string.h>
 #include <unistd.h>
+#include <util/platform.h>
 #include "gl-subsystem.h"
 
 #ifndef GL_TEXTURE_EXTERNAL_OES
@@ -39,6 +40,12 @@
 #endif
 #ifndef EGL_SYNC_FLUSH_COMMANDS_BIT_KHR
 #define EGL_SYNC_FLUSH_COMMANDS_BIT_KHR 0x0001
+#endif
+#ifndef EGL_TIMEOUT_EXPIRED_KHR
+#define EGL_TIMEOUT_EXPIRED_KHR 0x30F5
+#endif
+#ifndef EGL_CONDITION_SATISFIED_KHR
+#define EGL_CONDITION_SATISFIED_KHR 0x30F6
 #endif
 
 /* OBS FBOs use a top-down texture convention. Flip once when crossing the
@@ -433,10 +440,21 @@ static void drain_gl_errors(void)
 	}
 }
 
-static void wait_and_close_fence_fd(int fence_fd)
+static bool should_log_throttled(uint64_t *last_ns, uint32_t *count)
+{
+	const uint64_t now = os_gettime_ns();
+	(*count)++;
+	if (*count <= 5 || *last_ns == 0 || now < *last_ns || (now - *last_ns) >= UINT64_C(5000000000)) {
+		*last_ns = now;
+		return true;
+	}
+	return false;
+}
+
+static bool wait_and_close_fence_fd(int fence_fd)
 {
 	if (fence_fd < 0)
-		return;
+		return true;
 	struct pollfd pfd = {
 		.fd = fence_fd,
 		.events = POLLIN,
@@ -445,37 +463,105 @@ static void wait_and_close_fence_fd(int fence_fd)
 	do {
 		ret = poll(&pfd, 1, 1000);
 	} while (ret < 0 && errno == EINTR);
-	if (ret == 0)
-		blog(LOG_WARNING, "Android interop: timed out waiting on acquire fence fd");
+	const int err = (ret < 0) ? errno : 0;
 	close(fence_fd);
+	if (ret > 0 && (pfd.revents & POLLIN) && !(pfd.revents & (POLLERR | POLLNVAL)))
+		return true;
+	static uint64_t last_log_ns;
+	static uint32_t fail_count;
+	if (should_log_throttled(&last_log_ns, &fail_count)) {
+		if (ret == 0) {
+			blog(LOG_WARNING,
+			     "Android interop: timed out waiting on acquire fence fd (count=%u)", fail_count);
+		} else if (ret < 0) {
+			blog(LOG_WARNING,
+			     "Android interop: poll on acquire fence fd failed (errno=%d count=%u)", err, fail_count);
+		} else {
+			blog(LOG_WARNING,
+			     "Android interop: acquire fence fd abnormal revents=0x%x (count=%u)",
+			     (unsigned int)pfd.revents, fail_count);
+		}
+	}
+	return false;
 }
 
-static void wait_acquire_fence(struct external_texture *t, int acquire_fence_fd)
+static bool wait_acquire_fence(struct external_texture *t, int acquire_fence_fd)
 {
 	if (acquire_fence_fd < 0)
-		return;
+		return true;
 	if (t->native_fence_sync && (t->wait_sync || t->client_wait_sync)) {
-		const EGLint attribs[] = {
-			EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
-			acquire_fence_fd,
-			EGL_NONE,
-		};
-		EGLSyncKHR sync = t->create_sync(t->egl_display, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
-		if (sync != EGL_NO_SYNC_KHR) {
-			/* eglCreateSyncKHR took ownership of acquire_fence_fd. */
-			const bool waited = t->wait_sync && (t->wait_sync(t->egl_display, sync, 0) == EGL_TRUE);
-			if (!waited && t->client_wait_sync) {
-				(void)eglGetError();
-				t->client_wait_sync(t->egl_display, sync, 0, 1000000000ULL);
-			} else if (!waited) {
-				(void)eglGetError();
+		/* Pass a duplicated fd to eglCreateSyncKHR so that if creation fails
+		 * (and EGL closes or consumes the passed fd), we still hold our own
+		 * untouched acquire_fence_fd for the poll() fallback without risking
+		 * double-close or closing a recycled fd number. */
+		const int egl_fd = dup(acquire_fence_fd);
+		if (egl_fd >= 0) {
+			const EGLint attribs[] = {
+				EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
+				egl_fd,
+				EGL_NONE,
+			};
+			EGLSyncKHR sync = t->create_sync(t->egl_display, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+			if (sync != EGL_NO_SYNC_KHR) {
+				/* eglCreateSyncKHR took ownership of egl_fd; close our copy now. */
+				close(acquire_fence_fd);
+				bool ready = false;
+				if (t->wait_sync) {
+					if (t->wait_sync(t->egl_display, sync, 0) == EGL_TRUE) {
+						ready = true;
+					} else {
+						const EGLint err = eglGetError();
+						static uint64_t last_wait_ns;
+						static uint32_t wait_fail_count;
+						if (should_log_throttled(&last_wait_ns, &wait_fail_count)) {
+							blog(LOG_WARNING,
+							     "Android interop: eglWaitSyncKHR failed (0x%x count=%u)%s",
+							     err, wait_fail_count,
+							     t->client_wait_sync
+								     ? "; falling back to eglClientWaitSyncKHR"
+								     : "");
+						}
+					}
+				}
+				if (!ready && t->client_wait_sync) {
+					const EGLint status =
+						t->client_wait_sync(t->egl_display, sync, 0, 1000000000ULL);
+					if (status == EGL_CONDITION_SATISFIED_KHR) {
+						ready = true;
+					} else {
+						const EGLint err = (status == EGL_FALSE) ? eglGetError() : EGL_SUCCESS;
+						static uint64_t last_cwait_ns;
+						static uint32_t cwait_fail_count;
+						if (should_log_throttled(&last_cwait_ns, &cwait_fail_count)) {
+							blog(LOG_WARNING,
+							     "Android interop: eglClientWaitSyncKHR failed (status=0x%x err=0x%x count=%u)",
+							     status, err, cwait_fail_count);
+						}
+					}
+				}
+				t->destroy_sync(t->egl_display, sync);
+				return ready;
 			}
-			t->destroy_sync(t->egl_display, sync);
-			return;
+			const EGLint create_err = eglGetError();
+			static uint64_t last_create_ns;
+			static uint32_t create_fail_count;
+			if (should_log_throttled(&last_create_ns, &create_fail_count)) {
+				blog(LOG_WARNING,
+				     "Android interop: eglCreateSyncKHR(acquire fence) failed (0x%x count=%u); falling back to poll",
+				     create_err, create_fail_count);
+			}
+		} else {
+			const int dup_err = errno;
+			static uint64_t last_dup_ns;
+			static uint32_t dup_fail_count;
+			if (should_log_throttled(&last_dup_ns, &dup_fail_count)) {
+				blog(LOG_WARNING,
+				     "Android interop: dup(acquire fence fd) failed (errno=%d count=%u); falling back to poll",
+				     dup_err, dup_fail_count);
+			}
 		}
-		(void)eglGetError();
 	}
-	wait_and_close_fence_fd(acquire_fence_fd);
+	return wait_and_close_fence_fd(acquire_fence_fd);
 }
 
 static int create_release_fence(struct external_texture *t)
@@ -595,7 +681,16 @@ static gs_texture_t *render_external_texture(struct external_texture *t, const f
 {
 	if (release_fence_fd)
 		*release_fence_fd = -1;
-	wait_acquire_fence(t, acquire_fence_fd);
+	if (!wait_acquire_fence(t, acquire_fence_fd)) {
+		static uint64_t last_skip_ns;
+		static uint32_t skip_count;
+		if (should_log_throttled(&last_skip_ns, &skip_count)) {
+			blog(LOG_WARNING,
+			     "Android interop: skipping OES->2D render (%ux%u) because acquire fence wait failed (count=%u)",
+			     t->width, t->height, skip_count);
+		}
+		return NULL;
+	}
 
 	struct gl_state state;
 	save_state(&state);
@@ -619,7 +714,16 @@ static gs_texture_t *render_external_texture(struct external_texture *t, const f
 	glUniform1i(t->image, 0);
 	glUniformMatrix4fv(t->transform, 1, GL_FALSE, transform);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
-	const bool ok = glGetError() == GL_NO_ERROR;
+	const GLenum gl_err = glGetError();
+	const bool ok = gl_err == GL_NO_ERROR;
+	if (!ok) {
+		static uint64_t last_gl_ns;
+		static uint32_t gl_err_count;
+		if (should_log_throttled(&last_gl_ns, &gl_err_count)) {
+			blog(LOG_WARNING, "Android interop: OES->2D render GL error 0x%x (size=%ux%u count=%u)",
+			     (unsigned int)gl_err, t->width, t->height, gl_err_count);
+		}
+	}
 	if (release_fence_fd) {
 		if (ok) {
 			*release_fence_fd = create_release_fence(t);
@@ -703,61 +807,94 @@ bool device_android_external_texture_set_buffer(gs_android_external_texture_t *t
 	if (image == EGL_NO_IMAGE_KHR) {
 		/* EGL_IMAGE_PRESERVED_KHR is not part of EGL_ANDROID_image_native_buffer
 		 * and the driver rejects it for AHardwareBuffers (EGL_BAD_PARAMETER), so
-		 * no attributes are passed. */
-		/* Different drivers want different inputs here, so try the four documented
-		 * combinations once and remember the one that works: an AHardwareBuffer is
-		 * either wrapped by eglGetNativeClientBufferANDROID or passed directly, and
-		 * the call either takes the current context or EGL_NO_CONTEXT. */
-		static int working = -1;
-		static bool probed;
-		if (!probed) {
-			probed = true;
+		 * no attributes are passed.
+		 * Per EGL_ANDROID_image_native_buffer, ctx must be EGL_NO_CONTEXT and
+		 * AHardwareBuffer is wrapped via eglGetNativeClientBufferANDROID. Probe
+		 * spec-compliant paths first and only cache once a path succeeds so a
+		 * transient first-buffer failure never locks out subsequent imports. */
+		enum {
+			IMPORT_UNKNOWN = -1,
+			IMPORT_WRAPPED_NO_CTX = 0,
+			IMPORT_DIRECT_NO_CTX = 1,
+			IMPORT_WRAPPED_CTX = 2,
+			IMPORT_DIRECT_CTX = 3,
+		};
+		static const char *const import_names[4] = {
+			"wrapped",
+			"direct",
+			"wrapped+context",
+			"direct+context",
+		};
+		static int working = IMPORT_UNKNOWN;
+		if (working == IMPORT_UNKNOWN) {
 			EGLClientBuffer wrapped =
 				t->get_native_client_buffer ? t->get_native_client_buffer(hb) : NULL;
 			EGLContext ctx = eglGetCurrentContext();
 			const struct {
 				EGLClientBuffer buffer;
 				EGLContext context;
-				const char *name;
-			} variants[] = {
-				{wrapped, ctx, "wrapped+context"},
-				{wrapped, EGL_NO_CONTEXT, "wrapped"},
-				{(EGLClientBuffer)hb, ctx, "direct+context"},
-				{(EGLClientBuffer)hb, EGL_NO_CONTEXT, "direct"},
+			} variants[4] = {
+				{wrapped, EGL_NO_CONTEXT},
+				{(EGLClientBuffer)hb, EGL_NO_CONTEXT},
+				{wrapped, ctx},
+				{(EGLClientBuffer)hb, ctx},
 			};
-			for (int i = 0; i < 4 && working < 0; i++) {
+			EGLint errors[4] = {EGL_SUCCESS, EGL_SUCCESS, EGL_SUCCESS, EGL_SUCCESS};
+			for (int i = 0; i < 4; i++) {
 				if (!variants[i].buffer)
 					continue;
 				EGLImageKHR candidate = t->create_image(t->egl_display, variants[i].context,
 									EGL_NATIVE_BUFFER_ANDROID,
 									variants[i].buffer, NULL);
-				const EGLint error = eglGetError();
 				if (candidate != EGL_NO_IMAGE_KHR) {
 					working = i;
-					blog(LOG_INFO, "Android interop: EGL image via %s", variants[i].name);
+					blog(LOG_INFO, "Android interop: EGL image via %s", import_names[i]);
 					image = candidate;
 					break;
 				}
-				blog(LOG_INFO, "Android interop: EGL image via %s failed (0x%x)",
-				     variants[i].name, error);
+				errors[i] = eglGetError();
 			}
-			if (working < 0) {
-				AHardwareBuffer_Desc desc = {0};
-				AHardwareBuffer_describe(hb, &desc);
-				blog(LOG_ERROR, "Android interop: no EGL image path for %ux%u format=%u usage=0x%llx",
-				     desc.width, desc.height, desc.format, (unsigned long long)desc.usage);
+			if (working == IMPORT_UNKNOWN) {
+				static uint64_t last_probe_fail_ns;
+				static uint32_t probe_fail_count;
+				if (should_log_throttled(&last_probe_fail_ns, &probe_fail_count)) {
+					AHardwareBuffer_Desc desc = {0};
+					AHardwareBuffer_describe(hb, &desc);
+					blog(LOG_ERROR,
+					     "Android interop: no EGL image path for %ux%u stride=%u format=%u usage=0x%llx "
+					     "(errs: wrapped=0x%x direct=0x%x wrapped+ctx=0x%x direct+ctx=0x%x count=%u)",
+					     desc.width, desc.height, desc.stride, desc.format,
+					     (unsigned long long)desc.usage, errors[0], errors[1], errors[2],
+					     errors[3], probe_fail_count);
+				}
 				return false;
 			}
-		} else if (working >= 0) {
-			EGLClientBuffer client = (EGLClientBuffer)hb;
-			if (working <= 1 && t->get_native_client_buffer)
-				client = t->get_native_client_buffer(hb);
-			const EGLContext ctx =
-				(working == 0 || working == 2) ? eglGetCurrentContext() : EGL_NO_CONTEXT;
-			image = t->create_image(t->egl_display, ctx, EGL_NATIVE_BUFFER_ANDROID, client, NULL);
+		} else {
+			const bool use_wrapped = (working == IMPORT_WRAPPED_NO_CTX || working == IMPORT_WRAPPED_CTX);
+			const bool use_ctx = (working == IMPORT_WRAPPED_CTX || working == IMPORT_DIRECT_CTX);
+			EGLClientBuffer client =
+				(use_wrapped && t->get_native_client_buffer) ? t->get_native_client_buffer(hb)
+									     : (EGLClientBuffer)hb;
+			const EGLContext ctx = use_ctx ? eglGetCurrentContext() : EGL_NO_CONTEXT;
+			if (client)
+				image = t->create_image(t->egl_display, ctx, EGL_NATIVE_BUFFER_ANDROID, client, NULL);
+			if (image == EGL_NO_IMAGE_KHR) {
+				const EGLint err = client ? eglGetError() : EGL_BAD_PARAMETER;
+				static uint64_t last_import_fail_ns;
+				static uint32_t import_fail_count;
+				if (should_log_throttled(&last_import_fail_ns, &import_fail_count)) {
+					AHardwareBuffer_Desc desc = {0};
+					AHardwareBuffer_describe(hb, &desc);
+					blog(LOG_WARNING,
+					     "Android interop: EGL image via %s failed (0x%x client=%p) for %ux%u "
+					     "stride=%u format=%u usage=0x%llx (count=%u)",
+					     import_names[working], err, (void *)client, desc.width, desc.height,
+					     desc.stride, desc.format, (unsigned long long)desc.usage,
+					     import_fail_count);
+				}
+				return false;
+			}
 		}
-		if (image == EGL_NO_IMAGE_KHR)
-			return false;
 
 		size_t slot = 0;
 		for (size_t i = 0; i < EGL_IMAGE_CACHE_CAP; i++) {
@@ -785,13 +922,15 @@ bool device_android_external_texture_set_buffer(gs_android_external_texture_t *t
 	drain_gl_errors();
 	glBindTexture(GL_TEXTURE_EXTERNAL_OES, t->external);
 	glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)image);
-	const bool ok = glGetError() == GL_NO_ERROR;
+	const GLenum gl_err = glGetError();
+	const bool ok = gl_err == GL_NO_ERROR;
 	restore_state(&state);
 	if (!ok) {
-		static bool warned_bind;
-		if (!warned_bind) {
-			warned_bind = true;
-			blog(LOG_ERROR, "Android interop: glEGLImageTargetTexture2DOES failed");
+		static uint64_t last_bind_ns;
+		static uint32_t bind_fail_count;
+		if (should_log_throttled(&last_bind_ns, &bind_fail_count)) {
+			blog(LOG_ERROR, "Android interop: glEGLImageTargetTexture2DOES failed (0x%x count=%u)",
+			     (unsigned int)gl_err, bind_fail_count);
 		}
 	}
 	return ok;

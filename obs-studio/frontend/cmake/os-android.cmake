@@ -180,6 +180,16 @@ else()
   message(WARNING "3-2 打包：没有 OBS::libobs-opengl 目标 —— APK 里没有渲染后端，obs_reset_video 会失败")
 endif()
 
+foreach(_hx_target OBS::obs_ndi_avutil59 OBS::obs_ndi_avcodec61)
+  if(TARGET ${_hx_target})
+    add_dependencies(obs-studio ${_hx_target})
+    get_target_property(_hx_dir ${_hx_target} BINARY_DIR)
+    string(REPLACE "OBS::" "" _hx_name "${_hx_target}")
+    list(APPEND _extra_libs "${_hx_dir}/lib${_hx_name}.so")
+    message(STATUS "android-ndi: bundling MediaCodec HX bridge lib${_hx_name}.so")
+  endif()
+endforeach()
+
 # Optional verification-build hook: bundle official arm64-v8a libndi.so when
 # -DOBS_ANDROID_NDI_SDK_DIR=<path> is explicitly passed. Default CI leaves it unset.
 if(DEFINED OBS_ANDROID_NDI_SDK_DIR AND NOT OBS_ANDROID_NDI_SDK_DIR STREQUAL "")

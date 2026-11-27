@@ -22,6 +22,12 @@
 #include <obs.hpp>
 
 #include <QDialog>
+#ifdef __ANDROID__
+#include <QPoint>
+#include <QPointF>
+class QTimer;
+class QTouchEvent;
+#endif
 
 class OBSBasic;
 class OBSEventFilter;
@@ -37,6 +43,16 @@ private:
 	OBSSignal removedSignal;
 	OBSSignal renamedSignal;
 	std::unique_ptr<OBSEventFilter> eventFilter;
+#ifdef __ANDROID__
+	QTimer *longPressTimer = nullptr;
+	QPoint longPressWidgetPos;
+	int longPressRelX = 0;
+	int longPressRelY = 0;
+	bool longPressTriggered = false;
+	bool twoFingerActive = false;
+	bool suppressNextLeftRelease = false;
+	QPointF lastTwoFingerMid;
+#endif
 
 	static void SourceRemoved(void *data, calldata_t *params);
 	static void SourceRenamed(void *data, calldata_t *params);
@@ -49,6 +65,10 @@ private:
 	bool HandleMouseWheelEvent(QWheelEvent *event);
 	bool HandleFocusEvent(QFocusEvent *event);
 	bool HandleKeyEvent(QKeyEvent *event);
+#ifdef __ANDROID__
+	bool HandleTouchEvent(QTouchEvent *event);
+	void TriggerLongPressRightClick();
+#endif
 
 	OBSEventFilter *BuildEventFilter();
 

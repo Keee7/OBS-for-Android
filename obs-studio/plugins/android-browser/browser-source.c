@@ -246,6 +246,30 @@ static void update(void *data, obs_data_t *settings)
 	pthread_mutex_unlock(&s->mutex);
 	obs_source_set_audio_active(s->source, audioActive);
 }
+static void proc_reload(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	struct browser_source *s = data;
+	if (!s)
+		return;
+	pthread_mutex_lock(&s->mutex);
+	if (s->host && !s->dirty)
+		obs_android_browser_reload(s->host);
+	else
+		s->reload = true;
+	pthread_mutex_unlock(&s->mutex);
+}
+static void proc_go_back(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	struct browser_source *s = data;
+	if (!s)
+		return;
+	pthread_mutex_lock(&s->mutex);
+	if (s->host && !s->dirty)
+		obs_android_browser_go_back(s->host);
+	pthread_mutex_unlock(&s->mutex);
+}
 static void *create(obs_data_t *settings, obs_source_t *source)
 {
 	struct browser_source *s = bzalloc(sizeof(*s));
@@ -264,6 +288,11 @@ static void *create(obs_data_t *settings, obs_source_t *source)
 		pthread_mutex_destroy(&s->mutex);
 		bfree(s);
 		return NULL;
+	}
+	proc_handler_t *ph = obs_source_get_proc_handler(source);
+	if (ph) {
+		proc_handler_add(ph, "void browser_reload()", proc_reload, s);
+		proc_handler_add(ph, "void browser_go_back()", proc_go_back, s);
 	}
 	update(s, settings);
 	return s;
@@ -504,12 +533,29 @@ static void touch(void *data, const struct obs_mouse_event *event, int action)
 static void mouse_click(void *data, const struct obs_mouse_event *event, int32_t type, bool up, uint32_t count)
 {
 	UNUSED_PARAMETER(count);
-	if (type == MOUSE_LEFT)
+	if (type == MOUSE_LEFT) {
 		touch(data, event, up ? 1 : 0);
+	} else if (type == MOUSE_RIGHT && !up && event) {
+		struct browser_source *s = data;
+		pthread_mutex_lock(&s->mutex);
+		if (s->host && !s->dirty)
+			obs_android_browser_right_click(s->host, event->x, event->y);
+		pthread_mutex_unlock(&s->mutex);
+	}
 }
 static void mouse_move(void *data, const struct obs_mouse_event *event, bool leave)
 {
 	touch(data, event, leave ? 3 : 2);
+}
+static void mouse_wheel(void *data, const struct obs_mouse_event *event, int x_delta, int y_delta)
+{
+	struct browser_source *s = data;
+	if (!event || (x_delta == 0 && y_delta == 0))
+		return;
+	pthread_mutex_lock(&s->mutex);
+	if (s->host && !s->dirty)
+		obs_android_browser_wheel(s->host, event->x, event->y, x_delta, y_delta);
+	pthread_mutex_unlock(&s->mutex);
 }
 static void defaults(obs_data_t *settings)
 {
@@ -611,6 +657,7 @@ static struct obs_source_info info = {
 	.hide = hide,
 	.mouse_click = mouse_click,
 	.mouse_move = mouse_move,
+	.mouse_wheel = mouse_wheel,
 };
 bool obs_module_load(void)
 {

@@ -68,6 +68,10 @@ static void reloadBrowser(void *ptr)
 {
 	static_cast<BrowserHandle *>(ptr)->object.callMethod<void>("reload");
 }
+static void goBackBrowser(void *ptr)
+{
+	static_cast<BrowserHandle *>(ptr)->object.callMethod<void>("goBack");
+}
 static void visibleBrowser(void *ptr, bool visible)
 {
 	static_cast<BrowserHandle *>(ptr)->object.callMethod<void>("setVisible", "(Z)V", jboolean(visible));
@@ -75,6 +79,15 @@ static void visibleBrowser(void *ptr, bool visible)
 static void touchBrowser(void *ptr, int x, int y, int action)
 {
 	static_cast<BrowserHandle *>(ptr)->object.callMethod<void>("touch", "(III)V", jint(x), jint(y), jint(action));
+}
+static void rightClickBrowser(void *ptr, int x, int y)
+{
+	static_cast<BrowserHandle *>(ptr)->object.callMethod<void>("rightClick", "(II)V", jint(x), jint(y));
+}
+static void wheelBrowser(void *ptr, int x, int y, int dx, int dy)
+{
+	static_cast<BrowserHandle *>(ptr)->object.callMethod<void>("wheel", "(IIII)V", jint(x), jint(y), jint(dx),
+								   jint(dy));
 }
 static uint32_t readBrowserAudio(void *ptr, int16_t *out, uint32_t max_frames, uint32_t *sample_rate,
 				 uint32_t *channels)
@@ -145,8 +158,9 @@ static void destroyBrowser(void *ptr)
 	h->audioFormat = nullptr;
 	delete h;
 }
-static const obs_android_browser_host host = {createBrowser, takeBrowserBuffer, updateBrowser, reloadBrowser,
-					      visibleBrowser, touchBrowser,     destroyBrowser, readBrowserAudio};
+static const obs_android_browser_host host = {
+	createBrowser,     takeBrowserBuffer, updateBrowser, reloadBrowser,  goBackBrowser,   visibleBrowser,
+	touchBrowser,      rightClickBrowser, wheelBrowser,  destroyBrowser, readBrowserAudio};
 bool OBSAndroidBrowserInit()
 {
 	obs_android_set_browser_host(&host);

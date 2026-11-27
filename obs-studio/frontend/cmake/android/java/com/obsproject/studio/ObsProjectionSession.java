@@ -61,6 +61,13 @@ final class ObsProjectionSession<S> {
 
     synchronized int[] captureSize(int[] displaySize) {
         if (closed || contentWidth <= 0 || contentHeight <= 0) return displaySize;
+        // Ignore stale/unrotated content bounds that cannot fit in the current display orientation
+        // (e.g. a portrait full-screen callback left over after rotating to landscape).
+        if (displaySize != null && displaySize.length >= 2 &&
+            displaySize[0] > 0 && displaySize[1] > 0 &&
+            (contentWidth > displaySize[0] || contentHeight > displaySize[1])) {
+            return displaySize;
+        }
         // Keep display density/rotation. Content dimensions already include rotation.
         return new int[] {contentWidth, contentHeight, displaySize[2], displaySize[3]};
     }

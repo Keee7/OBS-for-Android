@@ -336,9 +336,12 @@ struct obs_android_browser_host {
  void *(*take_buffer)(void *handle);
  int (*update)(void *handle, float transform[16]);
  void (*reload)(void *handle);
+ void (*go_back)(void *handle);
  void (*set_visible)(void *handle, bool visible);
  /* action: 0 down, 1 up, 2 move, 3 cancel */
  void (*touch)(void *handle, int x, int y, int action);
+ void (*right_click)(void *handle, int x, int y);
+ void (*wheel)(void *handle, int x, int y, int dx, int dy);
  void (*destroy)(void *handle);
  /* Drain up to max_frames of interleaved int16 PCM from this browser instance.
   * Returns frames written (0 when silent/empty). Out params receive format. */
@@ -354,8 +357,11 @@ EXPORT void *obs_android_browser_take_buffer(void *handle);
 /* -1: failed; 0: no new frame; 1: matrix updated. */
 EXPORT int obs_android_browser_update(void *handle, float transform[16]);
 EXPORT void obs_android_browser_reload(void *handle);
+EXPORT void obs_android_browser_go_back(void *handle);
 EXPORT void obs_android_browser_set_visible(void *handle, bool visible);
 EXPORT void obs_android_browser_touch(void *handle, int x, int y, int action);
+EXPORT void obs_android_browser_right_click(void *handle, int x, int y);
+EXPORT void obs_android_browser_wheel(void *handle, int x, int y, int dx, int dy);
 EXPORT void obs_android_browser_destroy(void *handle);
 EXPORT uint32_t obs_android_browser_read_audio(void *handle, int16_t *out, uint32_t max_frames,
 					       uint32_t *sample_rate, uint32_t *channels);

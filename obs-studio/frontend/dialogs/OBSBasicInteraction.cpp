@@ -29,6 +29,10 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QTimer>
+#include <QTouchEvent>
+#include <cmath>
+#include <cstring>
 #include <utility/android-window-fit.hpp>
 #endif
 
@@ -69,16 +73,54 @@ OBSBasicInteraction::OBSBasicInteraction(QWidget *parent, OBSSource source_)
 	titleLabel->setMinimumWidth(0);
 	titleLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 	connect(this, &QWidget::windowTitleChanged, titleLabel, &QLabel::setText);
+	headerLayout->addWidget(titleLabel, 1);
+
+	const char *sourceId = obs_source_get_id(source);
+	if (sourceId && strcmp(sourceId, "android_browser_source") == 0) {
+		auto *backButton = new QPushButton(QTStr("Basic.InteractionWindow.Back"), this);
+		backButton->setObjectName(QStringLiteral("androidInteractionBackButton"));
+		backButton->setMinimumSize(64, 36);
+		backButton->setAutoDefault(false);
+		backButton->setDefault(false);
+		connect(backButton, &QPushButton::clicked, this, [this]() {
+			if (!source)
+				return;
+			proc_handler_t *ph = obs_source_get_proc_handler(source);
+			if (ph)
+				proc_handler_call(ph, "browser_go_back", nullptr);
+		});
+		headerLayout->addWidget(backButton);
+
+		auto *refreshButton = new QPushButton(QTStr("Basic.InteractionWindow.Refresh"), this);
+		refreshButton->setObjectName(QStringLiteral("androidInteractionRefreshButton"));
+		refreshButton->setMinimumSize(64, 36);
+		refreshButton->setAutoDefault(false);
+		refreshButton->setDefault(false);
+		connect(refreshButton, &QPushButton::clicked, this, [this]() {
+			if (!source)
+				return;
+			proc_handler_t *ph = obs_source_get_proc_handler(source);
+			if (ph)
+				proc_handler_call(ph, "browser_reload", nullptr);
+		});
+		headerLayout->addWidget(refreshButton);
+	}
+
 	auto *closeButton = new QPushButton(QTStr("Close"), this);
 	closeButton->setObjectName(QStringLiteral("androidInteractionCloseButton"));
 	closeButton->setMinimumSize(72, 36);
 	closeButton->setAutoDefault(false);
 	closeButton->setDefault(false);
 	connect(closeButton, &QPushButton::clicked, this, &OBSBasicInteraction::close);
-	headerLayout->addWidget(titleLabel, 1);
 	headerLayout->addWidget(closeButton);
 	ui->verticalLayout->insertLayout(0, headerLayout);
 	ui->verticalLayout->setStretchFactor(ui->preview, 1);
+
+	longPressTimer = new QTimer(this);
+	longPressTimer->setSingleShot(true);
+	longPressTimer->setInterval(500);
+	connect(longPressTimer, &QTimer::timeout, this, &OBSBasicInteraction::TriggerLongPressRightClick);
+	ui->preview->setAttribute(Qt::WA_AcceptTouchEvents, true);
 #endif
 
 	ui->preview->setMouseTracking(true);
@@ -105,6 +147,10 @@ OBSBasicInteraction::OBSBasicInteraction(QWidget *parent, OBSSource source_)
 
 OBSBasicInteraction::~OBSBasicInteraction()
 {
+#ifdef __ANDROID__
+	if (longPressTimer)
+		longPressTimer->stop();
+#endif
 	// since QT fakes a mouse movement while destructing a widget
 	// remove our event filter
 	ui->preview->removeEventFilter(eventFilter.get());
@@ -114,6 +160,13 @@ OBSEventFilter *OBSBasicInteraction::BuildEventFilter()
 {
 	return new OBSEventFilter([this](QObject *, QEvent *event) {
 		switch (event->type()) {
+#ifdef __ANDROID__
+		case QEvent::TouchBegin:
+		case QEvent::TouchUpdate:
+		case QEvent::TouchEnd:
+		case QEvent::TouchCancel:
+			return this->HandleTouchEvent(static_cast<QTouchEvent *>(event));
+#endif
 		case QEvent::MouseButtonPress:
 		case QEvent::MouseButtonRelease:
 		case QEvent::MouseButtonDblClick:
@@ -189,6 +242,10 @@ void OBSBasicInteraction::closeEvent(QCloseEvent *event)
 	if (!event->isAccepted()) {
 		return;
 	}
+#ifdef __ANDROID__
+	if (longPressTimer)
+		longPressTimer->stop();
+#endif
 
 	config_set_int(App()->GetAppConfig(), "InteractionWindow", "cx", width());
 	config_set_int(App()->GetAppConfig(), "InteractionWindow", "cy", height());
@@ -340,6 +397,34 @@ bool OBSBasicInteraction::HandleMouseClickEvent(QMouseEvent *event)
 	QPoint pos = event->pos();
 	bool insideSource = GetSourceRelativeXY(pos.x(), pos.y(), mouseEvent.x, mouseEvent.y);
 
+#ifdef __ANDROID__
+	if (button == MOUSE_LEFT) {
+		if (mouseUp) {
+			if (longPressTimer)
+				longPressTimer->stop();
+			if (longPressTriggered || suppressNextLeftRelease) {
+				longPressTriggered = false;
+				suppressNextLeftRelease = false;
+				return true;
+			}
+		} else {
+			longPressTriggered = false;
+			suppressNextLeftRelease = false;
+			if (longPressTimer)
+				longPressTimer->stop();
+			if (insideSource && !twoFingerActive && event->type() == QEvent::MouseButtonPress &&
+			    event->source() != Qt::MouseEventNotSynthesized && longPressTimer) {
+				longPressWidgetPos = pos;
+				longPressRelX = mouseEvent.x;
+				longPressRelY = mouseEvent.y;
+				longPressTimer->start();
+			}
+		}
+	} else if (longPressTimer) {
+		longPressTimer->stop();
+	}
+#endif
+
 	if (mouseUp || insideSource) {
 		obs_source_send_mouse_click(source, &mouseEvent, button, mouseUp, clickCount);
 	}
@@ -356,13 +441,100 @@ bool OBSBasicInteraction::HandleMouseMoveEvent(QMouseEvent *event)
 	if (!mouseLeave) {
 		mouseEvent.modifiers = TranslateQtMouseEventModifiers(event);
 		QPoint pos = event->pos();
+#ifdef __ANDROID__
+		if (longPressTimer && longPressTimer->isActive()) {
+			const int dx = pos.x() - longPressWidgetPos.x();
+			const int dy = pos.y() - longPressWidgetPos.y();
+			if (dx * dx + dy * dy > 12 * 12)
+				longPressTimer->stop();
+		}
+		if (twoFingerActive || longPressTriggered)
+			return true;
+#endif
 		mouseLeave = !GetSourceRelativeXY(pos.x(), pos.y(), mouseEvent.x, mouseEvent.y);
 	}
+#ifdef __ANDROID__
+	else if (longPressTimer) {
+		longPressTimer->stop();
+	}
+#endif
 
 	obs_source_send_mouse_move(source, &mouseEvent, mouseLeave);
 
 	return true;
 }
+
+#ifdef __ANDROID__
+void OBSBasicInteraction::TriggerLongPressRightClick()
+{
+	if (!source || twoFingerActive)
+		return;
+	struct obs_mouse_event cancelEvent = {};
+	obs_source_send_mouse_move(source, &cancelEvent, true);
+
+	struct obs_mouse_event rightEvent = {};
+	rightEvent.x = longPressRelX;
+	rightEvent.y = longPressRelY;
+	longPressTriggered = true;
+	obs_source_send_mouse_click(source, &rightEvent, MOUSE_RIGHT, false, 1);
+	obs_source_send_mouse_click(source, &rightEvent, MOUSE_RIGHT, true, 1);
+}
+
+bool OBSBasicInteraction::HandleTouchEvent(QTouchEvent *event)
+{
+	if (!source || !event)
+		return false;
+
+	const auto &points = event->points();
+	if (event->type() == QEvent::TouchCancel || points.isEmpty()) {
+		if (longPressTimer)
+			longPressTimer->stop();
+		if (twoFingerActive) {
+			twoFingerActive = false;
+			suppressNextLeftRelease = true;
+			event->accept();
+			return true;
+		}
+		return false;
+	}
+
+	if (points.size() >= 2) {
+		if (longPressTimer)
+			longPressTimer->stop();
+		const QPointF mid = (points[0].position() + points[1].position()) * 0.5;
+		if (!twoFingerActive) {
+			struct obs_mouse_event cancelEvent = {};
+			obs_source_send_mouse_move(source, &cancelEvent, true);
+			twoFingerActive = true;
+			suppressNextLeftRelease = true;
+			longPressTriggered = false;
+			lastTwoFingerMid = mid;
+		} else {
+			const QPointF delta = mid - lastTwoFingerMid;
+			lastTwoFingerMid = mid;
+			struct obs_mouse_event wheelEvent = {};
+			if (GetSourceRelativeXY(int(std::lround(mid.x())), int(std::lround(mid.y())), wheelEvent.x,
+						wheelEvent.y)) {
+				const int dx = int(std::lround(delta.x() * 3.0));
+				const int dy = int(std::lround(delta.y() * 3.0));
+				if (dx != 0 || dy != 0)
+					obs_source_send_mouse_wheel(source, &wheelEvent, dx, dy);
+			}
+		}
+		event->accept();
+		return true;
+	}
+
+	if (twoFingerActive) {
+		if (event->type() == QEvent::TouchEnd)
+			twoFingerActive = false;
+		event->accept();
+		return true;
+	}
+
+	return false;
+}
+#endif
 
 bool OBSBasicInteraction::HandleMouseWheelEvent(QWheelEvent *event)
 {

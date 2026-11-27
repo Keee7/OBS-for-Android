@@ -53,6 +53,7 @@ static const char *ndi_dlerror(void)
 #if defined(__ANDROID__)
 #include <android/log.h>
 #include <obs-android.h>
+#include <unistd.h>
 #endif
 
 static pthread_mutex_t g_ndi_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -60,9 +61,65 @@ static ndi_lib_handle_t g_ndi_lib = NULL;
 static struct ndi_api g_ndi_api;
 static int g_ndi_refs = 0;
 static bool g_ndi_initialized = false;
+static bool g_ndi_hx_bridge_ready = false;
 static char g_ndi_version[128] = {0};
 static char g_ndi_path[256] = {0};
 static char g_ndi_error[256] = {0};
+
+#if defined(__ANDROID__)
+static ndi_lib_handle_t g_hx_avutil_lib = NULL;
+static ndi_lib_handle_t g_hx_avcodec_lib = NULL;
+
+static void ensure_hx_symlink(const char *dir, const char *link_name, const char *target_path)
+{
+	if (!dir || !dir[0] || !link_name || !target_path || !target_path[0])
+		return;
+	char link_path[512];
+	snprintf(link_path, sizeof(link_path), "%s/%s", dir, link_name);
+	unlink(link_path);
+	(void)symlink(target_path, link_path);
+}
+
+/*
+ * Preload our MediaCodec-backed FFmpeg 7.x ABI bridge libraries (DT_SONAME =
+ * libavutil-ndi.so.59 / libavcodec-ndi.so.61) and mirror symlinks alongside
+ * libndi.so so libndi.so's dynamic HX loader resolves them via both Bionic's
+ * loaded-SONAME cache and DT_RUNPATH=$ORIGIN.
+ */
+static void prepare_mediacodec_hx_bridge(void)
+{
+	char nat_dir[256] = {0};
+	if (!obs_android_ndi_native_lib_dir(nat_dir, sizeof(nat_dir)) || !nat_dir[0])
+		return;
+
+	char avutil_so[384], avcodec_so[384];
+	snprintf(avutil_so, sizeof(avutil_so), "%s/libobs_ndi_avutil59.so", nat_dir);
+	snprintf(avcodec_so, sizeof(avcodec_so), "%s/libobs_ndi_avcodec61.so", nat_dir);
+
+	if (!g_hx_avutil_lib)
+		g_hx_avutil_lib = dlopen(avutil_so, RTLD_NOW | RTLD_GLOBAL);
+	if (!g_hx_avcodec_lib)
+		g_hx_avcodec_lib = dlopen(avcodec_so, RTLD_NOW | RTLD_GLOBAL);
+
+	const char *root = getenv("OBS_ROOT_PATH");
+	if (root && root[0]) {
+		char ndi_dir[384];
+		snprintf(ndi_dir, sizeof(ndi_dir), "%s/ndi", root);
+		ensure_hx_symlink(ndi_dir, "libavutil-ndi.so.59", avutil_so);
+		ensure_hx_symlink(ndi_dir, "libavcodec-ndi.so.61", avcodec_so);
+	}
+
+	g_ndi_hx_bridge_ready = (g_hx_avutil_lib != NULL && g_hx_avcodec_lib != NULL);
+	if (g_ndi_hx_bridge_ready) {
+		__android_log_print(ANDROID_LOG_INFO, "OBS-ndi",
+				    "MediaCodec NDI|HX bridge ready (%s + %s)", avutil_so, avcodec_so);
+	} else {
+		__android_log_print(ANDROID_LOG_WARN, "OBS-ndi",
+				    "MediaCodec NDI|HX bridge unavailable (avutil=%p avcodec=%p err=%s)",
+				    g_hx_avutil_lib, g_hx_avcodec_lib, ndi_dlerror());
+	}
+}
+#endif
 
 void ndi_runtime_default_dropin_path(char *out, size_t size)
 {
@@ -192,6 +249,10 @@ const struct ndi_api *ndi_runtime_acquire(void)
 		return &g_ndi_api;
 	}
 
+#if defined(__ANDROID__)
+	prepare_mediacodec_hx_bridge();
+#endif
+
 	/* 只接受应用私有目录里的运行库：$OBS_ROOT_PATH/ndi 与 Java 侧给出的
 	 * native lib dir。不再读环境变量、不再回退系统搜索路径。 */
 	char buf[384];
@@ -243,6 +304,14 @@ bool ndi_runtime_is_loaded(void)
 {
 	pthread_mutex_lock(&g_ndi_mtx);
 	const bool ok = g_ndi_initialized;
+	pthread_mutex_unlock(&g_ndi_mtx);
+	return ok;
+}
+
+bool ndi_runtime_has_hx_bridge(void)
+{
+	pthread_mutex_lock(&g_ndi_mtx);
+	const bool ok = g_ndi_hx_bridge_ready;
 	pthread_mutex_unlock(&g_ndi_mtx);
 	return ok;
 }

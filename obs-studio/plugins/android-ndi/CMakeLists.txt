@@ -29,3 +29,19 @@ endif()
 
 target_link_libraries(android-ndi PRIVATE OBS::libobs dl $<$<PLATFORM_ID:Android>:log>)
 set_target_properties_obs(android-ndi PROPERTIES FOLDER plugins/android-ndi PREFIX "")
+
+if(ANDROID)
+  # MediaCodec-backed FFmpeg 7.x ABI bridge for NDI|HX (H.264 / HEVC / AAC) decoding.
+  # Packaged into lib/arm64-v8a/ with DT_SONAME matching what libndi.so dynamically loads
+  # (libavcodec-ndi.so.61 and libavutil-ndi.so.59).
+  add_library(obs_ndi_avutil59 SHARED ndi-hx-avabi7.h ndi-hx-avutil59.c)
+  add_library(OBS::obs_ndi_avutil59 ALIAS obs_ndi_avutil59)
+  target_link_options(obs_ndi_avutil59 PRIVATE "-Wl,-soname,libavutil-ndi.so.59" "-Wl,-z,max-page-size=16384")
+  set_target_properties(obs_ndi_avutil59 PROPERTIES FOLDER plugins/android-ndi C_VISIBILITY_PRESET hidden NO_SONAME ON)
+
+  add_library(obs_ndi_avcodec61 SHARED ndi-hx-avabi7.h ndi-hx-avcodec61.c)
+  add_library(OBS::obs_ndi_avcodec61 ALIAS obs_ndi_avcodec61)
+  target_link_libraries(obs_ndi_avcodec61 PRIVATE mediandk log m)
+  target_link_options(obs_ndi_avcodec61 PRIVATE "-Wl,-soname,libavcodec-ndi.so.61" "-Wl,-z,max-page-size=16384")
+  set_target_properties(obs_ndi_avcodec61 PROPERTIES FOLDER plugins/android-ndi C_VISIBILITY_PRESET hidden NO_SONAME ON)
+endif()

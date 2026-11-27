@@ -24,6 +24,7 @@ import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.InputDevice;
 import android.view.Surface;
 import android.view.MotionEvent;
 import android.view.ViewGroup;
@@ -687,7 +688,24 @@ public final class ObsBrowserHost {
         if (old != null) { try { old.close(); } catch (RuntimeException e) { } }
         return image.getHardwareBuffer();
     }
-    public void reload() { ui.post(() -> { if (!closed && web != null) web.reload(); }); }
+    public void reload() {
+        ui.post(() -> {
+            if (!closed && web != null) {
+                Log.i(TAG, "reload url=" + web.getUrl());
+                web.stopLoading();
+                web.reload();
+            }
+        });
+    }
+    public void goBack() {
+        ui.post(() -> {
+            if (!closed && web != null) {
+                boolean can = web.canGoBack();
+                Log.i(TAG, "goBack canGoBack=" + can + " url=" + web.getUrl());
+                if (can) web.goBack();
+            }
+        });
+    }
     public void setVisible(boolean visible) { ui.post(() -> { if (!closed && web != null) { if (visible) web.onResume(); else web.onPause(); } }); }
     public void touch(int x, int y, int action) {
         ui.post(() -> {
@@ -702,9 +720,66 @@ public final class ObsBrowserHost {
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) touching = false;
         });
     }
+    public void rightClick(int x, int y) {
+        ui.post(() -> {
+            if (closed || web == null) return;
+            long now = SystemClock.uptimeMillis();
+            if (touching) {
+                dispatchTouch(MotionEvent.ACTION_CANCEL, x, y, now);
+                touching = false;
+            }
+            web.requestFocus();
+            dispatchMouseButton(MotionEvent.ACTION_DOWN, MotionEvent.BUTTON_SECONDARY, x, y, now, now);
+            dispatchMouseButton(MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.BUTTON_SECONDARY, x, y, now, now);
+            dispatchMouseButton(MotionEvent.ACTION_BUTTON_RELEASE, 0, x, y, now, now + 1);
+            dispatchMouseButton(MotionEvent.ACTION_UP, 0, x, y, now, now + 1);
+        });
+    }
+    public void wheel(int x, int y, int dx, int dy) {
+        ui.post(() -> {
+            if (closed || web == null) return;
+            long now = SystemClock.uptimeMillis();
+            MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[1];
+            props[0] = new MotionEvent.PointerProperties();
+            props[0].id = 0;
+            props[0].toolType = MotionEvent.TOOL_TYPE_MOUSE;
+            MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[1];
+            coords[0] = new MotionEvent.PointerCoords();
+            coords[0].x = x;
+            coords[0].y = y;
+            coords[0].setAxisValue(MotionEvent.AXIS_HSCROLL, dx / 40f);
+            coords[0].setAxisValue(MotionEvent.AXIS_VSCROLL, dy / 40f);
+            MotionEvent ev = MotionEvent.obtain(now, now, MotionEvent.ACTION_SCROLL, 1, props, coords,
+                    0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_MOUSE, 0);
+            try { web.dispatchGenericMotionEvent(ev); } finally { ev.recycle(); }
+        });
+    }
     private void dispatchTouch(int action, int x, int y, long now) {
         MotionEvent event = MotionEvent.obtain(downTime, now, action, x, y, 0);
         try { web.dispatchTouchEvent(event); } finally { event.recycle(); }
+    }
+    private void dispatchMouseButton(int action, int buttonState, int x, int y, long down, long now) {
+        MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[1];
+        props[0] = new MotionEvent.PointerProperties();
+        props[0].id = 0;
+        props[0].toolType = MotionEvent.TOOL_TYPE_MOUSE;
+        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[1];
+        coords[0] = new MotionEvent.PointerCoords();
+        coords[0].x = x;
+        coords[0].y = y;
+        coords[0].pressure = (action == MotionEvent.ACTION_DOWN) ? 1f : 0f;
+        coords[0].size = 1f;
+        MotionEvent ev = MotionEvent.obtain(down, now, action, 1, props, coords,
+                0, buttonState, 1f, 1f, 0, 0, InputDevice.SOURCE_MOUSE, 0);
+        try {
+            if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_UP) {
+                web.dispatchTouchEvent(ev);
+            } else {
+                web.dispatchGenericMotionEvent(ev);
+            }
+        } finally {
+            ev.recycle();
+        }
     }
     public int drainAudio(short[] out, int maxFrames, int[] outFormat) {
         synchronized (audioLock) {

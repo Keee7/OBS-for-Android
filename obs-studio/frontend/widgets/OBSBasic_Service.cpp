@@ -63,7 +63,12 @@ bool OBSBasic::LoadService()
 	}
 
 	const char *type;
-	obs_data_set_default_string(data, "type", "rtmp_common");
+#ifdef __ANDROID__
+	constexpr const char *kDefaultServiceType = "rtmp_custom";
+#else
+	constexpr const char *kDefaultServiceType = "rtmp_common";
+#endif
+	obs_data_set_default_string(data, "type", kDefaultServiceType);
 	type = obs_data_get_string(data, "type");
 
 	OBSDataAutoRelease settings = obs_data_get_obj(data, "settings");
@@ -102,7 +107,11 @@ bool OBSBasic::InitService()
 		return true;
 	}
 
+#ifdef __ANDROID__
+	service = obs_service_create("rtmp_custom", "default_service", nullptr, nullptr);
+#else
 	service = obs_service_create("rtmp_common", "default_service", nullptr, nullptr);
+#endif
 	if (!service) {
 		return false;
 	}
@@ -114,7 +123,11 @@ bool OBSBasic::InitService()
 obs_service_t *OBSBasic::GetService()
 {
 	if (!service) {
+#ifdef __ANDROID__
+		service = obs_service_create("rtmp_custom", NULL, NULL, nullptr);
+#else
 		service = obs_service_create("rtmp_common", NULL, NULL, nullptr);
+#endif
 		obs_service_release(service);
 	}
 	return service;

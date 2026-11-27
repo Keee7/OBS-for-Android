@@ -660,6 +660,11 @@ void obs_android_browser_reload(void *handle)
  const struct obs_android_browser_host *h = browser_host;
  if (h && h->reload && handle) h->reload(handle);
 }
+void obs_android_browser_go_back(void *handle)
+{
+ const struct obs_android_browser_host *h = browser_host;
+ if (h && h->go_back && handle) h->go_back(handle);
+}
 void obs_android_browser_destroy(void *handle)
 {
  const struct obs_android_browser_host *h = browser_host;
@@ -676,6 +681,16 @@ void obs_android_browser_touch(void *handle, int x, int y, int action)
 {
  const struct obs_android_browser_host *h = browser_host;
  if (h && h->touch && handle) h->touch(handle, x, y, action);
+}
+void obs_android_browser_right_click(void *handle, int x, int y)
+{
+ const struct obs_android_browser_host *h = browser_host;
+ if (h && h->right_click && handle) h->right_click(handle, x, y);
+}
+void obs_android_browser_wheel(void *handle, int x, int y, int dx, int dy)
+{
+ const struct obs_android_browser_host *h = browser_host;
+ if (h && h->wheel && handle) h->wheel(handle, x, y, dx, dy);
 }
 uint32_t obs_android_browser_read_audio(void *handle, int16_t *out, uint32_t max_frames, uint32_t *sample_rate,
 					uint32_t *channels)

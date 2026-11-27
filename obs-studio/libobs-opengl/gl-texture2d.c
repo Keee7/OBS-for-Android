@@ -134,6 +134,19 @@ void gs_texture_destroy(gs_texture_t *tex)
 	if (!tex)
 		return;
 
+	if (tex->device) {
+		for (int i = 0; i < GS_MAX_TEXTURES; i++)
+			if (tex->device->cur_textures[i] == tex)
+				tex->device->cur_textures[i] = NULL;
+		if (tex->device->cur_render_target == tex || (tex->fbo && tex->device->cur_fbo == tex->fbo)) {
+			device_set_render_target(tex->device, NULL, NULL);
+			if (tex->fbo && tex->device->cur_fbo == tex->fbo) {
+				gl_bind_framebuffer(GL_DRAW_FRAMEBUFFER, 0);
+				tex->device->cur_fbo = NULL;
+			}
+		}
+	}
+
 	if (tex->cur_sampler)
 		gs_samplerstate_destroy(tex->cur_sampler);
 

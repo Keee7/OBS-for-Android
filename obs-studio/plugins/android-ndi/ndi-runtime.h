@@ -48,6 +48,7 @@ void ndi_runtime_release(void);
 
 /* Copies diagnostic info about the loaded runtime (or last load error). */
 bool ndi_runtime_is_loaded(void);
+bool ndi_runtime_has_hx_bridge(void);
 void ndi_runtime_get_info(char *version_out, size_t version_size, char *path_out, size_t path_size, char *error_out,
 			  size_t error_size);
 

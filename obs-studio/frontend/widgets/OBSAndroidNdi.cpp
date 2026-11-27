@@ -344,7 +344,7 @@ static void showNdiOutputSettingsDialog(QWidget *parent)
 		if (hasUser) {
 			const QString ver = probeNdiRuntimeVersion(userSo);
 			if (!ver.isEmpty()) {
-				rtStatus->setText(QStringLiteral("状态：已就绪（用户导入 · %1）").arg(ver));
+				rtStatus->setText(QStringLiteral("状态：已就绪（用户导入 · %1 · 已启用 MediaCodec NDI|HX 硬件解码）").arg(ver));
 			} else {
 				rtStatus->setText(QStringLiteral("状态：已发现用户导入的 libndi.so，但加载校验失败，请重新导入官方 arm64-v8a 版本。"));
 			}
@@ -355,7 +355,7 @@ static void showNdiOutputSettingsDialog(QWidget *parent)
 			const QString bundledSo = QString::fromUtf8(natDir) + QStringLiteral("/libndi.so");
 			const QString ver = probeNdiRuntimeVersion(bundledSo);
 			if (!ver.isEmpty()) {
-				rtStatus->setText(QStringLiteral("状态：已就绪（本地验证内置 · %1）").arg(ver));
+				rtStatus->setText(QStringLiteral("状态：已就绪（本地验证内置 · %1 · 已启用 MediaCodec NDI|HX 硬件解码）").arg(ver));
 				return;
 			}
 		}

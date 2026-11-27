@@ -529,7 +529,8 @@ static void format_status_text(struct ndi_source *s, char *out, size_t out_sz)
 		if (ndi_runtime_is_loaded()) {
 			char ver[128] = {0};
 			ndi_runtime_get_info(ver, sizeof(ver), NULL, 0, NULL, 0);
-			snprintf(out, out_sz, "%s (%s)", obs_module_text("Ndi.Status.Ready"), ver);
+			snprintf(out, out_sz, "%s (%s%s)", obs_module_text("Ndi.Status.Ready"), ver,
+				 ndi_runtime_has_hx_bridge() ? " + MediaCodec HX" : "");
 		} else {
 			snprintf(out, out_sz, "%s", obs_module_text("Ndi.Status.RuntimeMissing"));
 		}
@@ -592,14 +593,13 @@ static bool on_refresh_sources(obs_properties_t *props, obs_property_t *property
 
 static bool on_extra_ips_modified(void *priv, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
 {
+	UNUSED_PARAMETER(props);
 	UNUSED_PARAMETER(property);
-	struct ndi_source *s = priv;
+	/* Keep the background finder in sync without returning true: rebuilding the
+	 * properties view on every keystroke destroys the focused QLineEdit and
+	 * dismisses the Android soft keyboard after each character. */
 	ndi_finder_set_source_extra_ips(priv, obs_data_get_string(settings, "ndi_extra_ips"));
-	obs_property_t *list = obs_properties_get(props, "ndi_source_name");
-	if (list)
-		populate_source_list(list, obs_data_get_string(settings, "ndi_source_name"));
-	refresh_status_property(props, s);
-	return true;
+	return false;
 }
 
 static obs_properties_t *ndi_source_properties(void *data)

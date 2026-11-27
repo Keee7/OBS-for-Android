@@ -188,31 +188,51 @@ public final class ObsProjectionHost extends Activity {
             return new int[] { 0, 0, 0, 0 };
         }
 
-        int w = 0, h = 0, mw = 0, mh = 0;
+        int w = 0, h = 0, mw = 0, mh = 0, bwm = 0, bhm = 0;
+        final int rot = d.getRotation();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             final android.view.Display.Mode m = d.getMode();
             if (m != null) {
                 mw = m.getPhysicalWidth();
                 mh = m.getPhysicalHeight();
-                w = mw;
-                h = mh;
+            }
+        }
+        /* Display.Mode reports unrotated panel pixels and does not account for panel installOrientation
+         * (common on tablets whose physical panel is portrait with ROTATION_90/270 installOrientation).
+         * MaximumWindowMetrics (API 30+) and Display.getRealSize() already return full display pixel
+         * bounds in the current orientation (unaffected by wm density). */
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                final Context displayCtx = ctx.getApplicationContext().createDisplayContext(d);
+                final android.view.WindowManager wm =
+                    (android.view.WindowManager) displayCtx.getSystemService(Context.WINDOW_SERVICE);
+                if (wm != null) {
+                    final android.graphics.Rect bounds = wm.getMaximumWindowMetrics().getBounds();
+                    bwm = bounds.width();
+                    bhm = bounds.height();
+                    if (bwm > 0 && bhm > 0) {
+                        w = bwm;
+                        h = bhm;
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "getMaximumWindowMetrics 失败，回退到 getRealSize: " + t);
             }
         }
         android.graphics.Point rs = new android.graphics.Point();
-        d.getRealSize(rs); // 只当兜底与对照，不当真相
-        if (w <= 0 || h <= 0) {
+        d.getRealSize(rs);
+        if ((w <= 0 || h <= 0) && rs.x > 0 && rs.y > 0) {
             w = rs.x;
             h = rs.y;
         }
-
-        final int rot = d.getRotation();
-        /* 旋转常量在 Surface 上，不在 Display 上 —— getRotation() 的返回注解是 @Surface.Rotation。
-         * 写成 Display.ROTATION_90 编不过（javap 过 android-35 的 android.jar：Display 那侧只有
-         * getRotation()，ROTATION_0/90/180/270 四个都在 Surface 上）。0=竖 1=横 2=倒竖 3=倒横。 */
-        if (rot == android.view.Surface.ROTATION_90 || rot == android.view.Surface.ROTATION_270) {
-            final int t = w;
-            w = h;
-            h = t;
+        if ((w <= 0 || h <= 0) && mw > 0 && mh > 0) {
+            w = mw;
+            h = mh;
+            if (rot == android.view.Surface.ROTATION_90 || rot == android.view.Surface.ROTATION_270) {
+                final int t = w;
+                w = h;
+                h = t;
+            }
         }
 
         android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
@@ -222,8 +242,8 @@ public final class ObsProjectionHost extends Activity {
         final int dpi = dm.densityDpi;
         if (w != lastMeasured[0] || h != lastMeasured[1] || dpi != lastMeasured[2] || rot != lastMeasured[3]) {
             lastMeasured = new int[] { w, h, dpi, rot };
-            Log.i(TAG, "屏幕采集参数测量：mode=" + mw + "x" + mh + "，旋转=" + rot + " -> " + w + "x" + h + "@" + dpi
-                               + "dpi（getRealSize=" + rs.x + "x" + rs.y + "）");
+            Log.i(TAG, "屏幕采集参数测量：maxMetrics=" + bwm + "x" + bhm + "，getRealSize=" + rs.x + "x" + rs.y
+                               + "，mode=" + mw + "x" + mh + "，旋转=" + rot + " -> " + w + "x" + h + "@" + dpi + "dpi");
         }
         return new int[] { w, h, dpi, rot };
     }
