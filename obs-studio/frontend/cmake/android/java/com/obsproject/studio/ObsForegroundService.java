@@ -247,7 +247,7 @@ public final class ObsForegroundService extends Service {
      *
      * 两条约束决定了它的形状：① 服务没在跑时什么都不做（不能为了改类型白起一个进程），
      * 反正下一次 start() 会按当时的投影态自己算；② startForeground 必须在主线程，而调用方
-     * （ObsProjectionHost 的 Activity 回调）不保证，所以一律 post 一次，不假设调用线程。
+     * （ObsProjectionHost / ObsProjectionConsentActivity 的回调）不保证，所以一律 post 一次，不假设调用线程。
      */
     public static void retypeIfNeeded() {
         final ObsForegroundService svc = instance;

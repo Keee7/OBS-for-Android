@@ -28,13 +28,13 @@ public final class ObsProjectionConsentActivity extends Activity {
             finish();
             return;
         }
-        final MediaProjectionManager mpm =
-            ObsProjectionHost.acquireProjectionManager(getApplicationContext(), myGen);
-        if (mpm == null) {
-            finish();
-            return;
-        }
         try {
+            final MediaProjectionManager mpm =
+                ObsProjectionHost.acquireProjectionManager(getApplicationContext(), myGen);
+            if (mpm == null) {
+                finish();
+                return;
+            }
             if (saved == null) {
                 startActivityForResult(mpm.createScreenCaptureIntent(), REQUEST_CODE);
                 Log.i(ObsProjectionHost.TAG, "已通过 createScreenCaptureIntent 发起系统录屏授权请求");

@@ -20,7 +20,7 @@ QString obsAndroidPermissionsStatus();
 void obsAndroidPermissionsRegisterCameraBus();
 
 // P-18-a：把屏幕采集的同意总线注册进 libobs 的 obs_android_screen_* —— 两格：问有没有令牌 /
-// 去要一次令牌。Java 侧是 ObsProjectionHost（一个收 onActivityResult 的透明代理 Activity），
+// 去要一次令牌。Java 侧由 ObsProjectionHost 管理状态，ObsProjectionConsentActivity 负责收 onActivityResult，
 // 不是这个文件里那个 ObsPermissionHost：MediaProjection 是一次性 token、系统那边没有可查状态。
 // 不调这一句的话采集插件里 obs_android_screen_ready() 恒 false —— 属性页会说"没令牌"，
 // 而用户分不清"没同意"与"壳没接线"。注册幂等，App 启动时调一次即可。
