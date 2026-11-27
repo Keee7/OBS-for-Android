@@ -72,7 +72,7 @@ void ndi_runtime_default_dropin_path(char *out, size_t size)
 	if (root && root[0])
 		snprintf(out, size, "%s/ndi/libndi.so", root);
 	else
-		snprintf(out, size, "libndi.so");
+		out[0] = '\0';
 }
 
 static bool resolve_required_symbols(ndi_lib_handle_t h, struct ndi_api *api, char *err, size_t err_size)
@@ -96,7 +96,7 @@ static bool resolve_required_symbols(ndi_lib_handle_t h, struct ndi_api *api, ch
 
 	REQ_SYM(initialize, "NDIlib_initialize");
 	REQ_SYM(destroy, "NDIlib_destroy");
-	OPT_SYM(version, "NDIlib_version");
+	REQ_SYM(version, "NDIlib_version");
 
 	REQ_SYM(find_create_v2, "NDIlib_find_create_v2");
 	REQ_SYM(find_destroy, "NDIlib_find_destroy");
@@ -122,6 +122,25 @@ static bool resolve_required_symbols(ndi_lib_handle_t h, struct ndi_api *api, ch
 	return true;
 }
 
+static bool ndi_is_supported_version(const char *version)
+{
+	if (!version)
+		return false;
+	const char *p = version;
+	while (*p) {
+		if (*p >= '0' && *p <= '9') {
+			char *end = NULL;
+			long major = strtol(p, &end, 10);
+			if (end != p && (*end == '.' || *end == '\0'))
+				return major == 5 || major == 6;
+			p = end;
+		} else {
+			p++;
+		}
+	}
+	return false;
+}
+
 static bool try_open_candidate(const char *candidate)
 {
 	if (!candidate || !candidate[0])
@@ -138,6 +157,14 @@ static bool try_open_candidate(const char *candidate)
 		ndi_dlclose(h);
 		return false;
 	}
+	/* NDIlib_version 已是必需符号：初始化前先解析主版本，只接受 5 或 6。 */
+	const char *runtime_version = api.version();
+	if (!ndi_is_supported_version(runtime_version)) {
+		snprintf(g_ndi_error, sizeof(g_ndi_error), "%s: unsupported NDI runtime version \"%s\" (need major 5 or 6)",
+			 candidate, runtime_version ? runtime_version : "unknown");
+		ndi_dlclose(h);
+		return false;
+	}
 	if (!api.initialize()) {
 		snprintf(g_ndi_error, sizeof(g_ndi_error), "%s: NDIlib_initialize() returned false", candidate);
 		ndi_dlclose(h);
@@ -147,8 +174,7 @@ static bool try_open_candidate(const char *candidate)
 	g_ndi_api = api;
 	g_ndi_initialized = true;
 	snprintf(g_ndi_path, sizeof(g_ndi_path), "%s", candidate);
-	const char *ver = api.version ? api.version() : "NDI runtime";
-	snprintf(g_ndi_version, sizeof(g_ndi_version), "%s", ver ? ver : "NDI runtime");
+	snprintf(g_ndi_version, sizeof(g_ndi_version), "%s", runtime_version);
 	g_ndi_error[0] = '\0';
 #if defined(__ANDROID__)
 	__android_log_print(ANDROID_LOG_INFO, "OBS-ndi", "Loaded NDI runtime: %s (%s) send=%d", g_ndi_path,
@@ -166,23 +192,12 @@ const struct ndi_api *ndi_runtime_acquire(void)
 		return &g_ndi_api;
 	}
 
-	const char *env_path = getenv("OBS_NDI_LIB_PATH");
-	if (env_path && env_path[0] && try_open_candidate(env_path)) {
-		g_ndi_refs = 1;
-		pthread_mutex_unlock(&g_ndi_mtx);
-		return &g_ndi_api;
-	}
-
+	/* 只接受应用私有目录里的运行库：$OBS_ROOT_PATH/ndi 与 Java 侧给出的
+	 * native lib dir。不再读环境变量、不再回退系统搜索路径。 */
 	char buf[384];
 	const char *root = getenv("OBS_ROOT_PATH");
 	if (root && root[0]) {
 		snprintf(buf, sizeof(buf), "%s/ndi/libndi.so", root);
-		if (try_open_candidate(buf)) {
-			g_ndi_refs = 1;
-			pthread_mutex_unlock(&g_ndi_mtx);
-			return &g_ndi_api;
-		}
-		snprintf(buf, sizeof(buf), "%s/lib/libndi.so", root);
 		if (try_open_candidate(buf)) {
 			g_ndi_refs = 1;
 			pthread_mutex_unlock(&g_ndi_mtx);
@@ -201,12 +216,6 @@ const struct ndi_api *ndi_runtime_acquire(void)
 		}
 	}
 #endif
-
-	if (try_open_candidate("libndi.so")) {
-		g_ndi_refs = 1;
-		pthread_mutex_unlock(&g_ndi_mtx);
-		return &g_ndi_api;
-	}
 
 	pthread_mutex_unlock(&g_ndi_mtx);
 	return NULL;
