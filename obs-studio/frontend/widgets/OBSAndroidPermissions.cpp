@@ -6,14 +6,14 @@
 #include <QJniEnvironment>
 #include <QJniObject>
 
-/* P-18-b 的"接面"那一格要 ANativeWindow_toSurface：它属于 libandroid，而**只有前端 link 了它**
+/* "接面"那一格要 ANativeWindow_toSurface：它属于 libandroid，而**只有前端 link 了它**
  * （build.ninja 里 frontend/libobs_*.so 那行有 -landroid -lmediandk，插件按 android-camera 的取舍
  * 一律不 link android）—— 所以这道转换只能落在本文件，插件把 ANativeWindow* 当不透明 void* 递过来。
  * minSdk 29 ≥ 26，这个符号不需要运行时判档。 */
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 
-/* P-17-f 那第三条腿要的东西：<QGuiApplication> 给 applicationState / applicationStateChanged
+/* 第三条腿要的东西：<QGuiApplication> 给 applicationState / applicationStateChanged
  * （Qt 6 把它们从 QCoreApplication 搬到了 QGuiApplication），<QObject> 给 QObject::connect
  * （两处坑写在下面那次 connect 的注释里），<atomic> 给那个跨线程布尔。 */
 #include <QGuiApplication>
@@ -73,7 +73,7 @@ QString obsAndroidPermissionsStatus()
 	return callDescribe(hostActivity());
 }
 
-/* ---------------- P-17：相机权限总线（libobs ↔ ObsPermissionHost） ---------------- */
+/* 相机权限总线（libobs ↔ ObsPermissionHost） */
 
 /* 为什么这一格必须由前端来填：插件 .so 只链 libobs、没有 JavaVM，而 CAMERA 授予态只有 Java 的
  * Context 问得到（Camera2 NDK 里没有 checkSelfPermission）。总线本体在 libobs/obs-android.h，
@@ -101,15 +101,14 @@ static int cameraRequestPermission(void *param)
 						       act.object<jobject>());
 }
 
-/* ---------------- P-17-f：前后台 → "此刻该不该占着相机" ---------------- */
+/* 前后台 → "此刻该不该占着相机" */
 
 /* 为什么这一格也要前端来填（跟权限那两条不是一个理由）：Camera2 的 Activity 生命周期只有
  * Java/Qt 那侧看得见 —— 插件是纯 C、没有 Activity 回调，而 Android 的政策是"你的窗口停了
  * 就该把相机放下"，不放的代价是下次进应用直接 ACAMERA_ERROR_CAMERA_IN_USE。
  *
  * 为什么**缓存**而不是一问就去读 applicationState()：这条腿是在**视频线程**上被 camera2_video_tick
- * 读的，而 QGuiApplication::applicationState()（Qt 6.9.3，android_x86_64/include/QtGui/
- * qguiapplication.h:126，信号在同文件 :153）在 Qt 里属于平台插件的 GUI 线程状态。
+ * 读的，而 QGuiApplication::applicationState() 属于平台插件的 GUI 线程状态。
  * 所以只在 UI 线程收到 applicationStateChanged 时写一次这个原子量，别的线程只读。 */
 static std::atomic<bool> g_captureAllowed{true};
 
@@ -119,19 +118,11 @@ static bool cameraCaptureAllowed(void *param)
 	return g_captureAllowed.load();
 }
 
-/* 交还的判据是"面停了"= Hidden/Suspended（Android 的 onStop），**不含 Inactive**（onPause 那一格）。
- *
- * 这条是量出来的，不是我推的：b107 原本写的是"只有 Active 才算该持有"，理由是"两边后果不对称，
- * 取保守那一头" —— 这个理由漏了一步：**保守只有在"暂时的状态之后一定还会再来一次真信号"时才成立**。
- * 实测它不成立：19:38:06 一个 monkey 发的 LAUNCH_SINGLE_TOP 重启意图让 Qt 连着发了
- * state=4 → state=2，然后就**停**在 2；同一时刻 dumpsys 说 topResumedActivity=QtActivity、
- * state=RESUMED、mCurrentFocus 也还是我们，进程 16293 活着，日志之后 109 秒再没一行。
- * 后果从"保守"变成了"永久没画面"：相机被交还，而 g_capture_allowed 再没有翻回 true，
- * 插件 f 腿第 4 支那个重开条件（allowed）永远不满足 —— 用户看到的是一个不报错的黑源。
- *
- * 换成现在的判据，同一趟生命周期各状态的落点（MuMu 实测）：HOME → 2 然后 0（交还照旧发生，
- * 立案时那条硬约束②"退后台不交还设备就是 CAMERA_IN_USE"仍然满足）；对话框/下拉栏/重启意图抢
- * 焦点 → 停在 2（画面不断）；回前台 → 4（重开，实测 11 ms）。
+/* 交还的判据是"面停了" = Hidden/Suspended（Android 的 onStop），**不含 Inactive**（onPause 那一格）。
+ * 只按"Active 才算持有"会漏掉一种情况：Qt 可能连发 state=4 → 2 后停在 2，而应用仍在前台，
+ * 这时相机被交还、g_captureAllowed 再没翻回 true，用户看到的是一个不报错的黑源。
+ * 换成现在的判据后：HOME → 2 然后 0（交还照旧发生）；对话框/下拉栏/重启意图抢焦点 → 停在 2
+ * （画面不断）；回前台 → 4（重开）。
  *
  * 单独提成一个函数、不写两遍：下面冷启动起头那一处也用它，判据只有一份。 */
 static bool stateAllowsCapture(Qt::ApplicationState state)
@@ -169,12 +160,11 @@ void obsAndroidPermissionsRegisterCameraBus()
 	s_bus_registered = true;
 
 	/* 先按"现在这一刻"的态起头，再挂信号：注册发生在建窗口之后（OBSBasic 构造里），
-	 * 那时可能还没 Active —— b107 用旧判据（只认 Active）就在这儿起过冲突：冷启动那一拍
-	 * 量到"可采集初值=0"，源 activate 后刚开起来 139 ms 就被自己拆掉（19:36:34.352 开、
-	 * .492 拆），等 .525 的 state=4 再重开。用同一个判据之后 Inactive 也算可持有，
-	 * 这一趟开→拆→开没了；万一将来又在建窗口之前注册，这一句也让第一拍就是对的。 */
+	 * 那时可能还没 Active，
+	 * 用同一个判据之后 Inactive 也算可持有，
+	 * 万一将来又在建窗口之前注册，这一句也让第一拍就是对的。 */
 	g_captureAllowed.store(stateAllowsCapture(QGuiApplication::applicationState()));
-	/* 两个坑，都是 b107 编出来的、不是推定：
+	/* 两个坑：
 	 *  ① Qt 6 没有全局 connect()（不加限定名只在 QObject 派生类的成员函数里捡得到，
 	 *     本文件这个是自由函数）⇒ 写 QObject::connect，与 dialogs/OBSAbout.cpp:71 同形。
 	 *  ② 三连参那个"无 context"重载在这一版里根本不存在：前端这个 TU 的 DEFINES 里有
@@ -194,7 +184,7 @@ void obsAndroidPermissionsRegisterCameraBus()
 	     (int)g_captureAllowed.load());
 }
 
-/* ---------------- P-18-a：屏幕采集同意总线（libobs ↔ ObsProjectionHost） ---------------- */
+/* 屏幕采集同意总线（libobs ↔ ObsProjectionHost） */
 
 /* Java 侧宿主（frontend/cmake/android/java/com/obsproject/studio/ObsProjectionHost.java）。
  * 与权限那个类分开的理由写在那文件的头注释里：MediaProjection 没有可查状态，必须真收得到
@@ -205,13 +195,10 @@ static const char kProjectionClass[] = "com/obsproject/studio/ObsProjectionHost"
  * 不是 requestPermissions（那个才只能在 Activity 上调）。拿不到时传个无效 jobject 下去，
  * Java 侧 ctx 判空 → -1，与相机那两条腿同一个失败形状。
  *
- * 口名是查出来的不是推的：`javap -s` 扫 Qt6Android.jar 里的 org.qtproject.qt.android.QtNative，
- * 静态取上下文的只有两个 —— `activity()` ()Landroid/app/Activity; 与 `getContext()`
- * ()Landroid/content/Context;。**没有 application()**（我第一版按别的框架的习惯写了它，
- * 那样运行时会 NoSuchMethodError → jobject 为空 → 每次 request_consent 都返回 -1，
- * 而这在属性页上看起来与"用户没同意"是同一种表现）。
- * 这两个口都是包内可见，JNI 那侧照样调得到：上面 hostActivity() 调 activity() 已经是 P-17
- * 实测跑通过的同一条路。 */
+ * QtNative 静态取上下文的只有 `activity()` ()Landroid/app/Activity; 与 `getContext()`
+ * ()Landroid/content/Context;，**没有 application()**（用错会 NoSuchMethodError → jobject
+ * 为空 → request_consent 恒返回 -1，在属性页上看起来与"用户没同意"一样）。
+ * 这两个口都是包内可见，JNI 那侧照样调得到：上面 hostActivity() 调 activity() 是同一条路。 */
 static QJniObject hostContext()
 {
 	return QJniObject::callStaticObjectMethod("org/qtproject/qt/android/QtNative", "getContext",
@@ -242,7 +229,7 @@ static int screenRequestConsent(void *param)
 						       ctx.object<jobject>());
 }
 
-/* ---------------- P-18-b：把令牌接成一块投影面（量的、接的、收的三条腿） ---------------- */
+/* 把令牌接成一块投影面（量的、接的、收的三条腿） */
 
 /* 采集尺寸这一格只做一件事：把 Java 那边 Display.getMode() 的量取结果搬到 native 的 uint32_t 里。
  * 为什么非要绕这一圈而不在前端问 QScreen：QScreen 给的是**逻辑**像素（这台 wm density 覆盖成 240
@@ -250,7 +237,7 @@ static int screenRequestConsent(void *param)
  * 只是画面与屏幕不成比例 —— 这类错只能从源头掐掉：源头就是 Java。
  * hostContext() 拿不到时返回 false（与 request_consent 那格同一个失败形状：问不到就说问不到）。
  *
- * 一次往返拿四个数（d 腿起）：源每秒要问一次尺寸，好发现旋转/分辨率变了。原先那三格
+ * 一次往返拿四个数：源每秒要问一次尺寸，好发现旋转/分辨率变了。原先那三格
  * captureWidth/Height/Dpi 每次问要跑三遍完整量取，日志也跟着三遍。 */
 static bool screenDisplaySize(void *param, uint32_t *width, uint32_t *height, uint32_t *dpi)
 {
@@ -357,7 +344,7 @@ static void screenStopDisplay(void *param)
 					   why.object<jstring>());
 }
 
-/* ---------------- P-18-d：把令牌也交回去（第六格） ---------------- */
+/* 把令牌也交回去（第六格） */
 
 /* 与上面那格的分别写进 obs-android.h 的结构体注释了，这里只记落地：Java 侧 stopProjection 自己
  * 就按"先收面、再 stop 令牌、再落意图位、再重算前台类型"那一步不落顺序做完，所以这一格不需要
@@ -374,7 +361,7 @@ static void screenReleaseConsent(void *param)
 		     screenDescribe().toUtf8().constData());
 }
 
-/* ---------------- P-18-e：系统内录三条腿 ---------------- */
+/* 系统内录三条腿 */
 
 /* drainAudio(short[] out, int maxFrames) 一问就是 10 ms 一发（一秒一百次），所以这里的 short[]
  * 养在文件级复用：每次新建就是每秒一百个临时对象（Java 侧那句注释给的是同一个理由）。
@@ -498,7 +485,7 @@ static uint32_t screenReadAudio(void *param, int16_t *out, uint32_t max_frames)
 	 * 判 env 有效再解引用：QJniEnvironment 拿不到 JNIEnv 时 jniEnv() 给空指针，
 	 * 而 operator-> 就是它 —— 少这一格判空是段错误，不是"读不到"。
 	 * （"Qt 会不会替外来线程 attach"这件事不靠读源码断定：屏幕尺寸那一格本来就是 libobs
-	 * 的视频线程在每秒问一次、P-18-b/d 两轮的日志里都是真数，外来线程走得通是量出来的。） */
+	 * 的视频线程在每秒问一次、日志里都是真数，外来线程走得通是量出来的。） */
 	QJniEnvironment env;
 	if (!env.isValid()) {
 		static bool warned = false;
@@ -574,17 +561,6 @@ static const struct obs_android_screen_host kScreenHost = {
 	screenCaptureError,
 };
 
-static bool hardwareDecoderQuery(const char *mime, char *out, size_t size)
-{
-    auto type = QJniObject::fromString(QString::fromUtf8(mime));
-    auto name = QJniObject::callStaticObjectMethod("com/obsproject/studio/ObsCodecCapabilities", "findHardwareDecoder",
-        "(Ljava/lang/String;)Ljava/lang/String;", type.object<jstring>());
-    QByteArray bytes = name.toString().toUtf8();
-    if (bytes.isEmpty() || size <= size_t(bytes.size())) return false;
-    memcpy(out, bytes.constData(), size_t(bytes.size()) + 1);
-    return true;
-}
-
 void obsAndroidPermissionsRegisterScreenBus()
 {
 	static bool s_bus_registered = false;
@@ -593,10 +569,9 @@ void obsAndroidPermissionsRegisterScreenBus()
 	s_bus_registered = true;
 
 	obs_android_set_screen_host(&kScreenHost);
-	obs_android_set_decoder_query(hardwareDecoderQuery);
 	obs_android_set_screen_gpu_host(&kScreenGpuHost);
 
-	/* 这一行是 P-18-a/b/d/e 的冒烟抓手。几格在这里**现调**（ready / has_consent / display_size /
+	/* 几格在这里**现调**（ready / has_consent / display_size /
 	 * start_audio / stop_audio）：本轮还没有任何采集源去问它们，所以"native → JNI → Java 走得通"
 	 * 这件事只有靠这一行才有一手证据（打出 ready=1 就说明总线指针对了、JNI 方法名签名对了、类真在 APK 里）。
 	 * 注：has_consent 在这里必然读到 =0 —— 令牌不跨进程活，冷启动那一刻手上没有；

@@ -13,22 +13,6 @@ import java.util.LinkedHashMap;
 
 /** Strict candidates only: Surface/YUV input, real hardware, requested size/rate and mode. */
 public final class ObsCodecCapabilities {
-    public static String findHardwareDecoder(String mime) {
-        for (MediaCodecInfo info : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
-            try {
-                if (info.isEncoder() || info.isAlias() || !info.isHardwareAccelerated() || info.isSoftwareOnly()) continue;
-                for (String type : info.getSupportedTypes()) {
-                    if (!type.equalsIgnoreCase(mime)) continue;
-                    MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(type);
-                    if (caps.isFeatureRequired(MediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback)
-                        || caps.isFeatureRequired(MediaCodecInfo.CodecCapabilities.FEATURE_TunneledPlayback)) continue;
-                    Log.i(TAG, "hardware decoder mime=" + mime + " component=" + info.getName());
-                    return info.getName();
-                }
-            } catch (IllegalArgumentException | SecurityException e) { Log.w(TAG, "Ignoring decoder", e); }
-        }
-        return "";
-    }
     private static final String TAG = "ObsCodecCapabilities";
     private ObsCodecCapabilities() {}
     private static final LinkedHashMap<String, String[]> cache = new LinkedHashMap<>();

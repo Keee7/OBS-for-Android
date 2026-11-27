@@ -114,7 +114,7 @@ static void log_android_version(void)
 
 static void log_abi_info(void)
 {
-	/* 运行时的 ro.product.cpu.abi 可被模拟器改写（MuMu 上 arm64 包会报告 arm），
+	/* 运行时的 ro.product.cpu.abi 可被模拟器改写，
 	 * 因此 ABI 只能取编译期宏。 */
 #if defined(__aarch64__)
 	const char *abi = "arm64-v8a";
@@ -297,7 +297,7 @@ void obs_android_usb_close(int fd)
 }
 
 /* ------------------------------------------------------------------------- */
-/* A4：Android 音频输入设备总线（见 obs-android.h 的说明）                     */
+/* Android 音频输入设备总线（见 obs-android.h 的说明）                     */
 /* ------------------------------------------------------------------------- */
 
 /* 指针的读写与 USB 总线同一套取舍：注册只发生在 App 启动/退出，读发生在视频线程与
@@ -422,7 +422,7 @@ void obs_android_audio_remove_route_callback(obs_android_audio_route_cb cb, void
 }
 
 /* ------------------------------------------------------------------------- */
-/* P-17：内置摄像头的权限总线（见 obs-android.h 的说明）                          */
+/* 内置摄像头的权限总线（见 obs-android.h 的说明）                          */
 /* ------------------------------------------------------------------------- */
 
 /* 指针读写与上面两条总线同一套取舍：注册只发生在 App 启动/退出，读发生在视频线程与 UI 线程，
@@ -471,7 +471,7 @@ bool obs_android_camera_capture_allowed(void)
 }
 
 /* ------------------------------------------------------------------------- */
-/* P-18-a：屏幕采集同意状态总线（见 obs-android.h 的说明）                        */
+/* 屏幕采集同意状态总线（见 obs-android.h 的说明）                        */
 /* ------------------------------------------------------------------------- */
 
 /* 指针读写与前三条总线同一套取舍：注册只发生在 App 启动/退出，读发生在视频线程与 UI 线程，
@@ -551,7 +551,7 @@ bool obs_android_screen_start_display(void *native_window)
 
 /* 没有返回值：收面这件事只有"做了"和"本来就没在做"两种状态，都不需要告诉调用方。
  * 总线没接线时也直接返回 —— 注销总线（退出时）晚于源的 deactivate 是正常次序，
- * 反过来时这一格就是那条"收尾跑在注销之后"的实际路径（见 plan.md §八 风险 3 的教训）。 */
+ * 反过来时这一格就是那条"收尾跑在注销之后"的实际路径。 */
 void obs_android_screen_stop_display(void)
 {
 	const struct obs_android_screen_host *h = screen_host;
@@ -572,7 +572,7 @@ void obs_android_screen_capture_error(char *out, size_t size)
 	out[size - 1] = 0;
 }
 
-/* ---- P-18-e：系统内录三格。全部 fail-closed，理由写在 obs-android.h 那一段里。 ---- */
+/* ---- 系统内录三格。全部 fail-closed，理由写在 obs-android.h 那一段里。 ---- */
 
 bool obs_android_screen_start_audio(uint32_t *sample_rate, uint32_t *channels)
 {
@@ -695,16 +695,6 @@ static void *android_java_vm;
 void obs_android_set_java_vm(void *vm) { android_java_vm = vm; }
 void *obs_android_get_java_vm(void) { return android_java_vm; }
 
-static bool (*decoder_query)(const char *, char *, size_t);
-void obs_android_set_decoder_query(bool (*query)(const char *, char *, size_t)) { decoder_query = query; }
-bool obs_android_find_hardware_decoder(const char *mime, char *out, size_t size)
-{
- if (!out || !size) return false;
- out[0] = 0;
- bool found = decoder_query && decoder_query(mime, out, size);
- out[size - 1] = 0;
- return found && out[0];
-}
 void obs_android_set_screen_gpu_host(const struct obs_android_screen_gpu_host *host) { screen_gpu_host = host; }
 void *obs_android_screen_gpu_create(uint32_t texture, uint32_t width, uint32_t height, uint32_t dpi)
 {

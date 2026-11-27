@@ -52,9 +52,9 @@
 #include "widgets/OBSAndroidAudio.hpp"
 #include "widgets/OBSAndroidDisplay.hpp"
 #include "widgets/OBSAndroidKeepAlive.hpp" // 前台保活服务语言同步
-#include "widgets/OBSAndroidPath.hpp" // 3-4：openUrl(本地路径) 的 Android 替代
+#include "widgets/OBSAndroidPath.hpp" // openUrl(本地路径) 的 Android 替代
 #include <QAbstractButton>
-#include <QAbstractScrollArea> // 3-4 触摸：长按坐标要按 viewport 系给（itemAt/exec 都吃这个系）
+#include <QAbstractScrollArea> // 触摸：长按坐标要按 viewport 系给（itemAt/exec 都吃这个系）
 #include <QAbstractSlider>
 #include <QAbstractItemView>
 #include <QAbstractSpinBox>
@@ -66,9 +66,9 @@
 #include <QScreen>
 #include <QSlider>
 #include <QTextEdit>
-#include <QComboBox> // P-8 触摸：组合框弹层探针要认出按下落在的是不是 QComboBox
-#include <QContextMenuEvent> // 3-4 触摸：长按合成右键
-#include <QGestureEvent> // P-8 探针：认出 TapAndHold 手势
+#include <QComboBox>
+#include <QContextMenuEvent> // 触摸：长按合成右键
+#include <QGestureEvent>
 #include <QInputMethod>
 #include <QJniObject>
 #include <QMenu>
@@ -78,9 +78,6 @@
 #include <QWindow>
 #include <memory>
 #include <android/log.h>
-// P-1 装载轨迹：APK 不是 debuggable，blog() 只进日志文件不进 logcat，实测看不看得到全靠这条。
-#define P1LOG(...) __android_log_print(ANDROID_LOG_INFO, "P1-LOAD", __VA_ARGS__)
-#include <android-plugin-modules.h> // 构建期由 plugins/ 白名单生成
 #endif
 
 #include <chrono>
@@ -1023,25 +1020,20 @@ std::vector<UpdateBranch> OBSApp::GetBranches()
 }
 
 #ifdef __ANDROID__
-/* Android 触摸/按键补齐。两件事性质相同 —— 平台把事件送进来了，但 OBS 那套桌面语义没人接 ——
+/* Android 触摸/按键补齐。平台把事件送进来了，但 OBS 那套桌面语义没人接 ——
  * 所以合在一个 app 级事件过滤器里：
- * ① 3-4 长按 = 右键。Android 上 Qt 把触摸转成鼠标事件（实测长按 1.2 s 只把列表项选中了，
- * 不出上下文菜单 —— TapAndHold 手势在 QWidget 这条路上没人接），而 OBS 的场景/源/混音器菜单
- * 全挂在 customContextMenuRequested 上，没有右键就永远点不出来。
+ * ① 长按 = 右键。Android 上 Qt 把触摸转成鼠标事件，TapAndHold 手势在 QWidget 这条路上
+ * 没人接、不会出上下文菜单，而 OBS 的场景/源/混音器菜单全挂在 customContextMenuRequested 上，
+ * 没有右键就永远点不出来。
  * 不拦原始事件：按下照常发给控件（选中、滚动行为都不变），只是同时起一个计时器；到点还没松手
  * 也没滑出阈值，就照 Qt 处理 Key_Menu 的做法，给"最近的声明了上下文菜单策略的祖先控件"送一条
  * QContextMenuEvent(Mouse)。触发后的那次松手**只在真的弹起了菜单时**吞掉（免得给列表补一次"点击"）；
  * 什么都没弹就照常交回控件 —— 否则长按等于把按钮的 clicked 吃掉，见 fire() 的返回值注释。
- * ② 返回键 = Escape，见下面 KeyPress 那一格（build 74）。
+ * ② 返回键 = Escape，见下面 KeyPress 那一格。
  * 不用 Q_OBJECT：只要 eventFilter 虚函数 + 成员 QTimer，省掉一次 moc。 */
-/* 把顶层窗口压进屏幕可用区（全局兜底，B 方案）。
+/* 把顶层窗口压进屏幕可用区（全局兜底）。
  *
- * 背景：OBS 的对话框尺寸是按桌面设计的 —— 添加源 1040x620、设置 981x730、
- * 高级音频 1100x340、滤镜 861x726 …，而这块手机横屏的逻辑尺寸只有 873x393，
- * 于是底部按钮和右侧内容直接落在屏外、点不到。之前零散地在几个对话框的 showEvent
- * 里"收高度"处理过（OBSBasicSettings 是上游自带，OBSBasicFilters 是本移植早期加的），
- * 但都只收高度、且没覆盖最常用的"添加源"。
- *
+ * OBS 的对话框尺寸按桌面设计，手机横屏可用区更小，底部按钮和右侧内容会落在屏外、点不到。
  * 这里改成全局兜底：任何顶层窗口显示后，只要比可用区大就压到可用区并居中。
  * 覆盖全部对话框，以后新增的也自动受益。
  *
@@ -1061,8 +1053,8 @@ static void clampTopLevelToScreen(QWidget *w)
 	 * 或某个子控件的 minimumHeight），需要在它的构造函数里放宽 —— 见
 	 * OBSBasicSourceSelect / OBSBasicSettings 的 #ifdef __ANDROID__ 块。
 	 *
-	 * 踩过的三层留档，免得以后再摸一遍：
-	 *   ① .ui 里写死 minimumHeight（添加源的 sourceTypeList 是 460）；
+	 * 常见三类来源：
+	 *   ① .ui 里写死 minimumHeight；
 	 *   ② 布局首次 show 时把窗口自己的 minimumSize 设成布局最小尺寸
 	 *      （QLayout 默认 SetDefaultConstraint），QWidget::resize() 被它夹住；
 	 *   ③ QLayout 算最小尺寸走 qSmartMinSize()（qlayoutengine.cpp:321-333）：
@@ -1084,10 +1076,9 @@ static void clampTopLevelToScreen(QWidget *w)
 			}
 		}
 
-		/* 这里**故意不再硬压**。以前用 setMinimumSize(0,0)+SetNoConstraint 把窗口
+		/* 这里**故意不再硬压**。用 setMinimumSize(0,0)+SetNoConstraint 把窗口
 		 * 强行缩到目标尺寸，会造出"窗口比内容小"的不一致状态：布局仍按原来的最小
-		 * 尺寸摆放子控件，控件被裁在窗口外 —— 实测把添加源列表的滚动和命中判定都
-		 * 搞坏了（列表 viewport 比可视区大，滚动条范围算错）。
+		 * 尺寸摆放子控件，控件被裁在窗口外，列表的滚动和命中判定都会出错。
 		 *
 		 * 正确做法是在对话框自己的构造函数里放宽最小尺寸，参考
 		 * OBSBasicSourceSelect / OBSBasicSettings 里的 #ifdef __ANDROID__ 块。
@@ -1643,8 +1634,7 @@ public:
 	{
 		timer.setSingleShot(true);
 		/* 到点只是"长按到位"，不当场弹菜单 —— OBS 的上下文菜单结尾是阻塞的 popup.exec()，
-		 * 手指还按着的时候弹出去，会被随后那发 touch 当成"点在菜单外"立刻 dismiss
-		 * （2026-09-05 20:36 实测：sendEvent 同毫秒返回，一句 setVisible(false) 都没有）。
+		 * 手指还按着的时候弹出去，会被随后那发 touch 当成"点在菜单外"立刻 dismiss。
 		 * 真正的弹出发放延到松手那一刻。 */
 		connect(&timer, &QTimer::timeout, this, [this] { armed = true; });
 	}
@@ -1656,13 +1646,8 @@ protected:
 			return false;
 
 		switch (ev->type()) {
-		/* Android 的返回键 = Escape。这一条是"先量再修"量出来的，而且**推翻了动手前的猜测**：
-		 * BACK 不是没送进 Qt —— build 73 实测（`.qoder/back-measure.sh`、留档 `.qoder/backprobe/`）
-		 * 它以 QEvent::KeyPress、key=Qt::Key_Back(0x1000061，qnamespace.h:855)、nativeVirtualKey=0
-		 * 正常进来，沿焦点链一路传播到底没人接（主界面那一拍 6 个控件各打一行、投影仪那一拍只到
-		 * OBSProjector），而**同一个窗**上紧接着发 ESCAPE(111)=Qt::Key_Escape(0x1000000) 就被
-		 * OBSProjector.cpp:63 那条 QAction 接走并关掉了窗 ⇒ 缺的只有"翻译"这一环：前端全树对
-		 * Qt::Key_Back 零处理（grep frontend/ 命中 0）。
+		/* Android 的返回键 = Escape。BACK 以 QEvent::KeyPress、key=Qt::Key_Back 正常进来，
+		 * 沿焦点链一路传播到底没人接，而前端全树对 Qt::Key_Back 零处理 ⇒ 缺的只有"翻译"这一环。
 		 * 为什么换成 Escape 而不是直接 close()/reject()：投影仪的关闭链是
 		 * EscapeTriggered → OBSBasic::DeleteProjector（键盘 :65 与触摸菜单 :310 两条路都走它），
 		 * 自己 close() 会绕过它；而根界面上浮动 dock 之类也是顶层窗，close() 会把它直接收掉。
@@ -1672,12 +1657,11 @@ protected:
 			QKeyEvent *ke = static_cast<QKeyEvent *>(ev);
 			if (ke->key() != Qt::Key_Back)
 				break;
-			/* 菜单/popup 立着时 Qt 自己就把它撤了（09-07 00:26 实测 BACK 能关 popup 菜单），不抢。 */
+			/* 菜单/popup 立着时 Qt 自己就把它撤了，不抢。 */
 			if (QApplication::activePopupWidget())
 				break;
 			QWidget *top = static_cast<QWidget *>(watched)->window();
-			/* 焦点还在根界面上 ⇒ BACK 留给 Android。今天它在主界面上什么都不做（01:39 实测
-			 * pid 不变、chrome 仍 39,42,51），"退回后台"是另一笔账，不混进这一条里改。 */
+/* 焦点还在根界面上 ⇒ BACK 留给 Android；"退回后台"是另一笔账，不混进这一条里改。 */
 			if (top == static_cast<OBSApp *>(qApp)->GetMainWindow())
 				break;
 			backEaten = true;
@@ -1750,18 +1734,13 @@ protected:
 			QMouseEvent *me = static_cast<QMouseEvent *>(ev);
 			if (me->button() != Qt::LeftButton)
 				break;
-			/* P-8 修法 v3（组合框）。b83 实测（.qoder/p8-b83/p8.txt）：弹层从来不是"打不开"，
-			 * 而是"开在松手之前的 1 ms 里、又被这发松手关掉"——
-			 *   41.811 PRESS→QComboBox「simpleOutRecFormat」 / 41.815 SHOW→QComboBoxPrivateContainer
-			 *   / 41.816 REL（落到主窗那个 QWidget）+ HIDE，**同一毫秒**。
-			 * 同一处按满 400 ms（G2）弹层就活得好好的，截图 G2-combo.png 里两档混合容器都立着
-			 * ⇒ 弹层本身能建、能画、能收后续点击，坏的只有"这发太快的松手"：
-			 *   `QComboBoxPrivateContainer::eventFilter` 对落在弹层外的 MouseButtonRelease 一律 hidePopup，
-			 *   而 Android 上这发松手送到的是主窗的 widget，不是刚建出来的弹层。
-			 * ⇒ 最小干预：**不替 Qt 弹**（b83 证明 Qt 自己会弹），只记下"这发按下落在组合框上"，
+			/* 组合框弹层：Qt 会在按下时自己建弹层，但这发松手送到的是主窗的 widget，不是刚建出来的
+			 * 弹层，`QComboBoxPrivateContainer::eventFilter` 对落在弹层外的 MouseButtonRelease
+			 * 一律 hidePopup ⇒ 弹层"开在松手之前的 1 ms 里、又被这发松手关掉"。
+			 * ⇒ 最小干预：**不替 Qt 弹**，只记下"这发按下落在组合框上"，
 			 *   到松手那一刻再看弹层立没立着（见下面 release 分支）。
-			 * 为什么不在这里判定：v1 就是在这儿读 `activePopupWidget()` 想确认"弹起来了"，实测恒为 null
-			 *   （Qt 登记活动弹层要到下一轮事件循环，SHOW 行里的 act=0 是同一件事）⇒ 判定必须放到松手时。
+			 * 判定必须放到松手时：按下时读 `activePopupWidget()` 恒为 null
+			 *   （Qt 登记活动弹层要到下一轮事件循环）。
 			 * 弹层已经立着时不记：那一下该由 Qt 的"点外面就关"收尾，不抢。
 			 * 长按那套（armed/timer）这里一并跳过：弹层刚立起来，再补一发合成右键只会把它按死。 */
 			if (QComboBox *cb = qobject_cast<QComboBox *>(pw)) {
@@ -1808,7 +1787,7 @@ protected:
 				     re->globalPosition().toPoint().y(), pop ? pop->metaObject()->className() : "none",
 				     int(comboPress != nullptr));
 			}
-			/* P-8 修法 v3（接上面 press 分支）：这发松手如果正好是"刚落在组合框上的那次按下"的尾巴、
+			/* 这发松手如果正好是"刚落在组合框上的那次按下"的尾巴、
 			 * 而此刻弹层确实立着，就把它吃掉 —— Qt 那条"松手落在弹层外 ⇒ hidePopup"收不到事件，弹层留住。
 			 * 判定放在这里（而不是按下时）是因为活动弹层要等下一轮事件循环才登记得上，见上面那段。
 			 * 指针一进分支就清 ⇒ 最多多吃一发，绝不会波及后面不相干的松手（拖滚动条那类）。 */
@@ -1825,8 +1804,7 @@ protected:
 				armed = false;
 				/* 只有真的弹起了菜单才吞这发松手。吞的理由（对列表那类成立）：既不给它补一次
 				 * "点击"，也不让它以为按键还开着。但**没弹出任何东西的长按**本来就是"一次按得
-				 * 久一点的点击" —— 一律吞掉就把只有 `clicked` 一个入口的按钮判了死刑（转场 "+"：
-				 * 03:45 实测长按 1.2 s 三发全 `菜单立过=0`，而同一处一发 tap 就弹菜单）。 */
+				 * 久一点的点击" —— 一律吞掉就把只有 `clicked` 一个入口的按钮判了死刑。 */
 				if (!fire())
 					return false;
 				return true;
@@ -1844,8 +1822,7 @@ private:
 
 	/* 返回值 = "这发长按真的立起过菜单吗"。松手分支要用（见 eventFilter 里 MouseButtonRelease
 	 * 那段）：立过才吞松手，没立就把它交回控件 —— 否则只有 `clicked` 一个入口的按钮
-	 * （转场 "+" 就是）在手指按久一点时变成"点了没反应"。03:45 实测：三条手势形态各长按 1.2 s，
-	 * `锚「transitionAdd」` 一次都没新增、`菜单立过=0`。三条出口各自量耗时 > 0 就算立过 ——
+	 * 在手指按久一点时变成"点了没反应"。三条出口各自量耗时 > 0 就算立过 ——
 	 * OBS 的菜单结尾是阻塞的 popup.exec()，同毫秒返回的那条路根本没弹东西。 */
 	bool fire()
 	{
@@ -1855,12 +1832,10 @@ private:
 
 		/* 按下事件落在的是 QAbstractScrollArea 的 viewport，而策略设在列表控件自己身上；
 		 * 往上找到那个声明了策略的祖先，pos 也按它的坐标系给 —— OBS 的 handler 里是 itemAt(pos)。
-		 * build 80 在这条向下的路之前先补一次**向下的几何落点**：04:42 实测预览区那发按下的接收者
-		 * 是**顶层窗自己**（`w「OBSBasic」1067x667+0+0 顶层=1`），而 `preview` 那条
-		 * `Qt::CustomContextMenu` 设在它**自己身上**（`forms/OBSBasic.ui:240`）—— 既不在 w 上、
-		 * 也不在 w 的祖先里 ⇒ 只往上爬永远找不到它。`childAt` 是纯几何的下钻（不看事件派发怎么
-		 * 选接收者），拿同一个 pressGlobal 在 w 的子树里再落一次点。**只在往下落空了之后才走老路**，
-		 * 且老路 `policyUp(w->parentWidget())` 与 build 79 逐字同形 ⇒ 现在绿着的那些腿一步没动。 */
+		 * 另外补一次**向下的几何落点**：预览区的 `Qt::CustomContextMenu` 设在它**自己身上**
+		 * （`forms/OBSBasic.ui:240`），既不在 w 上、也不在 w 的祖先里 ⇒ 只往上爬永远找不到它。
+		 * `childAt` 是纯几何的下钻（不看事件派发怎么选接收者），拿同一个 pressGlobal 在 w 的子树里
+		 * 再落一次点。**只在往下落空了之后才走老路** `policyUp(w->parentWidget())`。 */
 		auto policyUp = [](QWidget *x) {
 			while (x) {
 				const Qt::ContextMenuPolicy policy = x->contextMenuPolicy();
@@ -1877,13 +1852,10 @@ private:
 		if (!menu)
 			menu = w;
 
-		/* 给 3-4 探针一个能 grep 的确定信号：光看"菜单有没有弹"分不清是长按没触发，
-		 * 还是触发了但那个控件压根没挂菜单。
-		 * 行尾那三个字段是 04:1x 之后加的：只有 className 时"接收=OBSBasic"这一格无法自证 ——
-		 * 预览中心那三个落点报的就是 OBSBasic，可落点明明在显示面自己的那个原生子窗（#7）里。
-		 * ⇒ 补 objectName（同一张 .ui 里独一份）、它在父系里的几何、它自己是不是顶层窗、
-		 *   以及它所属顶层窗的 objectName。**一律追加在行尾**，前面 `%s@(%d,%d) → %s` 那截不动 ——
-		 *   `.qoder/longpress-hit-probe.sh` 与 `menupos-probe.sh` 的正则都吃这个前缀。 */
+		/* 日志里补 objectName、几何、是否顶层窗及所属顶层窗的 objectName：只有 className 时
+		 * 无法区分"长按没触发"和"触发了但控件没挂菜单"，也自证不了接收者身份 ——
+		 * 预览中心的落点报的就是 OBSBasic，可落点其实在显示面自己的原生子窗里。
+		 * 这些字段一律追加在行尾，前缀格式保持不变。 */
 		const QRect wGeo = w->geometry();
 		const QWidget *wWin = w->window();
 		blog(LOG_DEBUG,
@@ -1905,8 +1877,8 @@ private:
 
 		/* 坐标系：QAbstractScrollArea 那一类（SourceTree/SceneTree 都是）的
 		 * `customContextMenuRequested` 按 Qt 文档给的是 **viewport 系**坐标 —— OBS 的 handler 里
-		 * 就是 `itemAt(pos)`，而 `menu` 是带 2px 边框的外层控件。照外层算会整体偏一个边框宽：
-		 * 02:32 实测手指在逻辑(160,76)、菜单却起于(162,78)；行边界上这一偏还会选错行。 */
+		 * 就是 `itemAt(pos)`，而 `menu` 是带 2px 边框的外层控件。照外层算会整体偏一个边框宽，
+		 * 行边界上这一偏还会选错行。 */
 		QWidget *coordBase = menu;
 		if (QAbstractScrollArea *scroll = qobject_cast<QAbstractScrollArea *>(menu))
 			coordBase = scroll->viewport();
@@ -1956,7 +1928,7 @@ private:
 	QPoint pressGlobal;
 	bool armed = false;
 	bool backEaten = false;
-	QPointer<QComboBox> comboPress; // P-8：这发按下落在组合框上（松手时据此决定吃不吃）
+	QPointer<QComboBox> comboPress; // 这发按下落在组合框上（松手时据此决定吃不吃）
 };
 
 #endif // __ANDROID__
@@ -1970,7 +1942,7 @@ OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
 
 #ifdef __ANDROID__
 	/* 装在 app 上：所有控件的鼠标**和键盘**事件都过这一道（跟着进程活，不用管析构）。
-	 * ① 3-4 长按合成右键；② build 74 返回键当 Escape 用。 */
+	 * ① 长按合成右键；② 返回键当 Escape 用。 */
 	installEventFilter(new AndroidInputFilter(this));
 	AndroidTouchScrollGuard::globalSlot() = new AndroidTouchScrollGuard(this);
 
