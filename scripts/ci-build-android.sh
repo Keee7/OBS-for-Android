@@ -427,6 +427,7 @@ package_apk() {
         --build-tools "$BUILD_TOOLS"
     python3 "$SCRIPT_DIR/qt-android-ime/patch-qt-android-jar.py" \
         --qt-version "$QT_VERSION" --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
+        --qtbase-src "$BUILD_DIR/_deps/obs_qtbase_android-src" \
         --android-jar "$SDK/platforms/$PLATFORM/android.jar" --javac "$JAVA_HOME/bin/javac" \
         --output "$BUILD_DIR/qt-ime-patched/Qt6Android.jar"
     cp -f "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" "$ab_dir/libs/Qt6Android.jar"

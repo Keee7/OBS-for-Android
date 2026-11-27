@@ -1,6 +1,8 @@
---- QtRootLayout.java
-+++ QtRootLayout.java
-@@ -7,16 +7,50 @@
+diff --git a/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java b/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java
+index 761c5fb..8a7ddfb 100644
+--- a/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java
++++ b/src/android/jar/src/org/qtproject/qt/android/QtRootLayout.java
+@@ -7,25 +7,58 @@ package org.qtproject.qt.android;
  import android.app.Activity;
  import android.content.Context;
  import android.content.res.Configuration;
@@ -15,8 +17,8 @@
      QtRootLayout(Context context)
      {
          super(context);
-+    }
-+
+     }
+ 
 +    @Override
 +    protected void onAttachedToWindow()
 +    {
@@ -50,10 +52,11 @@
 +                    && getWidth() > 0 && getHeight() > 0)
 +                QtDisplayManager.handleLayoutSizeChanged(getWidth(), getHeight());
 +        });
-     }
- 
++    }
++
      @Override
-@@ -25,7 +59,6 @@
+     protected void onSizeChanged(int w, int h, int oldw, int oldh)
+     {
          Activity activity = (Activity) getContext();
          if (activity == null || (w == oldw && h == oldh))
              return;
@@ -61,7 +64,7 @@
          QtDisplayManager.handleLayoutSizeChanged(w, h);
      }
  
-@@ -40,6 +73,7 @@
+@@ -40,6 +73,7 @@ class QtRootLayout extends QtLayout
          // called a bit late (QTBUG-94459).
          QtNative.runAction(() -> {
              QtDisplayManager.handleOrientationChange(activity);

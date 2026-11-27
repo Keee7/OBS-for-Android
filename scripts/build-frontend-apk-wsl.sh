@@ -158,6 +158,7 @@ python3 "$SCRIPT_DIR/stage-qt-gradle-properties.py" \
 
 python3 "$SCRIPT_DIR/qt-android-ime/patch-qt-android-jar.py" \
     --qt-version 6.12.0 --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
+    --qtbase-src "$BUILD_DIR/_deps/obs_qtbase_android-src" \
     --android-jar "$SDK/platforms/android-$COMPILE_SDK_VERSION/android.jar" \
     --javac "$JAVA_HOME/bin/javac" --output "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" || exit 1
 cp -f "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" "$AB_DIR/libs/Qt6Android.jar" || exit 1

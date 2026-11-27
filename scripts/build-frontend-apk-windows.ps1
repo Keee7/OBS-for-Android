@@ -129,6 +129,7 @@ if ($Action -in @('package','all')) {
     $patchedQtJar = Join-Path $build 'qt-ime-patched/Qt6Android.jar'
     Invoke-BuildTool 'python' @("$PSScriptRoot/qt-android-ime/patch-qt-android-jar.py",
         '--qt-version', $QtVersion, '--jar', "$qt/jar/Qt6Android.jar",
+        '--qtbase-src', "$build/_deps/obs_qtbase_android-src",
         '--android-jar', "$sdk/platforms/android-$CompileSdkVersion/android.jar",
         '--javac', "$env:JAVA_HOME/bin/javac.exe", '--output', $patchedQtJar) 'qt-ime-runtime.log'
     Copy-Item -LiteralPath $patchedQtJar -Destination "$androidBuild/libs/Qt6Android.jar" -Force

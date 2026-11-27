@@ -1,0 +1,140 @@
+diff --git a/src/android/jar/src/org/qtproject/qt/android/QtWindowInsetsController.java b/src/android/jar/src/org/qtproject/qt/android/QtWindowInsetsController.java
+index a3d0a0d..ed1aa31 100644
+--- a/src/android/jar/src/org/qtproject/qt/android/QtWindowInsetsController.java
++++ b/src/android/jar/src/org/qtproject/qt/android/QtWindowInsetsController.java
+@@ -4,6 +4,7 @@
+ package org.qtproject.qt.android;
+ 
+ import android.app.Activity;
++import android.content.res.Configuration;
+ import android.content.res.Resources;
+ import android.content.res.TypedArray;
+ import android.os.Build;
+@@ -45,6 +46,42 @@ class QtWindowInsetsController
+         }
+     }
+ 
++    private static boolean hideLandscapeStatusBar(Activity activity)
++    {
++        Configuration configuration = activity.getResources().getConfiguration();
++        return !activity.isInMultiWindowMode()
++                && configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
++                && configuration.smallestScreenWidthDp < 600;
++    }
++
++    // With no layout flags, update the status bar while preserving the current window mode.
++    @SuppressWarnings("deprecation")
++    private static void updateStatusBar(Activity activity, Window window, Integer layoutFlags)
++    {
++        boolean hide = hideLandscapeStatusBar(activity);
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
++            WindowInsetsController controller = window.getInsetsController();
++            if (controller == null)
++                return;
++
++            int statusBar = WindowInsets.Type.statusBars();
++            if (layoutFlags != null)
++                controller.show(WindowInsets.Type.systemBars() & ~statusBar);
++            controller.setSystemBarsBehavior(hide
++                    ? WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
++                    : WindowInsetsController.BEHAVIOR_DEFAULT);
++            if (hide)
++                controller.hide(statusBar);
++            else
++                controller.show(statusBar);
++        } else {
++            View decor = window.getDecorView();
++            int statusFlags = View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
++            int flags = layoutFlags != null ? layoutFlags : decor.getSystemUiVisibility() & ~statusFlags;
++            setSystemUiVisibility(decor, hide ? flags | statusFlags : flags);
++        }
++    }
++
+     @UsedFromNativeCode
+     static void showNormal(Activity activity)
+     {
+@@ -53,18 +90,8 @@ class QtWindowInsetsController
+             return;
+ 
+         final View decor = window.getDecorView();
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+-            setDecorFitsSystemWindows(window, true);
+-            WindowInsetsController ctrl = window.getInsetsController();
+-            if (ctrl != null) {
+-                ctrl.show(WindowInsets.Type.systemBars());
+-                ctrl.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_DEFAULT);
+-            }
+-        } else {
+-            @SuppressWarnings("deprecation")
+-            int flags = View.SYSTEM_UI_FLAG_VISIBLE; // clear all flags
+-            setSystemUiVisibility(decor, flags);
+-        }
++        setDecorFitsSystemWindows(window, true);
++        updateStatusBar(activity, window, 0);
+ 
+         setTransparentSystemBars(activity, false);
+         useCutoutShortEdges(window, false);
+@@ -116,6 +143,7 @@ class QtWindowInsetsController
+         }
+     }
+ 
++    @SuppressWarnings("deprecation")
+     @UsedFromNativeCode
+     static void showExpanded(Activity activity)
+     {
+@@ -124,20 +152,9 @@ class QtWindowInsetsController
+             return;
+ 
+         final View decor = window.getDecorView();
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+-            setDecorFitsSystemWindows(window, false);
+-            WindowInsetsController ctrl = window.getInsetsController();
+-            if (ctrl != null) {
+-                ctrl.show(WindowInsets.Type.systemBars());
+-                ctrl.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_DEFAULT);
+-            }
+-        } else {
+-            @SuppressWarnings("deprecation")
+-            int flags =   View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+-                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+-                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+-            setSystemUiVisibility(decor, flags);
+-        }
++        setDecorFitsSystemWindows(window, false);
++        updateStatusBar(activity, window, View.SYSTEM_UI_FLAG_LAYOUT_STABLE
++                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+ 
+         setTransparentSystemBars(activity, true);
+         useCutoutShortEdges(window, true);
+@@ -201,12 +218,14 @@ class QtWindowInsetsController
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+             WindowInsets insets = activity.getWindow().getDecorView().getRootWindowInsets();
+             if (insets != null)
+-                return !insets.isVisible(WindowInsets.Type.statusBars());
++                return !insets.isVisible(WindowInsets.Type.statusBars())
++                        && !insets.isVisible(WindowInsets.Type.navigationBars());
+         } else {
+             @SuppressWarnings("deprecation")
+             int flags = decor.getSystemUiVisibility();
+             @SuppressWarnings("deprecation")
+-            int immersiveMask = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
++            int immersiveMask = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
++                    | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION;
+             return (flags & immersiveMask) == immersiveMask;
+         }
+ 
+@@ -233,8 +252,14 @@ class QtWindowInsetsController
+ 
+     static void restoreFullScreenVisibility(Activity activity)
+     {
++        Window window = activity.getWindow();
++        if (window == null)
++            return;
++
+         if (isFullScreen(activity))
+             showFullScreen(activity);
++        else
++            updateStatusBar(activity, window, null);
+     }
+ 
+     /*
