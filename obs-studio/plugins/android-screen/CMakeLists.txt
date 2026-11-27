@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28...3.30)
 add_library(android-screen MODULE)
 add_library(OBS::android-screen ALIAS android-screen)
 
-target_sources(android-screen PRIVATE screen-capture.c)
+target_sources(android-screen PRIVATE screen-capture.c screen-audio.c)
 target_link_libraries(android-screen PRIVATE OBS::libobs)
 
 if(OS_ANDROID)
@@ -15,7 +15,7 @@ if(OS_ANDROID)
   # link libandroid，见 build.ninja 里 frontend/libobs_*.so 那行的 -landroid）。本插件只从
   # AImageReader_getWindow 拿一个 ANativeWindow 指针往下递，一个 ANativeWindow_* 函数都没调用过，
   # 前向声明不需要库。把 android 挂到插件上是给整个插件层开一条别的插件都没有的依赖，不划算。
-  target_link_libraries(android-screen PRIVATE mediandk)
+  target_link_libraries(android-screen PRIVATE mediandk OBS::android-common)
 endif()
 
 set_target_properties_obs(android-screen PROPERTIES FOLDER plugins/android-screen PREFIX "")

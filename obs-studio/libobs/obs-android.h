@@ -226,6 +226,10 @@ EXPORT bool obs_android_camera_capture_allowed(void);
  * 保证线程安全，request_consent **不得阻塞等用户点同意框**。
  * start_display/stop_display 同一约定：它们由源的 activate/deactivate 调，落在图形线程上，
  * 实现方不得在那儿等任何 UI 结果。 */
+/** 系统内录 PCM 回调（在 Java 采集读线程上触发，stop_audio 返回前保证不再调用）。 */
+typedef void (*obs_android_screen_audio_cb)(const int16_t *pcm, uint32_t frames, uint32_t sample_rate,
+					    uint32_t channels, void *param);
+
 struct obs_android_screen_host {
 	void *param;
 
@@ -263,33 +267,17 @@ struct obs_android_screen_host {
 	 *  而"没在采的时候收面"不能报错也不崩。没有返回值就是因为没有可报的失败。 */
 	void (*stop_display)(void *param);
 
-	/* ---- 系统内录（AudioPlaybackCapture）三条腿 ----
-	 *
-	 * 方向仍然全是"native 问、Java 答"。这一路本来最顺手的形状是让 Java 的采集线程
-	 * 直接往回推 PCM（那要在前端开第一条 Java→native 的 JNI 导出），这里刻意不走它：
-	 * ① 整个 Android 移植到今天为止没有一条 Java→native 的路，加第一条要连带决定
-	 *    "注册在哪、类怎么找到、RegisterNatives 还是按符号名懒解析"—— Qt 把前端 .so 是
-	 *    dlopen 进来的，不是 classloader 的 native lib，按名字解析这条路很可能直接
-	 *    UnsatisfiedLinkError（未量，但风险形状清楚）；② PCM 的节拍本来就该由消费方定，
-	 *    插件自己那条音频线程按"取空就睡 10 ms"来问，比让 Java 猜一个推送粒度更好接；
-	 * ③ Java 侧因此只需要"读 AudioRecord → 攒进环形缓冲"这一件事，失败面小。
-	 *
-	 * 线程约定：start/stop 与视频那两格同（图形线程或源销毁路径上）；read_audio
-	 * **只会在插件那条音频线程上被调**，实现方要么自己可重入要么按单线程设计。 */
+	/* ---- 系统内录（AudioPlaybackCapture）：Java 读线程直推 PCM 给 native 回调 ---- */
 
-	/** 建 AudioRecord 与那条读线程。成功时回填**实到**的采样率与声道数（AudioRecord 可以
-	 *  拒绝我们要求的格式而给自己换一个，出参必须是它实际那一份 —— 插件拿这两个数填
-	 *  obs_source_audio，报错了就是变速/变调）。手里没令牌时返回 false（这一路依附令牌）。
-	 *  必须幂等：已经在录的时候再调一次应当返回 true 而不是再起一条线程。 */
-	bool (*start_audio)(void *param, uint32_t *sample_rate, uint32_t *channels);
+	/** 建 AudioRecord 与那条读线程，并通过 cb 回传 PCM 块。
+	 *  成功时回填**实到**的采样率与声道数（AudioRecord 可以拒绝我们要求的格式而给自己换一个，
+	 *  出参必须是它实际那一份）。手里没令牌或 cb 为空时返回 false。 */
+	bool (*start_audio)(void *param, obs_android_screen_audio_cb cb, void *cb_param, uint32_t *sample_rate,
+			    uint32_t *channels);
 
-	/** 停读线程并释放 AudioRecord。**必须幂等**，且返回时那条线程必须已经不在
-	 *  （插件那边紧接着就要 free 自己的缓冲）。 */
+	/** 停读线程并释放 AudioRecord。**必须幂等**，且返回时那条线程必须已经退出
+	 *  （保证 cb 不再被调用）。 */
 	void (*stop_audio)(void *param);
-
-	/** 从环形缓冲取走最多 max_frames 帧（交织 int16，每声道一列），返回实际帧数。
-	 *  0 = 此刻没有数据，不是错误 —— 调用方稍后再问。 */
-	uint32_t (*read_audio)(void *param, int16_t *out, uint32_t max_frames);
 
 	/** Copy a capture failure to caller-owned UTF-8 storage (never a JNI pointer). */
 	void (*capture_error)(void *param, char *out, size_t size);
@@ -316,11 +304,10 @@ EXPORT bool obs_android_screen_start_display(void *native_window);
 EXPORT void obs_android_screen_stop_display(void);
 EXPORT void obs_android_screen_capture_error(char *out, size_t size);
 
-/* 这三格同样 fail-closed：没接线时 start 返回 false（源据此就不起音频线程）、stop 空转、
- * read 返回 0 帧。"问不到"在这一路一律不等于"在录"。 */
-EXPORT bool obs_android_screen_start_audio(uint32_t *sample_rate, uint32_t *channels);
+/* 同样 fail-closed：没接线或 cb 为空时 start 返回 false，stop 空转。 */
+EXPORT bool obs_android_screen_start_audio(obs_android_screen_audio_cb cb, void *cb_param, uint32_t *sample_rate,
+					   uint32_t *channels);
 EXPORT void obs_android_screen_stop_audio(void);
-EXPORT uint32_t obs_android_screen_read_audio(int16_t *out, uint32_t max_frames);
 
 /* Browser host: opaque per-source handles. create/update/destroy are called on the
  * OBS graphics thread; UI work is queued by the host and never waited for. */
