@@ -235,6 +235,21 @@ if(NOT DEFINED OBS_ANDROID_COMPILE_SDK_VERSION OR OBS_ANDROID_COMPILE_SDK_VERSIO
   set(OBS_ANDROID_COMPILE_SDK_VERSION 36)
 endif()
 
+set(_obs_android_manifest "${OBS_ANDROID_PACKAGE_SOURCE_DIR}/AndroidManifest.xml")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_obs_android_manifest}")
+file(READ "${_obs_android_manifest}" _obs_android_manifest_xml)
+if(_obs_android_manifest_xml MATCHES "android:versionName=\"([^\"]+)\"")
+  set(OBS_ANDROID_VERSION_NAME "${CMAKE_MATCH_1}")
+else()
+  message(FATAL_ERROR "Cannot parse android:versionName from ${_obs_android_manifest}")
+endif()
+if(_obs_android_manifest_xml MATCHES "android:versionCode=\"([0-9]+)\"")
+  set(OBS_ANDROID_VERSION_CODE "${CMAKE_MATCH_1}")
+else()
+  message(FATAL_ERROR "Cannot parse android:versionCode from ${_obs_android_manifest}")
+endif()
+target_compile_definitions(obs-studio PRIVATE OBS_ANDROID_VERSION_NAME="${OBS_ANDROID_VERSION_NAME}")
+
 set_target_properties(
   obs-studio
   PROPERTIES
@@ -246,12 +261,9 @@ set_target_properties(
     QT_ANDROID_PACKAGE_NAME "${OBS_ANDROID_PACKAGE_NAME}"
     # Compress native libraries in the download. Android extracts them at install time.
     QT_ANDROID_LEGACY_PACKAGING TRUE
-    # 真正生效的是 cmake/android/AndroidManifest.xml 里那对 versionCode/versionName
-    # （设了 QT_ANDROID_PACKAGE_SOURCE_DIR 之后 androiddeployqt 用自带清单，不再拿模板覆盖）。
-    # 这两行只是 androiddeployqt 的默认值，出包前必须与清单保持一致，否则 aapt2 报的版本
-    # 和这里看到的是两个数 —— 三处版本号不一致就是这么来的。
-    QT_ANDROID_VERSION_NAME "0.2.9"
-    QT_ANDROID_VERSION_CODE 36
+    # Derived from AndroidManifest.xml above so versionName/versionCode stay in sync.
+    QT_ANDROID_VERSION_NAME "${OBS_ANDROID_VERSION_NAME}"
+    QT_ANDROID_VERSION_CODE "${OBS_ANDROID_VERSION_CODE}"
     QT_ANDROID_COMPILE_SDK_VERSION "${OBS_ANDROID_COMPILE_SDK_VERSION}"
     QT_ANDROID_TARGET_SDK_VERSION 35
     QT_ANDROID_MIN_SDK_VERSION 29)

@@ -188,7 +188,7 @@ QString GetAndroidInstalledVersionName()
 			version = verObj.toString().trimmed();
 	}
 	if (version.isEmpty())
-		version = QStringLiteral("0.2.9");
+		version = QString::fromUtf8(OBS_ANDROID_VERSION_NAME);
 	return version;
 }
 
