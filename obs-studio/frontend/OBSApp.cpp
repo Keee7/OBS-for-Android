@@ -1368,7 +1368,7 @@ bool OBSApp::OBSInit()
 
 #endif
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__ANDROID__)
 	setAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
 #endif
 

@@ -1308,23 +1308,9 @@ void OBSBasic::OBSInit()
 		ui->actionAlwaysOnTop->setVisible(false);
 	}
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ANDROID__)
 	if (!hideWindowOnStart) {
-#ifdef __ANDROID__
-		// Android's Activity owns the available area, including freeform and
-		// split-screen bounds. Dock minimum sizes must not resize the window.
-		layout()->setSizeConstraint(QLayout::SetNoConstraint);
-		setMinimumSize(0, 0);
-		showMaximized();
-		QTimer::singleShot(0, this, [this] {
-			const QRect available = screen()->availableGeometry();
-			blog(LOG_INFO, "Android main window: size=%dx%d available=%dx%d+%d+%d state=%d max=%dx%d dpr=%.2f",
-			     width(), height(), available.width(), available.height(), available.x(), available.y(),
-			     int(windowState()), maximumWidth(), maximumHeight(), devicePixelRatioF());
-		});
-#else
 		show();
-#endif
 	}
 #endif
 
@@ -1376,10 +1362,6 @@ void OBSBasic::OBSInit()
 		}
 	}
 
-#ifdef __ANDROID__
-	InitAndroidResponsiveLayout();
-#endif
-
 	bool pre23Defaults = config_get_bool(App()->GetUserConfig(), "General", "Pre23Defaults");
 	if (pre23Defaults) {
 		bool resetDockLock23 = config_get_bool(App()->GetUserConfig(), "General", "ResetDockLock23");
@@ -1399,6 +1381,31 @@ void OBSBasic::OBSInit()
 	bool sideDocks = config_get_bool(App()->GetUserConfig(), "BasicWindow", "SideDocks");
 	ui->sideDocks->setChecked(sideDocks);
 	setDockCornersVertical(sideDocks);
+
+#ifdef __ANDROID__
+	// Apply Android layout constraints and initial dock sizing BEFORE showing
+	// the main window to minimize first-frame jumps, then immediately reconcile
+	// real QtWindow safe-area insets and polished metrics once the native window exists.
+	layout()->setSizeConstraint(QLayout::SetNoConstraint);
+	setMinimumSize(0, 0);
+	InitAndroidResponsiveLayout();
+	if (!hideWindowOnStart) {
+		showMaximized();
+		ConnectAndroidWindowSignals();
+		UpdateAndroidSafeAreaMargins();
+		ResizeAndroidDocks();
+		QTimer::singleShot(150, this, [this] {
+			UpdateAndroidSafeAreaMargins();
+			ResizeAndroidDocks();
+		});
+		QTimer::singleShot(0, this, [this] {
+			const QRect available = screen()->availableGeometry();
+			blog(LOG_INFO, "Android main window: size=%dx%d available=%dx%d+%d+%d state=%d max=%dx%d dpr=%.2f",
+			     width(), height(), available.width(), available.height(), available.x(), available.y(),
+			     int(windowState()), maximumWidth(), maximumHeight(), devicePixelRatioF());
+		});
+	}
+#endif
 
 	SystemTray(true);
 

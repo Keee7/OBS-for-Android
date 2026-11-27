@@ -348,22 +348,29 @@ static void screenReleaseConsent(void *param)
 
 /* 系统内录（Java AudioRecord 读线程直接通过 nativeOnPcm 回调推入） */
 
+/* 锁序：g_screenAudioLifecycleMutex → g_screenAudioMutex（PCM 回调仅短持 g_screenAudioMutex）。 */
+static std::mutex g_screenAudioLifecycleMutex;
 static std::mutex g_screenAudioMutex;
 static obs_android_screen_audio_cb g_screenAudioCb = nullptr;
 static void *g_screenAudioParam = nullptr;
-static bool g_screenAudioNativeRegistered = false;
+static jlong g_screenAudioSessionSeq = 0;
+static jlong g_screenAudioSessionId = 0;
+static std::atomic<bool> g_screenAudioNativeRegistered{false};
 
-static void JNICALL onNativeScreenAudioPcm(JNIEnv *env, jclass, jshortArray pcmArr, jint frames, jint sampleRate,
-					   jint channels)
+static void JNICALL onNativeScreenAudioPcm(JNIEnv *env, jclass, jlong sessionId, jshortArray pcmArr, jint frames,
+					   jint sampleRate, jint channels)
 {
-	if (!env || !pcmArr || frames <= 0 || sampleRate <= 0 || (channels != 1 && channels != 2))
+	if (!env || !pcmArr || sessionId <= 0 || frames <= 0 || sampleRate <= 0 || (channels != 1 && channels != 2))
+		return;
+	const jsize arrLen = env->GetArrayLength(pcmArr);
+	if ((int64_t)frames * (int64_t)channels > (int64_t)arrLen)
 		return;
 	jshort *els = env->GetShortArrayElements(pcmArr, nullptr);
 	if (!els)
 		return;
 	{
 		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
-		if (g_screenAudioCb) {
+		if (g_screenAudioCb && sessionId == g_screenAudioSessionId) {
 			g_screenAudioCb(reinterpret_cast<const int16_t *>(els), (uint32_t)frames,
 					  (uint32_t)sampleRate, (uint32_t)channels, g_screenAudioParam);
 		}
@@ -373,20 +380,27 @@ static void JNICALL onNativeScreenAudioPcm(JNIEnv *env, jclass, jshortArray pcmA
 
 static bool registerProjectionAudioNatives()
 {
-	if (g_screenAudioNativeRegistered)
+	if (g_screenAudioNativeRegistered.load(std::memory_order_acquire))
+		return true;
+	std::lock_guard<std::mutex> lock(g_screenAudioMutex);
+	if (g_screenAudioNativeRegistered.load(std::memory_order_relaxed))
 		return true;
 	QJniEnvironment env;
 	if (!env.isValid())
 		return false;
 	jclass cls = env.findClass(kProjectionAudioClass);
-	if (!cls)
+	if (!cls) {
+		env.checkAndClearExceptions();
 		return false;
+	}
 	static const JNINativeMethod methods[] = {
-		{"nativeOnPcm", "([SIII)V", reinterpret_cast<void *>(onNativeScreenAudioPcm)},
+		{"nativeOnPcm", "(J[SIII)V", reinterpret_cast<void *>(onNativeScreenAudioPcm)},
 	};
-	if (env->RegisterNatives(cls, methods, 1) < 0)
+	if (env->RegisterNatives(cls, methods, 1) < 0) {
+		env.checkAndClearExceptions();
 		return false;
-	g_screenAudioNativeRegistered = true;
+	}
+	g_screenAudioNativeRegistered.store(true, std::memory_order_release);
 	return true;
 }
 
@@ -394,21 +408,30 @@ static bool screenStartAudio(void *param, obs_android_screen_audio_cb cb, void *
 			     uint32_t *channels)
 {
 	(void)param;
+	std::lock_guard<std::mutex> lifecycleLock(g_screenAudioLifecycleMutex);
 	if (!cb || !registerProjectionAudioNatives()) {
 		blog(LOG_WARNING, "OBSAndroidPermissions: 系统内录注册 native 回调失败");
 		return false;
 	}
+	jlong sessionId = 0;
 	{
 		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
+		sessionId = ++g_screenAudioSessionSeq;
+		g_screenAudioSessionId = sessionId;
 		g_screenAudioCb = cb;
 		g_screenAudioParam = cb_param;
 	}
 
-	const QJniObject arr = QJniObject::callStaticObjectMethod(kProjectionAudioClass, "start", "()[I");
+	const QJniObject arr = QJniObject::callStaticObjectMethod(kProjectionAudioClass, "start", "(J)[I", sessionId);
 	if (!arr.isValid()) {
-		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
-		g_screenAudioCb = nullptr;
-		g_screenAudioParam = nullptr;
+		{
+			std::lock_guard<std::mutex> lock(g_screenAudioMutex);
+			if (g_screenAudioSessionId == sessionId) {
+				g_screenAudioSessionId = 0;
+				g_screenAudioCb = nullptr;
+				g_screenAudioParam = nullptr;
+			}
+		}
 		blog(LOG_WARNING, "OBSAndroidPermissions: 启动系统音频内录失败（start 返回空），Java=%s",
 		     screenDescribe().toUtf8().constData());
 		return false;
@@ -419,9 +442,15 @@ static bool screenStartAudio(void *param, obs_android_screen_audio_cb cb, void *
 	const jsize n = env->GetArrayLength(ja);
 	jint *els = (n >= 2) ? env->GetIntArrayElements(ja, nullptr) : nullptr;
 	if (!els) {
-		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
-		g_screenAudioCb = nullptr;
-		g_screenAudioParam = nullptr;
+		env.checkAndClearExceptions();
+		{
+			std::lock_guard<std::mutex> lock(g_screenAudioMutex);
+			if (g_screenAudioSessionId == sessionId) {
+				g_screenAudioSessionId = 0;
+				g_screenAudioCb = nullptr;
+				g_screenAudioParam = nullptr;
+			}
+		}
 		QJniObject::callStaticMethod<void>(kProjectionAudioClass, "stop", "()V");
 		blog(LOG_WARNING, "OBSAndroidPermissions: 读取系统音频格式失败（数组长度=%d），Java=%s", (int)n,
 		     screenDescribe().toUtf8().constData());
@@ -432,9 +461,14 @@ static bool screenStartAudio(void *param, obs_android_screen_audio_cb cb, void *
 	env->ReleaseIntArrayElements(ja, els, JNI_ABORT); // 只读，不把改动写回去
 
 	if (rate <= 0 || ch <= 0) {
-		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
-		g_screenAudioCb = nullptr;
-		g_screenAudioParam = nullptr;
+		{
+			std::lock_guard<std::mutex> lock(g_screenAudioMutex);
+			if (g_screenAudioSessionId == sessionId) {
+				g_screenAudioSessionId = 0;
+				g_screenAudioCb = nullptr;
+				g_screenAudioParam = nullptr;
+			}
+		}
 		QJniObject::callStaticMethod<void>(kProjectionAudioClass, "stop", "()V");
 		blog(LOG_WARNING, "OBSAndroidPermissions: 无效的系统音频格式 %dHz×%d，Java=%s", (int)rate,
 		     (int)ch, screenDescribe().toUtf8().constData());
@@ -453,10 +487,12 @@ static bool screenStartAudio(void *param, obs_android_screen_audio_cb cb, void *
 static void screenStopAudio(void *param)
 {
 	(void)param;
+	std::lock_guard<std::mutex> lifecycleLock(g_screenAudioLifecycleMutex);
 	bool had = false;
 	{
 		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
 		had = (g_screenAudioCb != nullptr);
+		g_screenAudioSessionId = 0;
 		g_screenAudioCb = nullptr;
 		g_screenAudioParam = nullptr;
 	}

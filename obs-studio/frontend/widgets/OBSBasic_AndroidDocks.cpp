@@ -67,6 +67,11 @@ void OBSBasic::ConnectAndroidWindowSignals()
 void OBSBasic::UpdateAndroidSafeAreaMargins()
 {
 	ConnectAndroidWindowSignals();
+	// Wait until the native QtWindow exists so ObsWindowInsetsHost subtracts the
+	// QtWindow's own offset inside DecorView instead of applying raw root insets twice.
+	QWindow *wh = windowHandle();
+	if (!wh || !wh->handle())
+		return;
 	const QMargins insets = obsAndroidWindowSafeMargins(this);
 	if (contentsMargins() != insets) {
 		setContentsMargins(insets);
@@ -98,8 +103,9 @@ void OBSBasic::InitAndroidResponsiveLayout()
 		if (!QGuiApplication::inputMethod()->isVisible())
 			androidLayoutResizeTimer->start();
 	});
+	ensurePolished();
 	UpdateAndroidSafeAreaMargins();
-	QTimer::singleShot(0, this, &OBSBasic::ResizeAndroidDocks);
+	ResizeAndroidDocks();
 }
 
 void OBSBasic::resizeEvent(QResizeEvent *event)
@@ -396,10 +402,13 @@ void OBSBasic::ResizeAndroidDocks()
 	UpdateAndroidControlColumns(phone);
 
 	// Preserve user-set divider positions and dock arrangements between real window resizes.
-	if (contentSize == androidDockViewport && contentsMargins() == androidDockMargins)
-		return;
-	androidDockViewport = contentSize;
-	androidDockMargins = contentsMargins();
+	// Only populate the skip-cache once the window is visible with polished metrics and real insets.
+	if (isVisible()) {
+		if (contentSize == androidDockViewport && contentsMargins() == androidDockMargins)
+			return;
+		androidDockViewport = contentSize;
+		androidDockMargins = contentsMargins();
+	}
 
 	const QVariant previousMode = property("androidCompactLayout");
 	const bool compact = OBSAndroidLayout::compact(available.width(), available.height(), previousMode.toBool());

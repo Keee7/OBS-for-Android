@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="ObsAndroidTheme" parent="ObsAndroidThemeBase">
+        <item name="android:windowSplashScreenBackground">#1D1F26</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/obs_splash_icon</item>
+    </style>
+</resources>

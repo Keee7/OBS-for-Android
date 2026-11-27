@@ -22,6 +22,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QString>
@@ -33,6 +34,8 @@
 #include <QStandardPaths>
 
 #include <android/log.h>
+#include <dlfcn.h>
+#include <sys/stat.h>
 
 #include <cstdlib>
 #include <fstream>
@@ -76,9 +79,46 @@ QString privateFilesDir()
 	return QStringLiteral("/data/user/0/%1/files").arg(QString::fromStdString(pkg));
 }
 
+/* 为嵌入在 libobs_<abi>.so 中的 Qt 资源生成二进制指纹：
+ * :/obsdata、:/obsfrontenddata、:/obsplugindata 全部编译进当前共享库，
+ * 只要同一安装路径上的共享库大小、mtime、inode 及应用版本未变，磁盘缓存树即与包内完全一致。 */
+QByteArray currentResourceStamp()
+{
+	Dl_info dl{};
+	if (!dladdr(reinterpret_cast<const void *>(&PrepareAndroidRuntimePaths), &dl) || !dl.dli_fname) {
+		BOOT_LOGW("dladdr 无法定位当前共享库，本次将执行完整资源解包");
+		return {};
+	}
+	QString statTarget = QString::fromUtf8(dl.dli_fname);
+	const qsizetype bang = statTarget.indexOf(QLatin1String("!/"));
+	if (bang > 0)
+		statTarget.truncate(bang);
+	struct stat st{};
+	const QByteArray statPath = statTarget.toUtf8();
+	if (stat(statPath.constData(), &st) != 0) {
+		BOOT_LOGW("stat(%s) 失败，本次将执行完整资源解包", statPath.constData());
+		return {};
+	}
+	return QStringLiteral("v1|%1|%2|%3.%4|%5|%6\n")
+		.arg(QString::fromUtf8(dl.dli_fname))
+		.arg(static_cast<qint64>(st.st_size))
+		.arg(static_cast<qint64>(st.st_mtim.tv_sec))
+		.arg(static_cast<qint64>(st.st_mtim.tv_nsec))
+		.arg(static_cast<qint64>(st.st_ino))
+		.arg(QStringLiteral(OBS_ANDROID_VERSION_NAME))
+		.toUtf8();
+}
+
+bool resourceProbesPresent(const QString &root)
+{
+	return QFileInfo(root + "/share/libobs/default.effect").isFile() &&
+	       QFileInfo(root + "/share/obs/obs-studio/locale.ini").isFile() &&
+	       QFileInfo(root + "/share/obs/obs-studio/locale/en-US.ini").isFile() &&
+	       !QDir(root + "/share/obs/obs-plugins").entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty();
+}
+
 /* 把资源树 resRoot 下的所有文件按同样的相对路径拷到磁盘 dstRoot。先整目录删掉，
- * 保证每次启动都是干净的：增量拷贝会让人拿着一份改之前的 .effect 去查现在的问题
- * （M1 实测踩过）。 */
+ * 保证首次/升级解包干净，并用目录集合缓存 mkpath + 无缓冲整块写入减少系统调用并实时暴露写盘错误。 */
 bool extractTree(const QString &resRoot, const QString &dstRoot, int *count)
 {
 	QDir(dstRoot).removeRecursively();
@@ -87,24 +127,46 @@ bool extractTree(const QString &resRoot, const QString &dstRoot, int *count)
 		return false;
 	}
 
+	QSet<QString> createdDirs;
+	createdDirs.insert(dstRoot);
+
 	int n = 0;
 	QDirIterator it(resRoot, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
 	while (it.hasNext()) {
 		const QString src = it.next();
 		const QString dst = dstRoot + src.mid(resRoot.length());
-		QDir().mkpath(QFileInfo(dst).absolutePath());
-		QFile::remove(dst);
-		if (!QFile::copy(src, dst)) {
+		const QString parentDir = QFileInfo(dst).absolutePath();
+		if (!createdDirs.contains(parentDir)) {
+			if (!QDir().mkpath(parentDir)) {
+				BOOT_LOGE("创建子目录失败: %s", parentDir.toUtf8().constData());
+				return false;
+			}
+			createdDirs.insert(parentDir);
+		}
+		QFile in(src);
+		QFile out(dst);
+		if (!in.open(QIODevice::ReadOnly) ||
+		    !out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Unbuffered)) {
 			BOOT_LOGE("复制资源文件失败: %s -> %s", src.toUtf8().constData(), dst.toUtf8().constData());
 			return false;
 		}
+		const QByteArray bytes = in.readAll();
+		if (!bytes.isEmpty() && out.write(bytes) != bytes.size()) {
+			BOOT_LOGE("写入资源文件失败: %s -> %s", src.toUtf8().constData(), dst.toUtf8().constData());
+			return false;
+		}
+		if (out.error() != QFileDevice::NoError) {
+			BOOT_LOGE("刷新资源文件失败: %s -> %s", src.toUtf8().constData(), dst.toUtf8().constData());
+			return false;
+		}
+		out.close();
 		++n;
 	}
 	*count = n;
 	return true;
 }
 
-void unpack(const char *label, const QString &resRoot, const QString &dstRoot)
+bool unpack(const char *label, const QString &resRoot, const QString &dstRoot)
 {
 	int files = 0;
 	const bool ok = extractTree(resRoot, dstRoot, &files);
@@ -112,12 +174,16 @@ void unpack(const char *label, const QString &resRoot, const QString &dstRoot)
 		BOOT_LOGI("%s：解包成功（%d 个文件 -> %s）", label, files, dstRoot.toUtf8().constData());
 	else
 		BOOT_LOGE("%s：解包失败（已处理 %d 个文件 -> %s）", label, files, dstRoot.toUtf8().constData());
+	return ok;
 }
 
 } // namespace
 
 void PrepareAndroidRuntimePaths()
 {
+	QElapsedTimer timer;
+	timer.start();
+
 	const QString files = privateFilesDir();
 	if (files.isEmpty()) {
 		BOOT_LOGE("获取应用私有目录失败，未设置 OBS_ROOT_PATH");
@@ -135,9 +201,27 @@ void PrepareAndroidRuntimePaths()
 	if (!QDir().mkpath(root + "/lib"))
 		BOOT_LOGE("创建插件目录失败: %s/lib", root.toUtf8().constData());
 
-	unpack("libobs 资源 :/obsdata", QStringLiteral(":/obsdata"), root + "/share/libobs");
-	unpack("前端资源 :/obsfrontenddata", QStringLiteral(":/obsfrontenddata"), root + "/share/obs/obs-studio");
-	unpack("插件资源 :/obsplugindata", QStringLiteral(":/obsplugindata"), root + "/share/obs/obs-plugins");
+	const QString stampPath = root + "/.resources-stamp";
+	const QByteArray expectedStamp = currentResourceStamp();
+	bool cacheHit = false;
+	if (!expectedStamp.isEmpty() && resourceProbesPresent(root)) {
+		QFile stampFile(stampPath);
+		if (stampFile.open(QIODevice::ReadOnly) && stampFile.readAll() == expectedStamp)
+			cacheHit = true;
+	}
+
+	if (cacheHit) {
+		setenv("OBS_ROOT_PATH", root.toUtf8().constData(), 1);
+		BOOT_LOGI("运行时资源缓存命中，跳过解包（耗时 %lld ms）", static_cast<long long>(timer.elapsed()));
+		return;
+	}
+
+	QFile::remove(stampPath);
+	const bool okLibobs = unpack("libobs 资源 :/obsdata", QStringLiteral(":/obsdata"), root + "/share/libobs");
+	const bool okFrontend =
+		unpack("前端资源 :/obsfrontenddata", QStringLiteral(":/obsfrontenddata"), root + "/share/obs/obs-studio");
+	const bool okPlugins =
+		unpack("插件资源 :/obsplugindata", QStringLiteral(":/obsplugindata"), root + "/share/obs/obs-plugins");
 
 	setenv("OBS_ROOT_PATH", root.toUtf8().constData(), 1);
 
@@ -151,26 +235,41 @@ void PrepareAndroidRuntimePaths()
 		{"前端语言列表", "share/obs/obs-studio/locale.ini"},
 		{"默认语言文件", "share/obs/obs-studio/locale/en-US.ini"},
 	};
+	bool probesOk = true;
 	for (const Probe &p : probes) {
 		const QString path = root + '/' + p.rel;
-		if (QFile::exists(path))
+		if (QFile::exists(path)) {
 			BOOT_LOGI("资源校验 [%s]：%s（存在）", p.what, path.toUtf8().constData());
-		else
+		} else {
+			probesOk = false;
 			BOOT_LOGW("资源校验 [%s]：%s（缺失）", p.what, path.toUtf8().constData());
+		}
 	}
 
-	/* 插件数据没有写死的文件名可探（哪些插件在包里由 plugins/CMakeLists.txt 的白名单决定），
-	 * 所以探消费者自己拼出来的那个目录：obs-module.c 的 make_data_directory() 把
-	 * <root>/share/obs/obs-plugins/%module% 里的 %module% 换成模块名当 data_path，
-	 * obs_find_module_file() 再往里 stat 具体文件 —— 目录在不在、里有几张 effect，
-	 * 就是这条链能不能走通的证据。 */
+	if (okLibobs && okFrontend && okPlugins && probesOk && !expectedStamp.isEmpty()) {
+		const QString tmpStampPath = stampPath + ".tmp";
+		QFile tmpStamp(tmpStampPath);
+		if (tmpStamp.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Unbuffered) &&
+		    tmpStamp.write(expectedStamp) == expectedStamp.size() &&
+		    tmpStamp.error() == QFileDevice::NoError) {
+			tmpStamp.close();
+			QFile::remove(stampPath);
+			if (!QFile::rename(tmpStampPath, stampPath))
+				QFile::remove(tmpStampPath);
+		} else {
+			tmpStamp.close();
+			QFile::remove(tmpStampPath);
+		}
+	}
+
 	QDir plugRoot(root + "/share/obs/obs-plugins");
 	for (const QString &mod : plugRoot.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
 		const QDir m(plugRoot.filePath(mod));
-		const QStringList files = m.entryList(QDir::Files, QDir::Name);
+		const QStringList plugFiles = m.entryList(QDir::Files, QDir::Name);
 		BOOT_LOGI("插件数据目录 %s（%d 个顶层文件：%s）", m.absolutePath().toUtf8().constData(),
-			  int(files.size()), files.join(' ').toUtf8().constData());
+			  int(plugFiles.size()), plugFiles.join(' ').toUtf8().constData());
 	}
+	BOOT_LOGI("运行时资源首次/升级解包完成（耗时 %lld ms）", static_cast<long long>(timer.elapsed()));
 }
 
 namespace {
