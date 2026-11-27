@@ -124,16 +124,17 @@ void OBSBasic::ResetUI()
 	if (options && (androidStudioOptionsScroll || ui->previewLayout->indexOf(programOptions) >= 0)) {
 		const bool phone = !androidRegularDockLayout.isEmpty();
 		studioPortraitLayout |= phone;
-		options->setDirection(phone ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
-		if (phone)
+		const bool stacked = studioPortraitLayout;
+		options->setDirection(stacked ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
+		if (stacked)
 			options->setContentsMargins(4, 2, 4, 2);
 		else
 			options->setContentsMargins(-1, -1, -1, -1);
 		if (tBar)
-			tBar->setMinimumWidth(phone ? 120 : 0);
+			tBar->setMinimumWidth(stacked ? 120 : 0);
 		options->invalidate();
 		options->activate();
-		if (phone) {
+		if (stacked) {
 			auto *scroll = static_cast<QScrollArea *>(androidStudioOptionsScroll.data());
 			if (!scroll) {
 				scroll = new QScrollArea(this);
@@ -148,12 +149,18 @@ void OBSBasic::ResetUI()
 				scroll->setWidget(programOptions);
 			}
 			scroll->setFixedHeight(programOptions->minimumSizeHint().height() +
-					       scroll->style()->pixelMetric(QStyle::PM_ScrollBarExtent));
+					       (phone ? scroll->style()->pixelMetric(QStyle::PM_ScrollBarExtent) : 8));
 		} else if (auto *scroll = static_cast<QScrollArea *>(androidStudioOptionsScroll.data())) {
 			androidStudioOptionsScroll.clear();
+			// Qt's QScrollArea::takeWidget() nulls d->widget before setParent(nullptr);
+			// if a child holds focus, hide_helper() triggers focusNextPrevChild() ->
+			// ensureWidgetVisible() and dereferences the null d->widget. Clear focus first.
+			if (QWidget *focused = QApplication::focusWidget(); focused && scroll->isAncestorOf(focused))
+				focused->clearFocus();
 			scroll->takeWidget();
 			delete ui->previewLayout->replaceWidget(scroll, programOptions);
 			ui->previewLayout->setAlignment(programOptions, Qt::AlignCenter);
+			programOptions->show();
 			scroll->hide();
 			scroll->deleteLater();
 		}

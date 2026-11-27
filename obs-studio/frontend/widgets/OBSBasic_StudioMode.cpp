@@ -178,6 +178,25 @@ void OBSBasic::CreateProgramOptions()
 		connect(action, &QAction::triggered, this, toggleSwapScenesMode);
 		connect(action, &QAction::hovered, action, showToolTip);
 
+		menu.addSeparator();
+		auto togglePortraitLayout = [this]() {
+			const bool next =
+				!config_get_bool(App()->GetUserConfig(), "BasicWindow", "StudioPortraitLayout");
+			config_set_bool(App()->GetUserConfig(), "BasicWindow", "StudioPortraitLayout", next);
+			ResetUI();
+		};
+		action = menu.addAction(QTStr("Basic.Settings.General.StudioPortraitLayout"));
+		action->setCheckable(true);
+#ifdef __ANDROID__
+		const bool phoneForced = !androidRegularDockLayout.isEmpty();
+		action->setChecked(phoneForced ||
+				   config_get_bool(App()->GetUserConfig(), "BasicWindow", "StudioPortraitLayout"));
+		action->setEnabled(!phoneForced);
+#else
+		action->setChecked(config_get_bool(App()->GetUserConfig(), "BasicWindow", "StudioPortraitLayout"));
+#endif
+		connect(action, &QAction::triggered, this, togglePortraitLayout);
+
 		menu.exec(OBSMenuPos(OBSMenuPosBelow(configTransitions)));
 	};
 
