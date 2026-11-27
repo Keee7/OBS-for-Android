@@ -54,9 +54,9 @@
  * （移植层包在 threading-windows.h 内），POSIX 那一支不拉。 */
 #include <pthread.h>
 
-/* 回调上下文：源用弱引用、reader 用"退役 + 在册回调归零"。设计与取舍见该文件头。 */
-#include "../android-common/android-locale.h"
-#include "../android-common/reader-ctx.h"
+/* 回调上下文与 AImageReader 生命周期封装（与屏幕源共用）。 */
+#include <android-locale.h>
+#include <aimage-source.h>
 
 #include <obs-module.h>
 #include <util/dstr.h>
@@ -125,8 +125,7 @@ struct camera2_info {
  *   output/container/target/request 各归本结构，逐个用自己的 free 函数收
  *   device 由 ACameraDevice_close 释放；session 由 ACameraCaptureSession_close 释放（异步）*/
 struct camera2_stream {
-	AImageReader *reader;
-	ANativeWindow *window;
+	struct android_image_source img;
 	ACameraDevice *device;
 	ACameraCaptureSession *session;
 	ACaptureSessionOutput *output;
@@ -164,42 +163,9 @@ struct camera2_source {
 	 * 历史行为完全一致（不转），要转的人在属性页里对着预览调到正为止。 */
 	int rotation;
 
-	/* 打开/拆除互斥。**线程地图（这次逐条量过，别照记忆改）**：
-	 *  - update：UI 线程调 obs_source_update 时对视频源只做一件事 —— defer_update_count++
-	 *    （obs-source.c:1112-1113），本文件那个 camera2_update 真正跑起来是在
-	 *    obs_source_deferred_update（:1093-1101）里，而它由 obs_source_video_tick 调
-	 *    （:1410-1411）⇒ **视频线程**。（早先这里写的"update 在 UI 线程"是错的，
-	 *    错在把"谁按下的按钮"当成"谁执行的函数"。）
-	 *  - activate/deactivate：同一次 obs_source_video_tick 里按 activate_refs 的**跳变**调
-	 *    （obs-source.c:1440-1461，那句英文原话 "call activate/deactivate if the reference changed"）
-	 *    ⇒ 也是视频线程，且 MAIN_VIEW/AUX_VIEW 两个 view 不会让我开两遍。
-	 *  - video_tick（f 腿）：同一根线程、就在上面那两个判定的后面一行（:1463）。
-	 *  - destroy：**最后引用在谁手里就由谁执行**，通常是 UI 线程（从场景里删源、关程序）。
-	 * ⇒ 锁要防的是"视频线程正在开/拆，另一根线程进来 destroy"这一对，
-	 *   而不是 update 与 activate 互撞（那两个天生同线程）。不锁的最坏情形仍是
-	 *   "两条线程各自 session 已建、其中一条把另一条的设备关掉"。
-	 * 顺带把 f 腿那次要办的记在这儿（已定，别再"顺手"改）：既然拆除在视频线程上，那
-	 * close_capture 里那两处阻塞（ACameraDevice_close 原话要等在途采集收尾、外加我自己那个
-	 * 2000 ms 等待环）停的就是整个渲染循环。**f 腿量的结果是 133 ms**（b106：改设置那次
-	 * 14.789 "采集设置变了" → 14.922 "采集已拆除（update）" → 14.930 重开），
-	 * 而拆的触发点只有三个：deactivate、update（含 e 腿那颗按钮）、面已离开（f 腿）。
-	 * 三个都是人手点的、或本来就已经在后台的，133 ms = 超出 30 fps 那一帧预算约 4 帧。
-	 * ⇒ **不换 win-dshow 那种设备任务线程**：那要多一条线程 + 一套"任务投递 + 关掉时等它退场"的
-	 *   协议，换来的只是把这 133 ms 从视频线程挪走，而挪不挪没人看得出。真要翻案的条件写死：
-	 *   真机上这三条里有哪条的拆除时间到了几百 ms 量级（尤其 2000 ms 那个等待环被撞上），
-	 *   那时候再上设备线程，并且要连同"谁 owns 那次关闭"一起重新算，不是照抄 dshow。
-	 * 用 pthread_mutex 而不是"os_mutex" —— 后者在这棵树里根本不存在（util/ 下 grep 不到），
-	 * 仓内 C 插件的统一做法就是 pthread_mutex + threading.h:45 的 pthread_mutex_init_value。 */
 	pthread_mutex_t mtx;
 
 	struct camera2_stream s;
-
-	/* 拆除协议（c 腿的线程安全就靠这两层）：
-	 * shutting_down 只作快速短路（回调一进来就能退，不必碰 ctx 的锁）；
-	 * 真正的闸门是 ctx —— 它保证"已进入工作区"的回调被计数、retire 之后不再放新回调进来，
-	 * 源则走弱引用。原先是 in_callback + cb_thread_maybe_live 两个裸字段，问题见 reader-ctx.h。 */
-	volatile long shutting_down;
-	struct reader_ctx *ctx;
 
 	uint64_t frames_out;
 	uint64_t frames_dropped;
@@ -857,47 +823,16 @@ static void push_frame(struct camera2_source *c, obs_source_t *src, AImage *imag
 	}
 }
 
-/* AImageReader 的 onImageAvailable。头里两处关于线程与"拿不到帧"的话直接照办：
- *   "The callback happens on one dedicated thread per AImageReader instance. It is okay to use
- *    AImageReader_* and AImage_* methods within the callback."（NdkImageReader.h:316-319）
- *    ⇒ 不再自己建 ALooper，回调里就地 acquire/转换。
- *   回调里 acquire 返回 AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE 是**正常可能**的
- *    （:320-324：多帧排队时前一条回调已把帧取走）⇒ 这一档不报警，否则日志会被刷满。
- * 用 acquireLatestImage 而不是 NextImage：它会把更旧的帧直接退回系统，所以"一条回调取一帧"
- * 就能跟得上生产；用 NextImage 的话积压会长成"越 delay 越大直到整条流卡死"（:206-211 原话）。*/
-static void on_image_available(void *context, AImageReader *reader)
+static void camera2_on_frame(void *owner, obs_source_t *src, AImage *image)
 {
-	struct reader_ctx *ctx = context;
+	push_frame((struct camera2_source *)owner, src, image);
+}
 
-	/* enter 之前一个字段都不碰：retire 之后这里直接返回，而 ctx 比 data 活得久。
-	 * 进入工作区之后 owner / source / reader 都有人在等，close 不会在中途拆。 */
-	if (!reader_ctx_enter(ctx))
-		return;
-
-	struct camera2_source *c = reader_ctx_owner(ctx);
-	if (!c || os_atomic_load_long(&c->shutting_down))
-		goto out;
-
-	/* 弱引用现取：源已进销毁流程时拿到 NULL，直接退，不碰 c->source。 */
-	obs_source_t *src = reader_ctx_source(ctx);
-	if (!src)
-		goto out;
-
-	AImage *image = NULL;
-	const media_status_t st = AImageReader_acquireLatestImage(reader, &image);
-	if (st != AMEDIA_OK || !image) {
-		if (st != AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE)
-			blog(LOG_WARNING, "android-camera: acquireLatestImage 失败 media_status=%d", (int) st);
-		obs_source_release(src);
-		goto out;
-	}
-
-	push_frame(c, src, image);
-	AImage_delete(image);
-	obs_source_release(src);
-
-out:
-	reader_ctx_leave(ctx);
+static void camera2_on_acquire_error(void *owner, media_status_t st)
+{
+	UNUSED_PARAMETER(owner);
+	if (st != AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE)
+		blog(LOG_WARNING, "android-camera: acquireLatestImage 失败 media_status=%d", (int) st);
 }
 
 /* 设备与会话的回调：c 腿一律**不碰 source 指针**，context 传 NULL，只留一条日志。
@@ -953,7 +888,7 @@ static void on_session_active(void *context, ACameraCaptureSession *session)
  * close_capture_locked 收尾，"半开"这种状态留不到外面来）。 */
 static bool capture_is_open(const struct camera2_source *c)
 {
-	return c->s.reader || c->s.device || c->s.session || c->s.request;
+	return c->s.img.reader || c->s.device || c->s.session || c->s.request;
 }
 
 /* 看门狗重新计时。开好一次会话就挂一次 —— 首帧本来就比后续慢（AE 起来、缓冲填满），
@@ -968,10 +903,10 @@ static void close_capture_locked(struct camera2_source *c, const char *why)
 {
 	struct camera2_stream *s = &c->s;
 
-	if (!s->reader && !s->device && !s->session && !s->request)
+	if (!s->img.reader && !s->device && !s->session && !s->request)
 		return;
 
-	os_atomic_set_long(&c->shutting_down, 1);
+	os_atomic_set_long(&s->img.shutting_down, 1);
 
 	if (s->session) {
 		const camera_status_t st = ACameraCaptureSession_stopRepeating(s->session);
@@ -991,29 +926,7 @@ static void close_capture_locked(struct camera2_source *c, const char *why)
 		s->device = NULL;
 	}
 
-	if (s->reader) {
-		AImageReader_setImageListener(s->reader, NULL);
-
-		/* retire 之后不再放新回调进工作区；已在里面的靠 users 计数等。
-		 * 注意等的不是 in_callback —— 那个计数覆盖不到"框架已决定派发、尚未进入函数体"
-		 * 的那一段（NdkImageReader.h 既没承诺 delete 会 join，也没承诺 set NULL 之后
-		 * 不再派发），所以 retire 与 users 必须在同一把锁里完成，见 reader-ctx.h。 */
-		reader_ctx_retire(c->ctx);
-		if (reader_ctx_wait_idle(c->ctx, 2000)) {
-			/* 没人还在用 reader：队列里未消费的 AImage 由 delete 一并归还系统，
-			 * 常态路径因此不驻留任何 buffer。 */
-			reader_ctx_set_owner(c->ctx, NULL);
-			AImageReader_delete(s->reader);
-		} else {
-			/* 兜底：回调被系统挂起，delete 会与它撞车。reader 留着（连带队列里
-			 * 那几块 AImage），owner 也留着 —— 由 destroy 的第二道检查决定
-			 * 是否连同 data 一起有意泄漏。这里是唯一会多驻留几条 buffer 的路径。 */
-			blog(LOG_ERROR, "android-camera: 等 2 秒回调仍未退出，这次不 delete reader"
-					"（整包留给 destroy 兜底，宁可泄漏，不制造 use-after-free）");
-		}
-		s->reader = NULL;
-		s->window = NULL; // 归 reader 所有，跟着它一起没了
-	}
+	android_image_source_close(&s->img, "android-camera", 2000);
 
 	if (s->request) {
 		ACaptureRequest_free(s->request);
@@ -1073,14 +986,10 @@ static bool open_capture_locked(struct camera2_source *c)
 
 	c->last_error[0] = 0;
 
-	/* 上一场拆除时回调没退干净（close 超时、reader 已留作兜底）：旧 reader 还在那条
-	 * 线程手里，此时再开一路只会两路抢同一颗源。等它退了再开，看门狗每秒会重来一次。 */
-	if (!reader_ctx_wait_idle(c->ctx, 0)) {
+	if (!android_image_source_is_idle(&s->img)) {
 		set_error_key(c, "Err.CallbackBusy", NULL, 0);
 		return false;
 	}
-
-	os_atomic_set_long(&c->shutting_down, 0);
 
 	struct camera2_caps caps;
 	if (!read_camera_caps(c->manager, &cam, &caps)) {
@@ -1103,52 +1012,27 @@ static bool open_capture_locked(struct camera2_source *c)
 
 	bool ok = true;
 	ACameraDevice_StateCallbacks dev_cb = {NULL, on_device_disconnected, on_device_error, NULL};
-	/* 上面这个初始化按 ACameraDevice_StateCallbacks 的字段顺序写：
-	 * context / onDisconnected / onError / onClientSharedAccessPriorityChanged。
-	 * 最后一个只有共享模式（API 36）才会用到，给 NULL 是对的。 */
 	ACameraCaptureSession_stateCallbacks sess_cb = {
 		NULL, on_session_closed, on_session_ready, on_session_active};
 
-	ok = (AImageReader_new(w, h, AIMAGE_FORMAT_YUV_420_888, MAX_IMAGES, &s->reader) == AMEDIA_OK) && s->reader;
-	if (!ok) {
-		char wb[16], hb[16];
-		snprintf(wb, sizeof(wb), "%d", (int) w);
-		snprintf(hb, sizeof(hb), "%d", (int) h);
-		const char *args[] = {wb, hb};
-		set_error_key(c, "Err.ImageReader", args, 2);
-		goto fail;
-	}
-
-	/* ctx 建在 reader 成功之后：AImageReader_new 之前有若干 goto fail，而
-	 * close_capture_locked 见 reader/device/session/request 全空会直接早退 ——
-	 * 那时新建的 ctx 既不 retire 也不释放，下一次 open 还会把 c->ctx 覆盖掉，
-	 * 旧的那份（含 weak 与 mutex）就永久丢失。更要命的是旧 ctx 的 retired
-	 * 仍是 false、users 是 0，于是下一次 open 的 wait_idle 恒通过、闸门失效。
-	 * 挪到这里之后，所有 fail 路径都已经有 reader，close 一定会走到 retire。 */
-	struct reader_ctx *fresh = reader_ctx_create(c->source);
-	if (!fresh) {
-		set_error_key(c, "Err.CallbackAlloc", NULL, 0);
-		ok = false;
-		goto fail;
-	}
-	/* 覆盖之前先把上一份 retire 掉：close 正常走完时它已经是 retired（幂等），
-	 * 但打开失败等路径可能留下一个从未 retire 的旧 ctx —— 那样它的 retired 仍是
-	 * false、users 是 0，下一次 open 的 wait_idle 就会恒通过、闸门形同虚设。
-	 * 注意只 retire、不释放：reader-ctx.h 里写明 ctx 必须比采集结构体活得久，
-	 * "已决定派发"的回调仍会来读 retired 与 weak。 */
-	reader_ctx_retire(c->ctx);
-	reader_ctx_set_owner(fresh, c);
-	c->ctx = fresh;
-	/* listener 必须在 ctx 就位之后再取 context：写在这一行之前会拿到上一场的旧 ctx
-	 * （或 NULL），AImageReader_setImageListener 就把回调绑到已经 retire 的上下文上了。 */
-	AImageReader_ImageListener listener = {c->ctx, on_image_available};
-	if (AImageReader_setImageListener(s->reader, &listener) != AMEDIA_OK) {
-		set_error_key(c, "Err.ImageListener", NULL, 0);
-		ok = false;
-		goto fail;
-	}
-	if (AImageReader_getWindow(s->reader, &s->window) != AMEDIA_OK || !s->window) {
-		set_error_key(c, "Err.NoWindow", NULL, 0);
+	const enum android_image_open_err ierr = android_image_source_open(
+		&s->img, w, h, AIMAGE_FORMAT_YUV_420_888, MAX_IMAGES, "android-camera");
+	if (ierr != ANDROID_IMAGE_OK) {
+		if (ierr == ANDROID_IMAGE_ERR_BUSY) {
+			set_error_key(c, "Err.CallbackBusy", NULL, 0);
+		} else if (ierr == ANDROID_IMAGE_ERR_READER) {
+			char wb[16], hb[16];
+			snprintf(wb, sizeof(wb), "%d", (int) w);
+			snprintf(hb, sizeof(hb), "%d", (int) h);
+			const char *args[] = {wb, hb};
+			set_error_key(c, "Err.ImageReader", args, 2);
+		} else if (ierr == ANDROID_IMAGE_ERR_CTX) {
+			set_error_key(c, "Err.CallbackAlloc", NULL, 0);
+		} else if (ierr == ANDROID_IMAGE_ERR_LISTENER) {
+			set_error_key(c, "Err.ImageListener", NULL, 0);
+		} else {
+			set_error_key(c, "Err.NoWindow", NULL, 0);
+		}
 		ok = false;
 		goto fail;
 	}
@@ -1169,7 +1053,7 @@ static bool open_capture_locked(struct camera2_source *c)
 		ok = false;
 		goto fail;
 	}
-	if (ACaptureSessionOutput_create(s->window, &s->output) != ACAMERA_OK) {
+	if (ACaptureSessionOutput_create(s->img.window, &s->output) != ACAMERA_OK) {
 		set_error_key(c, "Err.SessionOutput", NULL, 0);
 		ok = false;
 		goto fail;
@@ -1221,7 +1105,7 @@ static bool open_capture_locked(struct camera2_source *c)
 		ok = false;
 		goto fail;
 	}
-	if (ACameraOutputTarget_create(s->window, &s->target) != ACAMERA_OK || !s->target) {
+	if (ACameraOutputTarget_create(s->img.window, &s->target) != ACAMERA_OK || !s->target) {
 		set_error_key(c, "Err.OutputTarget", NULL, 0);
 		ok = false;
 		goto fail;
@@ -1461,17 +1345,7 @@ static void *camera2_create(obs_data_t *settings, obs_source_t *source)
 		blog(LOG_ERROR, "android-camera: 初始化互斥锁失败，采集状态同步将受影响");
 	camera2_load_settings(data, settings);
 
-	/* 回调上下文独立于 data 分配：data 会被 bfree，而"已决定派发"的回调仍会来读它。 */
-	data->ctx = reader_ctx_create(source);
-	if (!data->ctx) {
-		/* 建不出 ctx 就别把源交出去：回调一律先 reader_ctx_enter() 再认领源，
-		 * 没有 ctx 这条源的采集永远开不起来。返回 NULL 让 obs_source_create 报错。 */
-		blog(LOG_ERROR, "android-camera: 建回调上下文失败（内存不足），不建本源");
-		pthread_mutex_destroy(&data->mtx);
-		bfree(data);
-		return NULL;
-	}
-	reader_ctx_set_owner(data->ctx, data);
+	android_image_source_init(&data->s.img, source, data, camera2_on_frame, camera2_on_acquire_error);
 
 	data->manager = ACameraManager_create();
 	if (!data->manager) {
@@ -1497,18 +1371,13 @@ static void camera2_destroy(void *data)
 	 * 再关 manager。反过来的话这里就是拿一个已释放的 manager 去关设备。
 	 * deactivate 正常走完时这里是空转（close_capture 见什么都没建就直接返回）。 */
 	close_capture(c, "destroy");
-	/* close 已经 retire 并等过 2 秒；这里再看一眼是否真没人。回调的 context 已经不是
-	 * &c 了（是 ctx），但 ctx->owner 仍指着 c —— users 归零之前 bfree(c) 依然是 UAF。 */
-	if (!reader_ctx_wait_idle(c->ctx, 0)) {
+	if (!android_image_source_destroy(&c->s.img)) {
 		/* 那条 reader 回调线程仍握着 owner=c ⇒ data、锁、manager 一样都不能放。
-		 * 这是故意泄漏：每次撞上都会有这条 ERROR 日志，比随机崩在一个已被复用的
-		 * 堆块上便宜得多。源本身的弱引用仍在 ctx 里，回调不会碰到已释放的 obs_source。 */
+		 * 这是故意泄漏：比随机崩在一个已被复用的堆块上便宜得多。 */
 		blog(LOG_ERROR, "android-camera: 源 '%s' 的回调线程仍在场 —— 这次不释放 data/锁/manager（故意泄漏）",
 		     obs_source_get_name(c->source));
 		return;
 	}
-	reader_ctx_set_owner(c->ctx, NULL);
-	c->ctx = NULL;
 	if (c->manager)
 		ACameraManager_delete(c->manager);
 	pthread_mutex_destroy(&c->mtx);
@@ -1729,7 +1598,7 @@ static obs_properties_t *camera2_properties(void *data)
 			snprintf(asked_fps, sizeof(asked_fps), "%d-%dfps", (int) c->s.fps_lo, (int) c->s.fps_hi);
 		else
 			snprintf(asked_fps, sizeof(asked_fps), "%s", obs_module_text("State.DefaultFps"));
-		if (c->s.reader && c->s.session) {
+		if (c->s.img.reader && c->s.session) {
 			char wb[16], hb[16], fob[24], fdb[24];
 			snprintf(wb, sizeof(wb), "%d", (int) c->s.width);
 			snprintf(hb, sizeof(hb), "%d", (int) c->s.height);

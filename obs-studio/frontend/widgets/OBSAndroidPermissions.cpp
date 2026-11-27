@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <mutex>
 #include <string.h>
 
 #include <obs.hpp>
@@ -345,39 +346,69 @@ static void screenReleaseConsent(void *param)
 		     screenDescribe().toUtf8().constData());
 }
 
-/* 系统内录三条腿 */
+/* 系统内录（Java AudioRecord 读线程直接通过 nativeOnPcm 回调推入） */
 
-/* drainAudio(short[] out, int maxFrames) 一问就是 10 ms 一发（一秒一百次），所以这里的 short[]
- * 养在文件级复用：每次新建就是每秒一百个临时对象（Java 侧那句注释给的是同一个理由）。
- * 存的是 **global ref** —— local ref 只活到本次 JNI 调用结束，而这一格要在插件那条音频线程上
- * 反复用；global ref 不随线程走，所以 start/stop 落在哪条线程都能建和销。
- *
- * 三个静态量各自只被一条路碰：read 在插件的采集线程，start/stop 在视频线程或源销毁路径上。
- * 插件那边是"先把线程 join 掉、再调 stop_audio"（那两行写在 screen-capture.c 的停止那一格），
- * 所以这里不再额外上锁。 */
-static jshortArray g_audioScratch = nullptr;
-static jsize g_audioScratchShorts = 0;
-static uint32_t g_audioScratchChannels = 0;
+static std::mutex g_screenAudioMutex;
+static obs_android_screen_audio_cb g_screenAudioCb = nullptr;
+static void *g_screenAudioParam = nullptr;
+static bool g_screenAudioNativeRegistered = false;
 
-static void audioReleaseScratch()
+static void JNICALL onNativeScreenAudioPcm(JNIEnv *env, jclass, jshortArray pcmArr, jint frames, jint sampleRate,
+					   jint channels)
 {
-	if (!g_audioScratch)
+	if (!env || !pcmArr || frames <= 0 || sampleRate <= 0 || (channels != 1 && channels != 2))
 		return;
-	QJniEnvironment env;
-	env->DeleteGlobalRef(g_audioScratch);
-	g_audioScratch = nullptr;
-	g_audioScratchShorts = 0;
-	g_audioScratchChannels = 0;
+	jshort *els = env->GetShortArrayElements(pcmArr, nullptr);
+	if (!els)
+		return;
+	{
+		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
+		if (g_screenAudioCb) {
+			g_screenAudioCb(reinterpret_cast<const int16_t *>(els), (uint32_t)frames,
+					  (uint32_t)sampleRate, (uint32_t)channels, g_screenAudioParam);
+		}
+	}
+	env->ReleaseShortArrayElements(pcmArr, els, JNI_ABORT);
 }
 
-/* Java 侧 ObsProjectionAudio.start() 把 `{实到采样率, 实到声道数}` 当返回值交出来（不写出参），为的是与
- * captureSize 一样**一趟 JNI 拿全** —— 与屏幕尺寸那格同一个形状，照抄那边的读法。
- * 出参必须是 Java 实到的那一组：AudioRecord 允许把我们要求的格式换成它自己的，报错了就是变速变调。 */
-static bool screenStartAudio(void *param, uint32_t *sample_rate, uint32_t *channels)
+static bool registerProjectionAudioNatives()
+{
+	if (g_screenAudioNativeRegistered)
+		return true;
+	QJniEnvironment env;
+	if (!env.isValid())
+		return false;
+	jclass cls = env.findClass(kProjectionAudioClass);
+	if (!cls)
+		return false;
+	static const JNINativeMethod methods[] = {
+		{"nativeOnPcm", "([SIII)V", reinterpret_cast<void *>(onNativeScreenAudioPcm)},
+	};
+	if (env->RegisterNatives(cls, methods, 1) < 0)
+		return false;
+	g_screenAudioNativeRegistered = true;
+	return true;
+}
+
+static bool screenStartAudio(void *param, obs_android_screen_audio_cb cb, void *cb_param, uint32_t *sample_rate,
+			     uint32_t *channels)
 {
 	(void)param;
+	if (!cb || !registerProjectionAudioNatives()) {
+		blog(LOG_WARNING, "OBSAndroidPermissions: 系统内录注册 native 回调失败");
+		return false;
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
+		g_screenAudioCb = cb;
+		g_screenAudioParam = cb_param;
+	}
+
 	const QJniObject arr = QJniObject::callStaticObjectMethod(kProjectionAudioClass, "start", "()[I");
 	if (!arr.isValid()) {
+		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
+		g_screenAudioCb = nullptr;
+		g_screenAudioParam = nullptr;
 		blog(LOG_WARNING, "OBSAndroidPermissions: 启动系统音频内录失败（start 返回空），Java=%s",
 		     screenDescribe().toUtf8().constData());
 		return false;
@@ -388,6 +419,10 @@ static bool screenStartAudio(void *param, uint32_t *sample_rate, uint32_t *chann
 	const jsize n = env->GetArrayLength(ja);
 	jint *els = (n >= 2) ? env->GetIntArrayElements(ja, nullptr) : nullptr;
 	if (!els) {
+		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
+		g_screenAudioCb = nullptr;
+		g_screenAudioParam = nullptr;
+		QJniObject::callStaticMethod<void>(kProjectionAudioClass, "stop", "()V");
 		blog(LOG_WARNING, "OBSAndroidPermissions: 读取系统音频格式失败（数组长度=%d），Java=%s", (int)n,
 		     screenDescribe().toUtf8().constData());
 		return false;
@@ -397,98 +432,38 @@ static bool screenStartAudio(void *param, uint32_t *sample_rate, uint32_t *chann
 	env->ReleaseIntArrayElements(ja, els, JNI_ABORT); // 只读，不把改动写回去
 
 	if (rate <= 0 || ch <= 0) {
+		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
+		g_screenAudioCb = nullptr;
+		g_screenAudioParam = nullptr;
+		QJniObject::callStaticMethod<void>(kProjectionAudioClass, "stop", "()V");
 		blog(LOG_WARNING, "OBSAndroidPermissions: 无效的系统音频格式 %dHz×%d，Java=%s", (int)rate,
 		     (int)ch, screenDescribe().toUtf8().constData());
 		return false;
-	}
-
-	/* 缓冲按"一秒"建：48k 立体声 = 96000 个 short = 192 KB，一次性的代价，换来读那一格零分配。
-	 * 幂等的第二发（或 Java 侧换了格式）走到这里：容量够就沿用，不够就销旧建新 —— 不销就是每换一次
-	 * 漏一枚 global ref。 */
-	const jsize need = (jsize)(rate * ch);
-	if (g_audioScratch && (g_audioScratchChannels != (uint32_t)ch || g_audioScratchShorts < need))
-		audioReleaseScratch();
-	if (!g_audioScratch) {
-		jshortArray fresh = env->NewShortArray(need);
-		if (!fresh) {
-			/* 缓冲给不出来就别把 AudioRecord 留在场上：那一头已经起了读线程，
-			 * 让它跟着这一格一起回去，两侧才还是一致的。 */
-			QJniObject::callStaticMethod<void>(kProjectionAudioClass, "stop", "()V");
-			blog(LOG_WARNING, "OBSAndroidPermissions: 分配系统音频采集缓冲区失败（%d 个样本）", (int)need);
-			return false;
-		}
-		g_audioScratch = (jshortArray)env->NewGlobalRef(fresh);
-		env->DeleteLocalRef(fresh);
-		g_audioScratchShorts = need;
-		g_audioScratchChannels = (uint32_t)ch;
 	}
 
 	if (sample_rate)
 		*sample_rate = (uint32_t)rate;
 	if (channels)
 		*channels = (uint32_t)ch;
-	blog(LOG_INFO, "OBSAndroidPermissions[Android]: 系统音频采集已启动，采样率=%dHz，声道=%d，缓冲区=%d 个样本",
-	     (int)rate, (int)ch, (int)g_audioScratchShorts);
+	blog(LOG_INFO, "OBSAndroidPermissions[Android]: 系统音频采集已启动，采样率=%dHz，声道=%d",
+	     (int)rate, (int)ch);
 	return true;
 }
 
-/* 与 release_consent 那格同样的"幂等 + 只在真做了事的那一发记日志"：Java 侧 stop 手里没录音
- * 时是空转，所以这一格也不返回成败（结构体里就是这么定的）。 */
 static void screenStopAudio(void *param)
 {
 	(void)param;
-	const bool had = (g_audioScratch != nullptr);
+	bool had = false;
+	{
+		std::lock_guard<std::mutex> lock(g_screenAudioMutex);
+		had = (g_screenAudioCb != nullptr);
+		g_screenAudioCb = nullptr;
+		g_screenAudioParam = nullptr;
+	}
 	QJniObject::callStaticMethod<void>(kProjectionAudioClass, "stop", "()V");
-	audioReleaseScratch();
 	if (had)
 		blog(LOG_INFO, "OBSAndroidPermissions[Android]: 系统音频采集已停止，Android 状态=%s",
 		     screenDescribe().toUtf8().constData());
-}
-
-/* 取一次 PCM。0 帧 = 此刻没有，不是错误（调用方睡 10 ms 再来）。
- *
- * **顺序要紧**：先 drain 再 GetShortArrayElements。这一格规范上允许给回一份**拷贝**（ART 通常给
- * 直接指针，但不保证），反过来写的症状是"声音永远慢一发"—— 比崩还难查，所以写在注释里。
- * 拿完就 Release(JNI_ABORT)：只读，不回写。 */
-static uint32_t screenReadAudio(void *param, int16_t *out, uint32_t max_frames)
-{
-	(void)param;
-	if (!out || max_frames == 0 || !g_audioScratch || g_audioScratchChannels == 0)
-		return 0;
-
-	/* max_frames 是**帧**，缓冲的容量是**short**，夹之前先换算（Java 侧 drain 自己也会按
-	 * out.length/声道数再夹一道，这里这一道是为了让 jint 那个窄化有界、且把"最多能拿回多少"说清楚）。 */
-	const uint32_t cap_frames = (uint32_t)(g_audioScratchShorts / (jsize)g_audioScratchChannels);
-	const jint want = (jint)((max_frames < cap_frames) ? max_frames : cap_frames);
-	const jint got = QJniObject::callStaticMethod<jint>(kProjectionAudioClass, "drain", "([SI)I",
-							    (jobject)g_audioScratch, want);
-	if (got <= 0)
-		return 0;
-
-	/* 这一条线程是插件自己 pthread_create 出来的原生线程，不在 JVM 的线程表里。
-	 * 判 env 有效再解引用：QJniEnvironment 拿不到 JNIEnv 时 jniEnv() 给空指针，
-	 * 而 operator-> 就是它 —— 少这一格判空是段错误，不是"读不到"。
-	 * （"Qt 会不会替外来线程 attach"这件事不靠读源码断定：屏幕尺寸那一格本来就是 libobs
-	 * 的视频线程在每秒问一次、日志里都是真数，外来线程走得通是量出来的。） */
-	QJniEnvironment env;
-	if (!env.isValid()) {
-		static bool warned = false;
-		if (!warned) {
-			warned = true;
-			blog(LOG_WARNING, "OBSAndroidPermissions: 读取系统音频失败：当前线程无法获取 JNIEnv");
-		}
-		return 0;
-	}
-
-	const jsize shorts = (jsize)got * (jsize)g_audioScratchChannels;
-	jshort *els = env->GetShortArrayElements(g_audioScratch, nullptr); // 不写 const：Release 那一格入参是 jshort*
-	if (!els) {
-		blog(LOG_WARNING, "OBSAndroidPermissions: 读取系统音频样本数组失败（%d 帧）", (int)got);
-		return 0;
-	}
-	memcpy(out, els, (size_t)shorts * sizeof(int16_t));
-	env->ReleaseShortArrayElements(g_audioScratch, els, JNI_ABORT);
-	return (uint32_t)got;
 }
 
 static void screenCaptureError(void *, char *out, size_t size)
@@ -531,6 +506,8 @@ static void screenGpuDestroy(void *ptr)
 }
 static const struct obs_android_screen_gpu_host kScreenGpuHost = {screenGpuCreate, screenGpuUpdate, screenGpuDestroy};
 
+static void screenAudioProbeCb(const int16_t *, uint32_t, uint32_t, uint32_t, void *) {}
+
 static const struct obs_android_screen_host kScreenHost = {
 	nullptr,
 	screenHasConsent,
@@ -541,7 +518,6 @@ static const struct obs_android_screen_host kScreenHost = {
 	screenStopDisplay,
 	screenStartAudio,
 	screenStopAudio,
-	screenReadAudio,
 	screenCaptureError,
 };
 
@@ -552,28 +528,16 @@ void obsAndroidPermissionsRegisterScreenBus()
 		return;
 	s_bus_registered = true;
 
+	registerProjectionAudioNatives();
 	obs_android_set_screen_host(&kScreenHost);
 	obs_android_set_screen_gpu_host(&kScreenGpuHost);
 
-	/* 几格在这里**现调**（ready / has_consent / display_size /
-	 * start_audio / stop_audio）：本轮还没有任何采集源去问它们，所以"native → JNI → Java 走得通"
-	 * 这件事只有靠这一行才有一手证据（打出 ready=1 就说明总线指针对了、JNI 方法名签名对了、类真在 APK 里）。
-	 * 注：has_consent 在这里必然读到 =0 —— 令牌不跨进程活，冷启动那一刻手上没有；
-	 * true 那一支要等采集源真开起来才能覆。
-	 * display_size 不一样：它不要令牌、只要 Context，所以在注册这一刻就能量到真数 ——
-	 * 这也是它对不对的第一手证据（预期 1280x720，与 dumpsys display 的 mode 同档）。
-	 * start_audio 与 has_consent 同理是**反向**证据：这一刻没有令牌，所以它必须返回 false，
-	 * 而 Java 侧会把 lastError 写成"startAudio：没有令牌…"—— 这一句跟着 describe 打出来，
-	 * 就同时证明了"调用真到了 Java、方法名与签名都对、判据没错"。万一它返回 true（不该有），
-	 * 后面那发 stop_audio 会当场把它收回去。
-	 * read_audio 不在这里现调：没有缓冲时它压根不过 JNI，探了也不成为证据。
-	 * 另外两格现调不了：request_consent 会在注册那一拍就给用户弹框；start_display 要一块真
-	 * AImageReader 的窗口，编不出假的；release_consent 此刻手里没令牌，调了也只是空转。 */
+	/* 启动自检：ready / has_consent / display_size / start_audio / stop_audio */
 	uint32_t dw = 0, dh = 0, ddpi = 0;
 	const bool sized = obs_android_screen_display_size(&dw, &dh, &ddpi);
 	uint32_t arate = 0, ach = 0;
-	const bool audio_up = obs_android_screen_start_audio(&arate, &ach); // 预期 false（没令牌）
-	obs_android_screen_stop_audio();                                    // 上面真起来了的话就地收回；否则空转
+	const bool audio_up = obs_android_screen_start_audio(screenAudioProbeCb, nullptr, &arate, &ach);
+	obs_android_screen_stop_audio();
 	const QJniObject s = QJniObject::callStaticObjectMethod(kProjectionClass, "describe",
 								"()Ljava/lang/String;");
 	const QString line = QStringLiteral(

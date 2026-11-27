@@ -572,9 +572,10 @@ void obs_android_screen_capture_error(char *out, size_t size)
 	out[size - 1] = 0;
 }
 
-/* ---- 系统内录三格。全部 fail-closed，理由写在 obs-android.h 那一段里。 ---- */
+/* ---- 系统内录两格（Java 直推 PCM 给回调）。全部 fail-closed，理由写在 obs-android.h 那一段里。 ---- */
 
-bool obs_android_screen_start_audio(uint32_t *sample_rate, uint32_t *channels)
+bool obs_android_screen_start_audio(obs_android_screen_audio_cb cb, void *cb_param, uint32_t *sample_rate,
+				    uint32_t *channels)
 {
 	const struct obs_android_screen_host *h = screen_host;
 
@@ -585,9 +586,9 @@ bool obs_android_screen_start_audio(uint32_t *sample_rate, uint32_t *channels)
 	if (channels)
 		*channels = 0;
 
-	if (!h || !h->start_audio)
+	if (!cb || !h || !h->start_audio)
 		return false;
-	return h->start_audio(h->param, sample_rate, channels);
+	return h->start_audio(h->param, cb, cb_param, sample_rate, channels);
 }
 
 void obs_android_screen_stop_audio(void)
@@ -597,15 +598,6 @@ void obs_android_screen_stop_audio(void)
 	if (!h || !h->stop_audio)
 		return;
 	h->stop_audio(h->param);
-}
-
-uint32_t obs_android_screen_read_audio(int16_t *out, uint32_t max_frames)
-{
-	const struct obs_android_screen_host *h = screen_host;
-
-	if (!h || !h->read_audio || !out || max_frames == 0)
-		return 0;
-	return h->read_audio(h->param, out, max_frames);
 }
 
 /* Browser host is registered before sources are loaded and unregistered after

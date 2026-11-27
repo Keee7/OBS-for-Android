@@ -16,7 +16,7 @@ if(OS_ANDROID)
   # 仍然**不**链 android（ANativeWindow_*）：本文件只是从 AImageReader_getWindow 拿到一个
   # ANativeWindow 指针往下递，一个 ANativeWindow_* 函数都没调用过 —— 前向声明不需要库，
   # 等真调了（比如 P-18 的 ANativeWindow_toSurface）再补，不提前挂。
-  target_link_libraries(android-camera PRIVATE camera2ndk mediandk)
+  target_link_libraries(android-camera PRIVATE camera2ndk mediandk OBS::android-common)
 endif()
 
 set_target_properties_obs(android-camera PROPERTIES FOLDER plugins/android-camera PREFIX "")
