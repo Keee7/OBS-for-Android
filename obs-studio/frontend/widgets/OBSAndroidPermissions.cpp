@@ -190,6 +190,7 @@ void obsAndroidPermissionsRegisterCameraBus()
  * 与权限那个类分开的理由写在那文件的头注释里：MediaProjection 没有可查状态，必须真收得到
  * onActivityResult，而 ObsPermissionHost 整套设计的前提恰恰是"不接回调"。 */
 static const char kProjectionClass[] = "com/obsproject/studio/ObsProjectionHost";
+static const char kProjectionAudioClass[] = "com/obsproject/studio/ObsProjectionAudio";
 
 /* 这里要的是通用 Context 而不是 Activity：起代理 Activity 用的是 startActivity（Context 就有），
  * 不是 requestPermissions（那个才只能在 Activity 上调）。拿不到时传个无效 jobject 下去，
@@ -386,15 +387,15 @@ static void audioReleaseScratch()
 	g_audioScratchChannels = 0;
 }
 
-/* Java 侧 startAudio() 把 `{实到采样率, 实到声道数}` 当返回值交出来（不写出参），为的是与
+/* Java 侧 ObsProjectionAudio.start() 把 `{实到采样率, 实到声道数}` 当返回值交出来（不写出参），为的是与
  * captureSize 一样**一趟 JNI 拿全** —— 与屏幕尺寸那格同一个形状，照抄那边的读法。
  * 出参必须是 Java 实到的那一组：AudioRecord 允许把我们要求的格式换成它自己的，报错了就是变速变调。 */
 static bool screenStartAudio(void *param, uint32_t *sample_rate, uint32_t *channels)
 {
 	(void)param;
-	const QJniObject arr = QJniObject::callStaticObjectMethod(kProjectionClass, "startAudio", "()[I");
+	const QJniObject arr = QJniObject::callStaticObjectMethod(kProjectionAudioClass, "start", "()[I");
 	if (!arr.isValid()) {
-		blog(LOG_WARNING, "OBSAndroidPermissions: 启动系统音频内录失败（startAudio 返回空），Java=%s",
+		blog(LOG_WARNING, "OBSAndroidPermissions: 启动系统音频内录失败（start 返回空），Java=%s",
 		     screenDescribe().toUtf8().constData());
 		return false;
 	}
@@ -429,7 +430,7 @@ static bool screenStartAudio(void *param, uint32_t *sample_rate, uint32_t *chann
 		if (!fresh) {
 			/* 缓冲给不出来就别把 AudioRecord 留在场上：那一头已经起了读线程，
 			 * 让它跟着这一格一起回去，两侧才还是一致的。 */
-			QJniObject::callStaticMethod<void>(kProjectionClass, "stopAudio", "()V");
+			QJniObject::callStaticMethod<void>(kProjectionAudioClass, "stop", "()V");
 			blog(LOG_WARNING, "OBSAndroidPermissions: 分配系统音频采集缓冲区失败（%d 个样本）", (int)need);
 			return false;
 		}
@@ -448,13 +449,13 @@ static bool screenStartAudio(void *param, uint32_t *sample_rate, uint32_t *chann
 	return true;
 }
 
-/* 与 release_consent 那格同样的"幂等 + 只在真做了事的那一发记日志"：Java 侧 stopAudio 手里没录音
+/* 与 release_consent 那格同样的"幂等 + 只在真做了事的那一发记日志"：Java 侧 stop 手里没录音
  * 时是空转，所以这一格也不返回成败（结构体里就是这么定的）。 */
 static void screenStopAudio(void *param)
 {
 	(void)param;
 	const bool had = (g_audioScratch != nullptr);
-	QJniObject::callStaticMethod<void>(kProjectionClass, "stopAudio", "()V");
+	QJniObject::callStaticMethod<void>(kProjectionAudioClass, "stop", "()V");
 	audioReleaseScratch();
 	if (had)
 		blog(LOG_INFO, "OBSAndroidPermissions[Android]: 系统音频采集已停止，Android 状态=%s",
@@ -472,11 +473,11 @@ static uint32_t screenReadAudio(void *param, int16_t *out, uint32_t max_frames)
 	if (!out || max_frames == 0 || !g_audioScratch || g_audioScratchChannels == 0)
 		return 0;
 
-	/* max_frames 是**帧**，缓冲的容量是**short**，夹之前先换算（Java 侧 drainAudio 自己也会按
+	/* max_frames 是**帧**，缓冲的容量是**short**，夹之前先换算（Java 侧 drain 自己也会按
 	 * out.length/声道数再夹一道，这里这一道是为了让 jint 那个窄化有界、且把"最多能拿回多少"说清楚）。 */
 	const uint32_t cap_frames = (uint32_t)(g_audioScratchShorts / (jsize)g_audioScratchChannels);
 	const jint want = (jint)((max_frames < cap_frames) ? max_frames : cap_frames);
-	const jint got = QJniObject::callStaticMethod<jint>(kProjectionClass, "drainAudio", "([SI)I",
+	const jint got = QJniObject::callStaticMethod<jint>(kProjectionAudioClass, "drain", "([SI)I",
 							    (jobject)g_audioScratch, want);
 	if (got <= 0)
 		return 0;

@@ -34,6 +34,7 @@
 #include <dlfcn.h>
 
 static const char kNdiHostClass[] = "com/obsproject/studio/ObsNdiHost";
+static const char kNdiInstallerClass[] = "com/obsproject/studio/ObsNdiRuntimeInstaller";
 
 static QJniObject ndiAppContext()
 {
@@ -377,7 +378,7 @@ static void showNdiOutputSettingsDialog(QWidget *parent)
 		const QJniObject srcObj = QJniObject::fromString(picked);
 		const QJniObject dstObj = QJniObject::fromString(userDir);
 		const QJniObject resObj = QJniObject::callStaticObjectMethod(
-			kNdiHostClass, "importRuntimeToStaging",
+			kNdiInstallerClass, "importRuntimeToStaging",
 			"(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
 			srcObj.object<jstring>(), dstObj.object<jstring>());
 		const QString res = resObj.isValid() ? resObj.toString() : QStringLiteral("ERR:JNI call failed");
@@ -391,14 +392,14 @@ static void showNdiOutputSettingsDialog(QWidget *parent)
 		QString probeErr;
 		const QString ver = probeNdiRuntimeVersion(stageSo, &probeErr);
 		if (ver.isEmpty()) {
-			QJniObject::callStaticMethod<void>(kNdiHostClass, "discardRuntimeStaging",
+			QJniObject::callStaticMethod<void>(kNdiInstallerClass, "discardRuntimeStaging",
 							   "(Ljava/lang/String;)V", dstObj.object<jstring>());
 			QMessageBox::warning(&dlg, QStringLiteral("校验失败"),
 					     QStringLiteral("所选文件未通过 NDI 运行库校验，已保留原有运行库：\n%1").arg(probeErr));
 			return;
 		}
 		const jboolean committed = QJniObject::callStaticMethod<jboolean>(
-			kNdiHostClass, "commitRuntimeStaging", "(Ljava/lang/String;)Z", dstObj.object<jstring>());
+			kNdiInstallerClass, "commitRuntimeStaging", "(Ljava/lang/String;)Z", dstObj.object<jstring>());
 		refreshRuntimeStatus();
 		if (committed == JNI_FALSE) {
 			QMessageBox::warning(&dlg, QStringLiteral("导入失败"),
@@ -414,7 +415,7 @@ static void showNdiOutputSettingsDialog(QWidget *parent)
 	QObject::connect(removeBtn, &QPushButton::clicked, &dlg, [&dlg, userDir, refreshRuntimeStatus]() {
 		stopNdiMainOutput();
 		const QJniObject dstObj = QJniObject::fromString(userDir);
-		QJniObject::callStaticMethod<jboolean>(kNdiHostClass, "removeRuntime", "(Ljava/lang/String;)Z",
+		QJniObject::callStaticMethod<jboolean>(kNdiInstallerClass, "removeRuntime", "(Ljava/lang/String;)Z",
 						       dstObj.object<jstring>());
 		refreshRuntimeStatus();
 	});
