@@ -34,6 +34,7 @@
 
 #define MAX_IMAGES 4
 #define RETRY_INTERVAL_NS (1000ULL * 1000000ULL)
+#define LIVE_CHECK_INTERVAL_NS (250ULL * 1000000ULL)
 #define FIRST_FRAME_NS (3000ULL * 1000000ULL)
 
 /* 全设备一份投影令牌；最后一颗源销毁时交还给系统。 */
@@ -54,6 +55,7 @@ struct screen_source {
 	/* GPU 采集字段及 state 均由 OBS 图形上下文串行访问；非渲染线程碰之前需 obs_enter_graphics()。 */
 	enum screen_capture_state state;
 	volatile long gpu_runtime_failed;
+	bool audio_attempted;
 
 	struct android_image_source img;
 	_Atomic uint32_t width;
@@ -230,7 +232,10 @@ static void close_capture(struct screen_source *c, const char *why)
 	c->state = SCREEN_STATE_IDLE;
 	obs_leave_graphics();
 
-	screen_audio_release(c->source);
+	if (c->audio_attempted) {
+		screen_audio_release(c->source);
+		c->audio_attempted = false;
+	}
 
 	if (c->display_started) {
 		obs_android_screen_stop_display();
@@ -279,7 +284,6 @@ static bool open_capture(struct screen_source *c)
 		c->state = SCREEN_STATE_GPU_PENDING;
 		obs_leave_graphics();
 		obs_source_output_video(c->source, NULL);
-		screen_audio_acquire(c->source);
 		blog(LOG_INFO, "android-screen: 等待在图形线程启动实验性 GPU 采集 %ux%u", w, h);
 		return true;
 	}
@@ -326,6 +330,7 @@ static bool open_capture(struct screen_source *c)
 	obs_leave_graphics();
 
 	screen_audio_acquire(c->source);
+	c->audio_attempted = true;
 
 	blog(LOG_INFO, "android-screen: 屏幕采集已启动（目标尺寸=%ux%u），等待首帧数据", w, h);
 	return true;
@@ -402,6 +407,7 @@ static void check_live(struct screen_source *c)
 
 	blog(LOG_INFO, "android-screen: 屏幕尺寸变了 %ux%u → %ux%u，重建投影面", c->width, c->height, w, h);
 	close_capture(c, "屏幕尺寸变化");
+	try_start(c);
 }
 
 static const char *screen_getname(void *unused)
@@ -530,6 +536,11 @@ static void screen_video_tick(void *data, float seconds)
 	const uint64_t gpu_opened = c->opened_ns;
 	obs_leave_graphics();
 
+	if (st == SCREEN_STATE_GPU_ACTIVE && !c->audio_attempted) {
+		screen_audio_acquire(c->source);
+		c->audio_attempted = true;
+	}
+
 	if (screen_gpu_should_fallback(os_atomic_load_long(&c->gpu_runtime_failed) != 0,
 				       st == SCREEN_STATE_GPU_ACTIVE, gpu_received, gpu_opened, now)) {
 		c->gpu_failed = true;
@@ -548,6 +559,7 @@ static void screen_video_tick(void *data, float seconds)
 	}
 
 	if (st != SCREEN_STATE_IDLE) {
+		c->next_try_ns = now + LIVE_CHECK_INTERVAL_NS;
 		if (st == SCREEN_STATE_CPU && !c->no_frame_warned && c->frames_out == c->frames_at_open &&
 		    (now - c->opened_ns) > FIRST_FRAME_NS) {
 			c->no_frame_warned = true;

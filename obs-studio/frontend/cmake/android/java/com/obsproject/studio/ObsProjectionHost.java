@@ -189,8 +189,17 @@ public final class ObsProjectionHost {
         }
         /* Display.Mode reports unrotated panel pixels and does not account for panel installOrientation
          * (common on tablets whose physical panel is portrait with ROTATION_90/270 installOrientation).
-         * MaximumWindowMetrics (API 30+) and Display.getRealSize() already return full display pixel
-         * bounds in the current orientation (unaffected by wm density). */
+         * Display.getRealSize() reads DisplayInfo.logicalWidth/Height directly in the display's true
+         * current orientation (unaffected by wm density or OBS's sensorLandscape activity orientation).
+         * MaximumWindowMetrics (API 30+) is queried as fallback and for diagnostic comparison because
+         * some Android 11-16 ROMs constrain ApplicationContext/DisplayContext WindowMetrics to the
+         * app's locked orientation while OBS is in the background. */
+        android.graphics.Point rs = new android.graphics.Point();
+        d.getRealSize(rs);
+        if (rs.x > 0 && rs.y > 0) {
+            w = rs.x;
+            h = rs.y;
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 final Context displayCtx = ctx.getApplicationContext().createDisplayContext(d);
@@ -200,20 +209,14 @@ public final class ObsProjectionHost {
                     final android.graphics.Rect bounds = wm.getMaximumWindowMetrics().getBounds();
                     bwm = bounds.width();
                     bhm = bounds.height();
-                    if (bwm > 0 && bhm > 0) {
+                    if ((w <= 0 || h <= 0) && bwm > 0 && bhm > 0) {
                         w = bwm;
                         h = bhm;
                     }
                 }
             } catch (Throwable t) {
-                Log.w(TAG, "getMaximumWindowMetrics 失败，回退到 getRealSize: " + t);
+                Log.w(TAG, "getMaximumWindowMetrics 失败: " + t);
             }
-        }
-        android.graphics.Point rs = new android.graphics.Point();
-        d.getRealSize(rs);
-        if ((w <= 0 || h <= 0) && rs.x > 0 && rs.y > 0) {
-            w = rs.x;
-            h = rs.y;
         }
         if ((w <= 0 || h <= 0) && mw > 0 && mh > 0) {
             w = mw;
@@ -503,6 +506,7 @@ public final class ObsProjectionHost {
                     }
                 }
             }, null);
+            final boolean recreateOnResize = Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE;
             session = new ObsProjectionSession<>((surface, width, height, density) -> {
                 final VirtualDisplay vd = mine.createVirtualDisplay("obs-screen", width, height, density,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, surface, null, null);
@@ -512,7 +516,7 @@ public final class ObsProjectionHost {
                     public void surface(Surface target) { vd.setSurface(target); }
                     public void release() { vd.release(); }
                 };
-            });
+            }, recreateOnResize);
             projection = p;
             consentRequestPending = false;
             lastAction = "已获取 MediaProjection 授权（API " + Build.VERSION.SDK_INT + "）";

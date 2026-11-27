@@ -106,6 +106,27 @@ void setupSceneItem(void *_data, obs_scene_t *scene)
 	if (data->transform != nullptr) {
 		obs_sceneitem_set_info2(sceneitem, data->transform);
 	}
+#ifdef __ANDROID__
+	else if (const char *id = obs_source_get_id(data->source);
+		 id && std::string_view(id) == "android_screen_capture") {
+		/* Fit screen capture inside the canvas by default so portrait <-> landscape
+		 * orientation changes scale cleanly instead of cropping half of portrait frames
+		 * off the bottom of a landscape canvas. */
+		obs_video_info ovi;
+		if (obs_get_video_info(&ovi) && ovi.base_width > 0 && ovi.base_height > 0) {
+			obs_transform_info itemInfo = {};
+			vec2_set(&itemInfo.pos, 0.0f, 0.0f);
+			vec2_set(&itemInfo.scale, 1.0f, 1.0f);
+			itemInfo.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
+			itemInfo.rot = 0.0f;
+			vec2_set(&itemInfo.bounds, float(ovi.base_width), float(ovi.base_height));
+			itemInfo.bounds_type = OBS_BOUNDS_SCALE_INNER;
+			itemInfo.bounds_alignment = OBS_ALIGN_CENTER;
+			itemInfo.crop_to_bounds = false;
+			obs_sceneitem_set_info2(sceneitem, &itemInfo);
+		}
+	}
+#endif
 	if (data->crop != nullptr) {
 		obs_sceneitem_set_crop(sceneitem, data->crop);
 	}

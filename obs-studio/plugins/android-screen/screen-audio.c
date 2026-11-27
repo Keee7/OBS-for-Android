@@ -109,14 +109,21 @@ static void screen_audio_on_pcm(const int16_t *pcm, uint32_t frames, uint32_t sa
 	}
 }
 
-void screen_audio_acquire(obs_source_t *source)
+bool screen_audio_acquire(obs_source_t *source)
 {
 	obs_source_t *ref = obs_source_get_ref(source);
 	if (!ref)
-		return;
+		return false;
 
 	pthread_mutex_lock(&audio_lifecycle_mx);
 	pthread_mutex_lock(&audio_mx);
+	if (active_sink && active_sink != source) {
+		pthread_mutex_unlock(&audio_mx);
+		pthread_mutex_unlock(&audio_lifecycle_mx);
+		obs_source_release(ref);
+		blog(LOG_WARNING, "android-screen: 已有另一屏幕采集源持有系统内录，本次不抢占其音频");
+		return false;
+	}
 	obs_source_t *prev = active_sink;
 	active_sink = ref;
 	if (!audio_active) {
@@ -127,6 +134,7 @@ void screen_audio_acquire(obs_source_t *source)
 	if (prev)
 		obs_source_release(prev);
 
+	bool started = audio_active;
 	if (!audio_active) {
 		uint32_t rate = 0, ch = 0;
 		if (!obs_android_screen_start_audio(screen_audio_on_pcm, NULL, &rate, &ch)) {
@@ -141,11 +149,24 @@ void screen_audio_acquire(obs_source_t *source)
 			audio_rate = rate;
 			audio_active = true;
 			pthread_mutex_unlock(&audio_mx);
+			started = true;
 			blog(LOG_INFO, "android-screen: 系统音频内录已启动（%uHz，%u 声道，Java 直推模式）",
 			     (unsigned)rate, (unsigned)ch);
 		}
+		if (!started) {
+			obs_source_t *drop = NULL;
+			pthread_mutex_lock(&audio_mx);
+			if (active_sink == source) {
+				drop = active_sink;
+				active_sink = NULL;
+			}
+			pthread_mutex_unlock(&audio_mx);
+			if (drop)
+				obs_source_release(drop);
+		}
 	}
 	pthread_mutex_unlock(&audio_lifecycle_mx);
+	return started;
 }
 
 void screen_audio_release(obs_source_t *source)
