@@ -215,6 +215,25 @@ static QString ndiUserRuntimeDir()
 	return QStringLiteral("/data/user/0/com.obsproject.studio/files/obsroot/ndi");
 }
 
+static bool ndiIsSupportedVersion(const char *version)
+{
+	if (!version)
+		return false;
+	const char *p = version;
+	while (*p) {
+		if (*p >= '0' && *p <= '9') {
+			char *end = nullptr;
+			const long major = std::strtol(p, &end, 10);
+			if (end != p && (*end == '.' || *end == '\0'))
+				return major == 5 || major == 6;
+			p = end;
+		} else {
+			p++;
+		}
+	}
+	return false;
+}
+
 static QString probeNdiRuntimeVersion(const QString &soPath, QString *errOut = nullptr)
 {
 	if (!QFileInfo::exists(soPath)) {
@@ -256,7 +275,15 @@ static QString probeNdiRuntimeVersion(const QString &soPath, QString *errOut = n
 	}
 	using version_fn = const char *(*)();
 	auto fn = reinterpret_cast<version_fn>(dlsym(h, "NDIlib_version"));
-	QString ver = (fn && fn()) ? QString::fromUtf8(fn()) : QStringLiteral("libndi.so");
+	const char *rawVer = fn ? fn() : nullptr;
+	if (!ndiIsSupportedVersion(rawVer)) {
+		if (errOut)
+			*errOut = QStringLiteral("不支持的 NDI 运行库版本：%1（仅支持 NDI 5 / 6）")
+					  .arg(rawVer ? QString::fromUtf8(rawVer) : QStringLiteral("unknown"));
+		dlclose(h);
+		return QString();
+	}
+	QString ver = QString::fromUtf8(rawVer);
 	dlclose(h);
 	return ver;
 }
