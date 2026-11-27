@@ -8,6 +8,7 @@
 #include <json11.hpp>
 
 #ifdef __ANDROID__
+#include <utility/AndroidJniContext.hpp>
 #include <utility/android-window-fit.hpp>
 
 #include <QDesktopServices>
@@ -33,8 +34,7 @@ namespace {
 QString GetAndroidAboutVersionName()
 {
 	QString version;
-	const QJniObject activity = QJniObject::callStaticObjectMethod(
-		"org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
+	const QJniObject activity = obsAndroidActivity();
 	if (activity.isValid()) {
 		const QJniObject verObj = QJniObject::callStaticObjectMethod(
 			"com/obsproject/studio/ObsUpdateHost", "installedVersionName",
@@ -57,8 +57,7 @@ void OpenAndroidExternalUrl(const QString &url)
 	const QString target = url.trimmed();
 	if (target.isEmpty() || target == QLatin1String("#"))
 		return;
-	const QJniObject activity = QJniObject::callStaticObjectMethod(
-		"org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
+	const QJniObject activity = obsAndroidActivity();
 	if (activity.isValid()) {
 		const QJniObject urlObj = QJniObject::fromString(target);
 		const jboolean opened = QJniObject::callStaticMethod<jboolean>(

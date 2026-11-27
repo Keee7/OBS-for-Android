@@ -15,8 +15,10 @@ target_sources(
     utility/AndroidRuntimeBootstrap.cpp
     utility/CrashHandler_Android.cpp
     utility/NativeEventFilter.cpp
+    utility/OBSAndroidInput.cpp
     utility/platform-android.cpp
     utility/system-info-android.cpp
+    widgets/OBSBasic_AndroidDocks.cpp
     # One Android TextureView and ANativeWindow for each OBS display.
     # 对应的 Java 侧在 cmake/android/java/com/obsproject/studio/ObsDisplayHost.java，
     # androiddeployqt 从 QT_ANDROID_PACKAGE_SOURCE_DIR 自动收 java/ 目录，不需要在这里列。

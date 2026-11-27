@@ -15,17 +15,13 @@
 #include <QJniObject>
 #include <QSaveFile>
 #include <obs-android.h>
+#include <utility/AndroidJniContext.hpp>
 
 static constexpr auto storageClass = "com/obsproject/studio/ObsStorageHost";
-static QJniObject storageContext()
-{
-	return QJniObject::callStaticObjectMethod("org/qtproject/qt/android/QtNative", "getContext",
-						"()Landroid/content/Context;");
-}
 
 static int openDocument(const char *path, const char *mode)
 {
-	auto context = storageContext();
+	auto context = obsAndroidContext();
 	if (!context.isValid())
 		return -1;
 	auto uri = QJniObject::fromString(QString::fromUtf8(path));
@@ -50,7 +46,7 @@ bool obsAndroidStorageManaged(const QString &path)
 
 bool obsAndroidStorageWritable(const QString &path)
 {
-	auto context = storageContext();
+	auto context = obsAndroidContext();
 	if (!context.isValid())
 		return false;
 	auto p = QJniObject::fromString(path);
@@ -60,7 +56,7 @@ bool obsAndroidStorageWritable(const QString &path)
 
 QString obsAndroidStorageCreate(const QString &path, const QString &name)
 {
-	auto context = storageContext();
+	auto context = obsAndroidContext();
 	if (!context.isValid())
 		return {};
 	auto p = QJniObject::fromString(path);
@@ -76,7 +72,7 @@ static bool createReplayDocument(const char *directory, const char *name, char *
 	if (!obsAndroidStorageManaged(path))
 		return true;
 
-	auto context = storageContext();
+	auto context = obsAndroidContext();
 	if (!context.isValid())
 		return false;
 	auto p = QJniObject::fromString(path);
@@ -92,7 +88,7 @@ static bool createReplayDocument(const char *directory, const char *name, char *
 
 void obsAndroidStorageRemove(const QString &path)
 {
-	auto context = storageContext();
+	auto context = obsAndroidContext();
 	if (!context.isValid())
 		return;
 	auto uri = QJniObject::fromString(path);
@@ -102,7 +98,7 @@ void obsAndroidStorageRemove(const QString &path)
 
 static bool finishReplayDocument(const char *uri, bool publish)
 {
-	auto context = storageContext();
+	auto context = obsAndroidContext();
 	if (!context.isValid())
 		return false;
 	auto path = QJniObject::fromString(QString::fromUtf8(uri));
@@ -119,7 +115,7 @@ void obsAndroidStorageInit()
 
 qint64 obsAndroidStorageSpace(const QString &path)
 {
-	auto context = storageContext();
+	auto context = obsAndroidContext();
 	if (!context.isValid())
 		return -1;
 	auto p = QJniObject::fromString(path);
@@ -170,7 +166,7 @@ void obsAndroidExportLog(QWidget *parent, const char *name)
 
 	if (!destination.isLocalFile()) {
 		source.close();
-		const auto context = storageContext();
+		const auto context = obsAndroidContext();
 		if (!context.isValid()) {
 			showError(QStringLiteral("Android context unavailable"));
 			return;
@@ -230,7 +226,7 @@ void obsAndroidExportLog(QWidget *parent, const char *name)
 bool obsAndroidExportProfile(const QString &tree, const QString &source, const QString &name,
 			     const QStringList &files)
 {
-	const auto context = storageContext();
+	const auto context = obsAndroidContext();
 	if (!context.isValid())
 		return false;
 	const auto uri = QJniObject::fromString(tree);
@@ -246,7 +242,7 @@ bool obsAndroidExportProfile(const QString &tree, const QString &source, const Q
 
 QString obsAndroidImportProfile(const QString &tree, const QString &destination, const QStringList &files)
 {
-	const auto context = storageContext();
+	const auto context = obsAndroidContext();
 	if (!context.isValid())
 		return {};
 	const auto uri = QJniObject::fromString(tree);

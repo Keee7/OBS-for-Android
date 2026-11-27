@@ -14,6 +14,7 @@
 #include <QWindow>
 #include <QtGlobal>
 #include <QtMath>
+#include "AndroidJniContext.hpp"
 #include "android-layout-policy.hpp"
 
 inline QMargins obsAndroidWindowSafeMargins(const QWindow *wh, const QScreen *fallbackScreen = nullptr)
@@ -24,8 +25,7 @@ inline QMargins obsAndroidWindowSafeMargins(const QWindow *wh, const QScreen *fa
 	if (dpr <= 0.0)
 		return margins;
 
-	const QJniObject activity = QJniObject::callStaticObjectMethod(
-		"org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
+	const QJniObject activity = obsAndroidActivity();
 	if (!activity.isValid())
 		return margins;
 

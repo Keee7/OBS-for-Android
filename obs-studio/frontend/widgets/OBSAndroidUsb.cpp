@@ -8,15 +8,11 @@
 #include <QByteArray>
 #include <QStringList>
 #include <QJniObject>
+#include <utility/AndroidJniContext.hpp>
 
 #include <cstring>
 
-/* 自 android-shell/obs_usb_host.cpp 忠实移植，改动只有两处：
- *   * Java 类名从 org/qtproject/example/obs_shell/ObsUsbHost 换成 com/obsproject/studio/ObsUsbHost；
- *   * 冒烟/诊断函数（query/refresh/sendTestHotplug）没有前端调用方，不搬；
- *     注册口换成与相机/屏幕总线同形状的 obsAndroidUsbRegisterBus()，并在注册时做一次现调探针。
- *
- * Java 侧的桥类（frontend/cmake/android/java/com/obsproject/studio/ObsUsbHost.java）
+/* Java 侧的桥类（frontend/cmake/android/java/com/obsproject/studio/ObsUsbHost.java）
  * 全是 public static 方法，所以只用 QJniObject::callStaticObjectMethod / callStaticMethod。 */
 static const char kUsbHostClass[] = "com/obsproject/studio/ObsUsbHost";
 
@@ -25,22 +21,6 @@ static QString jstringToQString(const QJniObject &s)
 	if (!s.isValid())
 		return QString();
 	return s.toString();
-}
-
-/* A1/A2 实测过 Qt 6.9.3 的暴露方式：org/qtproject/qt/android/QtNative 的
- * static Context getContext() / static Activity activity()（不是 Kotlin 属性名）。
- * 这里只要通用 Context（registerReceiver/openDevice 都是 Context 的方法），两个口哪个通拿哪个。 */
-static QJniObject appContext()
-{
-	QJniObject ctx;
-	const char *const getters[] = {"getContext", "activity"};
-	for (const char *g : getters) {
-		ctx = QJniObject::callStaticObjectMethod("org/qtproject/qt/android/QtNative", g,
-							 "()Landroid/content/Context;");
-		if (ctx.isValid())
-			break;
-	}
-	return ctx;
 }
 
 static void copyField(char *dst, size_t dstLen, const QString &src)
@@ -127,7 +107,7 @@ bool obsAndroidUsbRegisterBus(QString *detail)
 	}
 	s_bus_registered = true;
 
-	const QJniObject ctx = appContext();
+	const QJniObject ctx = obsAndroidAppContext();
 	if (!ctx.isValid()) {
 		const QString line = QStringLiteral("USB 宿主接口初始化失败：无法获取 Android Context");
 		if (detail)
