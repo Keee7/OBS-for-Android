@@ -28,6 +28,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <utility/AndroidJniContext.hpp>
 
 #include <cstdlib>
 #include <cstring>
@@ -35,19 +36,6 @@
 
 static const char kNdiHostClass[] = "com/obsproject/studio/ObsNdiHost";
 static const char kNdiInstallerClass[] = "com/obsproject/studio/ObsNdiRuntimeInstaller";
-
-static QJniObject ndiAppContext()
-{
-	QJniObject ctx;
-	const char *const getters[] = {"getContext", "activity"};
-	for (const char *g : getters) {
-		ctx = QJniObject::callStaticObjectMethod("org/qtproject/qt/android/QtNative", g,
-							 "()Landroid/content/Context;");
-		if (ctx.isValid())
-			break;
-	}
-	return ctx;
-}
 
 static void ndiCopyField(char *dst, size_t dstLen, const QString &src)
 {
@@ -132,7 +120,7 @@ bool obsAndroidNdiRegisterBus(QString *detail)
 	}
 	s_registered = true;
 
-	const QJniObject ctx = ndiAppContext();
+	const QJniObject ctx = obsAndroidAppContext();
 	if (!ctx.isValid()) {
 		const QString line = QStringLiteral("NDI 宿主桥初始化失败：无法获取 Android Context");
 		if (detail)
@@ -292,8 +280,7 @@ static QString probeNdiRuntimeVersion(const QString &soPath, QString *errOut = n
 static void openNdiSdkDownloadPage()
 {
 	const QString url = QStringLiteral("https://downloads.ndi.tv/SDK/NDI_SDK_Android/Install_NDI_SDK_v6_Android.tar.gz");
-	const QJniObject activity = QJniObject::callStaticObjectMethod(
-		"org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
+	const QJniObject activity = obsAndroidActivity();
 	if (activity.isValid()) {
 		const QJniObject urlObj = QJniObject::fromString(url);
 		if (QJniObject::callStaticMethod<jboolean>(

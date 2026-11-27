@@ -3,6 +3,7 @@
 #include <obs-android.h>
 #include <QJniObject>
 #include <QJniEnvironment>
+#include <utility/AndroidJniContext.hpp>
 #include <android/hardware_buffer_jni.h>
 #include <climits>
 #include <cstdint>
@@ -17,8 +18,7 @@ struct BrowserHandle {
 static void *createBrowser(uint32_t texture, uint32_t width, uint32_t height, const char *url, const char *css,
 			   bool transparent, bool rerouteAudio, bool desktopMode, bool fitWidth)
 {
-	QJniObject context = QJniObject::callStaticObjectMethod("org/qtproject/qt/android/QtNative", "getContext",
-								"()Landroid/content/Context;");
+	QJniObject context = obsAndroidContext();
 	if (!context.isValid()) {
 		return nullptr;
 	}

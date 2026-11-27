@@ -39,6 +39,7 @@
 #include <qt-wrappers.hpp>
 
 #ifdef __ANDROID__
+#include <utility/AndroidJniContext.hpp>
 #include <utility/android-window-fit.hpp>
 
 #include <QDesktopServices>
@@ -178,8 +179,7 @@ int CompareReleaseVersions(const QString &lhsRaw, const QString &rhsRaw)
 QString GetAndroidInstalledVersionName()
 {
 	QString version;
-	const QJniObject activity = QJniObject::callStaticObjectMethod(
-		"org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
+	const QJniObject activity = obsAndroidActivity();
 	if (activity.isValid()) {
 		const QJniObject verObj = QJniObject::callStaticObjectMethod(
 			"com/obsproject/studio/ObsUpdateHost", "installedVersionName",
@@ -195,8 +195,7 @@ QString GetAndroidInstalledVersionName()
 bool OpenAndroidReleaseUrl(const QString &url)
 {
 	const QString target = url.trimmed().isEmpty() ? QString::fromUtf8(ANDROID_DEFAULT_RELEASE_URL) : url.trimmed();
-	const QJniObject activity = QJniObject::callStaticObjectMethod(
-		"org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
+	const QJniObject activity = obsAndroidActivity();
 	if (activity.isValid()) {
 		const QJniObject urlObj = QJniObject::fromString(target);
 		const jboolean opened = QJniObject::callStaticMethod<jboolean>(

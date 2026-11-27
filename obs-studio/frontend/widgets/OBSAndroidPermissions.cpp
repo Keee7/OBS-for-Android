@@ -5,6 +5,7 @@
 
 #include <QJniEnvironment>
 #include <QJniObject>
+#include <utility/AndroidJniContext.hpp>
 
 /* "接面"那一格要 ANativeWindow_toSurface：它属于 libandroid，而**只有前端 link 了它**
  * （build.ninja 里 frontend/libobs_*.so 那行有 -landroid -lmediandk，插件按 android-camera 的取舍
@@ -28,14 +29,6 @@
 /* Java 侧宿主（frontend/cmake/android/java/com/obsproject/studio/ObsPermissionHost.java） */
 static const char kPermissionClass[] = "com/obsproject/studio/ObsPermissionHost";
 
-/* requestPermissions 只能在 Activity 上调（Context 没有这个方法），所以这里要的是 Activity 而不是
- * 通用 Context —— 与 ObsForegroundService 那边只要 Context 不同。 */
-static QJniObject hostActivity()
-{
-	return QJniObject::callStaticObjectMethod("org/qtproject/qt/android/QtNative", "activity",
-						  "()Landroid/app/Activity;");
-}
-
 static QString callDescribe(const QJniObject &ctx)
 {
 	const QJniObject s = QJniObject::callStaticObjectMethod(kPermissionClass, "describe",
@@ -46,7 +39,7 @@ static QString callDescribe(const QJniObject &ctx)
 
 bool obsAndroidPermissionsRequestStartup(QString *detail)
 {
-	const QJniObject act = hostActivity();
+	const QJniObject act = obsAndroidActivity();
 	if (!act.isValid()) {
 		const QString line = QStringLiteral("无法发起权限申请：获取 QtNative.activity() 失败");
 		if (detail)
@@ -70,7 +63,7 @@ bool obsAndroidPermissionsRequestStartup(QString *detail)
 
 QString obsAndroidPermissionsStatus()
 {
-	return callDescribe(hostActivity());
+	return callDescribe(obsAndroidActivity());
 }
 
 /* 相机权限总线（libobs ↔ ObsPermissionHost） */
@@ -86,7 +79,7 @@ QString obsAndroidPermissionsStatus()
 static bool cameraHasPermission(void *param)
 {
 	(void)param;
-	const QJniObject act = hostActivity();
+	const QJniObject act = obsAndroidActivity();
 	return QJniObject::callStaticMethod<jboolean>(kPermissionClass, "hasCameraPermission",
 						      "(Landroid/content/Context;)Z",
 						      act.object<jobject>()) != 0;
@@ -95,7 +88,7 @@ static bool cameraHasPermission(void *param)
 static int cameraRequestPermission(void *param)
 {
 	(void)param;
-	const QJniObject act = hostActivity();
+	const QJniObject act = obsAndroidActivity();
 	return (int)QJniObject::callStaticMethod<jint>(kPermissionClass, "requestCamera",
 						       "(Landroid/app/Activity;)I",
 						       act.object<jobject>());
@@ -194,17 +187,7 @@ static const char kProjectionAudioClass[] = "com/obsproject/studio/ObsProjection
 
 /* 这里要的是通用 Context 而不是 Activity：起代理 Activity 用的是 startActivity（Context 就有），
  * 不是 requestPermissions（那个才只能在 Activity 上调）。拿不到时传个无效 jobject 下去，
- * Java 侧 ctx 判空 → -1，与相机那两条腿同一个失败形状。
- *
- * QtNative 静态取上下文的只有 `activity()` ()Landroid/app/Activity; 与 `getContext()`
- * ()Landroid/content/Context;，**没有 application()**（用错会 NoSuchMethodError → jobject
- * 为空 → request_consent 恒返回 -1，在属性页上看起来与"用户没同意"一样）。
- * 这两个口都是包内可见，JNI 那侧照样调得到：上面 hostActivity() 调 activity() 是同一条路。 */
-static QJniObject hostContext()
-{
-	return QJniObject::callStaticObjectMethod("org/qtproject/qt/android/QtNative", "getContext",
-						  "()Landroid/content/Context;");
-}
+ * Java 侧 ctx 判空 → -1，与相机那两条腿同一个失败形状。 */
 
 /* Java 侧那本账（意图位/令牌/面/最后一次动作与错误）只有它自己能说清，native 侧每一处失败都顺手
  * 带上它 —— 屏幕这条路失败原因全在 Java 里，不带这句就只能靠 logcat 拼。 */
@@ -224,7 +207,7 @@ static bool screenHasConsent(void *param)
 static int screenRequestConsent(void *param)
 {
 	(void)param;
-	const QJniObject ctx = hostContext();
+	const QJniObject ctx = obsAndroidContext();
 	return (int)QJniObject::callStaticMethod<jint>(kProjectionClass, "requestConsent",
 						       "(Landroid/content/Context;)I",
 						       ctx.object<jobject>());
@@ -236,14 +219,14 @@ static int screenRequestConsent(void *param)
  * 为什么非要绕这一圈而不在前端问 QScreen：QScreen 给的是**逻辑**像素（这台 wm density 覆盖成 240
  * 时 dpr=1.5 ⇒ 1067x667），而 VirtualDisplay 要的是设备物理像素（1280x720），拿错那一档不报错、
  * 只是画面与屏幕不成比例 —— 这类错只能从源头掐掉：源头就是 Java。
- * hostContext() 拿不到时返回 false（与 request_consent 那格同一个失败形状：问不到就说问不到）。
+ * obsAndroidContext() 拿不到时返回 false（与 request_consent 那格同一个失败形状：问不到就说问不到）。
  *
  * 一次往返拿四个数：源每秒要问一次尺寸，好发现旋转/分辨率变了。原先那三格
  * captureWidth/Height/Dpi 每次问要跑三遍完整量取，日志也跟着三遍。 */
 static bool screenDisplaySize(void *param, uint32_t *width, uint32_t *height, uint32_t *dpi)
 {
 	(void)param;
-	const QJniObject ctx = hostContext();
+	const QJniObject ctx = obsAndroidContext();
 	if (!ctx.isValid()) {
 		blog(LOG_WARNING, "OBSAndroidPermissions: 无法获取屏幕尺寸：QtNative.getContext() 返回空");
 		return false;
@@ -291,7 +274,7 @@ static bool screenStartDisplay(void *param, void *native_window)
 		blog(LOG_WARNING, "OBSAndroidPermissions: 启动屏幕采集失败：ANativeWindow 为空");
 		return false;
 	}
-	const QJniObject ctx = hostContext();
+	const QJniObject ctx = obsAndroidContext();
 	if (!ctx.isValid()) {
 		blog(LOG_WARNING, "OBSAndroidPermissions: 启动屏幕采集失败：QtNative.getContext() 返回空");
 		return false;
@@ -521,7 +504,7 @@ static constexpr auto kScreenGpuClass = "com/obsproject/studio/ObsScreenGpuHost"
 struct ScreenGpuHandle { QJniObject object; };
 static void *screenGpuCreate(uint32_t texture, uint32_t width, uint32_t height, uint32_t dpi)
 {
- const QJniObject context = hostContext();
+ const QJniObject context = obsAndroidContext();
  if (!context.isValid()) return nullptr;
  auto object = QJniObject::callStaticObjectMethod(kScreenGpuClass, "create",
   "(Landroid/content/Context;IIII)Lcom/obsproject/studio/ObsScreenGpuHost;",

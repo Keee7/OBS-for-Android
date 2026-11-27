@@ -8,6 +8,7 @@
 #include <QJniEnvironment>
 #include <QJniObject>
 #include <QStringList>
+#include <utility/AndroidJniContext.hpp>
 
 #include <cstring>
 
@@ -19,19 +20,6 @@ static constexpr auto notifierClass = "com/obsproject/studio/ObsAudioRouteNotifi
 static void JNICALL onNativeAudioRouteChanged(JNIEnv *, jclass)
 {
 	obs_android_audio_notify_route_change();
-}
-
-static QJniObject appContext()
-{
-	QJniObject ctx;
-	const char *const getters[] = {"getContext", "activity"};
-	for (const char *g : getters) {
-		ctx = QJniObject::callStaticObjectMethod("org/qtproject/qt/android/QtNative", g,
-						 "()Landroid/content/Context;");
-		if (ctx.isValid())
-			break;
-	}
-	return ctx;
 }
 
 static void copyField(char *dst, size_t dstLen, const QString &src)
@@ -148,7 +136,7 @@ static bool registerRouteNotifier()
 
 bool OBSAndroidAudioInit()
 {
-	const QJniObject ctx = appContext();
+	const QJniObject ctx = obsAndroidAppContext();
 	if (!ctx.isValid()) {
 		blog(LOG_WARNING, "Android audio host: no Context from QtNative");
 		return false;
