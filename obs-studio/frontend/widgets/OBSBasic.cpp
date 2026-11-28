@@ -1397,6 +1397,15 @@ void OBSBasic::OBSInit()
 		QTimer::singleShot(150, this, [this] {
 			UpdateAndroidSafeAreaMargins();
 			ResizeAndroidDocks();
+			if (isVisible())
+				update();
+		});
+		QTimer::singleShot(450, this, [this] {
+			if (isVisible()) {
+				UpdateAndroidSafeAreaMargins();
+				ResizeAndroidDocks();
+				update();
+			}
 		});
 		QTimer::singleShot(0, this, [this] {
 			const QRect available = screen()->availableGeometry();

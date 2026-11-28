@@ -40,7 +40,10 @@ void OBSBasic::ConnectAndroidScreenSignals(QScreen *scr)
 void OBSBasic::ConnectAndroidWindowSignals()
 {
 	if (QWindow *wh = windowHandle(); wh && wh != androidObservedWindow) {
+		if (androidObservedWindow)
+			androidObservedWindow->removeEventFilter(this);
 		androidObservedWindow = wh;
+		wh->installEventFilter(this);
 		connect(wh, &QWindow::safeAreaMarginsChanged, this, [this] {
 			UpdateAndroidSafeAreaMargins();
 			if (androidLayoutResizeTimer)
@@ -50,9 +53,12 @@ void OBSBasic::ConnectAndroidWindowSignals()
 			if (!visible)
 				return;
 			UpdateAndroidSafeAreaMargins();
+			update();
 			QTimer::singleShot(150, this, [this] {
 				UpdateAndroidSafeAreaMargins();
 				ResizeAndroidDocks();
+				if (isVisible())
+					update();
 			});
 		});
 		connect(wh, &QWindow::screenChanged, this, [this](QScreen *scr) {
@@ -102,6 +108,19 @@ void OBSBasic::InitAndroidResponsiveLayout()
 	connect(QGuiApplication::inputMethod(), &QInputMethod::visibleChanged, this, [this] {
 		if (!QGuiApplication::inputMethod()->isVisible())
 			androidLayoutResizeTimer->start();
+	});
+	connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
+		if (state == Qt::ApplicationActive && isVisible()) {
+			QMetaObject::invokeMethod(
+				this,
+				[this] {
+					if (isVisible()) {
+						UpdateAndroidSafeAreaMargins();
+						update();
+					}
+				},
+				Qt::QueuedConnection);
+		}
 	});
 	ensurePolished();
 	UpdateAndroidSafeAreaMargins();
@@ -234,6 +253,20 @@ void OBSBasic::UpdateAndroidControlColumns(bool phone)
 bool OBSBasic::eventFilter(QObject *watched, QEvent *event)
 {
 	const auto type = event->type();
+	if (androidObservedWindow && watched == androidObservedWindow) {
+		if (type == QEvent::Expose && androidObservedWindow->isExposed()) {
+			QMetaObject::invokeMethod(
+				this,
+				[this] {
+					if (isVisible()) {
+						UpdateAndroidSafeAreaMargins();
+						update();
+					}
+				},
+				Qt::QueuedConnection);
+		}
+		return OBSMainWindow::eventFilter(watched, event);
+	}
 	if (androidDraggedDock && watched == androidDraggedDock &&
 	    (type == QEvent::Hide || type == QEvent::UngrabMouse))
 		CancelAndroidDockDrag();
