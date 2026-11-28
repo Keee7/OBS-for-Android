@@ -48,10 +48,17 @@ private:
 	QPoint longPressWidgetPos;
 	int longPressRelX = 0;
 	int longPressRelY = 0;
+	bool isAndroidBrowser = false;
 	bool longPressTriggered = false;
+	bool singleTouchActive = false;
 	bool twoFingerActive = false;
+	bool waitAllTouchReleased = false;
 	bool suppressNextLeftRelease = false;
 	QPointF lastTwoFingerMid;
+	int lastPinchX0 = 0;
+	int lastPinchY0 = 0;
+	int lastPinchX1 = 0;
+	int lastPinchY1 = 0;
 #endif
 
 	static void SourceRemoved(void *data, calldata_t *params);
@@ -68,6 +75,8 @@ private:
 #ifdef __ANDROID__
 	bool HandleTouchEvent(QTouchEvent *event);
 	void TriggerLongPressRightClick();
+	void GetSourceRelativeXYClamped(int mouseX, int mouseY, int &relX, int &relY);
+	void SendBrowserTouchMulti(int action, int x0, int y0, int x1, int y1);
 #endif
 
 	OBSEventFilter *BuildEventFilter();

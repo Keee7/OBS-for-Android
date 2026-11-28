@@ -674,6 +674,11 @@ void obs_android_browser_touch(void *handle, int x, int y, int action)
  const struct obs_android_browser_host *h = browser_host;
  if (h && h->touch && handle) h->touch(handle, x, y, action);
 }
+void obs_android_browser_touch_multi(void *handle, int action, int x0, int y0, int x1, int y1)
+{
+ const struct obs_android_browser_host *h = browser_host;
+ if (h && h->touch_multi && handle) h->touch_multi(handle, action, x0, y0, x1, y1);
+}
 void obs_android_browser_right_click(void *handle, int x, int y)
 {
  const struct obs_android_browser_host *h = browser_host;

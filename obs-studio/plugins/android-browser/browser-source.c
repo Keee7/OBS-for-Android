@@ -270,6 +270,21 @@ static void proc_go_back(void *data, calldata_t *cd)
 		obs_android_browser_go_back(s->host);
 	pthread_mutex_unlock(&s->mutex);
 }
+static void proc_touch_multi(void *data, calldata_t *cd)
+{
+	struct browser_source *s = data;
+	if (!s || !cd)
+		return;
+	const int action = (int)calldata_int(cd, "action");
+	const int x0 = (int)calldata_int(cd, "x0");
+	const int y0 = (int)calldata_int(cd, "y0");
+	const int x1 = (int)calldata_int(cd, "x1");
+	const int y1 = (int)calldata_int(cd, "y1");
+	pthread_mutex_lock(&s->mutex);
+	if (s->host && !s->dirty)
+		obs_android_browser_touch_multi(s->host, action, x0, y0, x1, y1);
+	pthread_mutex_unlock(&s->mutex);
+}
 static void *create(obs_data_t *settings, obs_source_t *source)
 {
 	struct browser_source *s = bzalloc(sizeof(*s));
@@ -293,6 +308,8 @@ static void *create(obs_data_t *settings, obs_source_t *source)
 	if (ph) {
 		proc_handler_add(ph, "void browser_reload()", proc_reload, s);
 		proc_handler_add(ph, "void browser_go_back()", proc_go_back, s);
+		proc_handler_add(ph, "void browser_touch_multi(int action, int x0, int y0, int x1, int y1)",
+				 proc_touch_multi, s);
 	}
 	update(s, settings);
 	return s;

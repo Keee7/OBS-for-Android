@@ -80,6 +80,11 @@ static void touchBrowser(void *ptr, int x, int y, int action)
 {
 	static_cast<BrowserHandle *>(ptr)->object.callMethod<void>("touch", "(III)V", jint(x), jint(y), jint(action));
 }
+static void touchMultiBrowser(void *ptr, int action, int x0, int y0, int x1, int y1)
+{
+	static_cast<BrowserHandle *>(ptr)->object.callMethod<void>("touchMulti", "(IIIII)V", jint(action), jint(x0),
+								   jint(y0), jint(x1), jint(y1));
+}
 static void rightClickBrowser(void *ptr, int x, int y)
 {
 	static_cast<BrowserHandle *>(ptr)->object.callMethod<void>("rightClick", "(II)V", jint(x), jint(y));
@@ -160,7 +165,7 @@ static void destroyBrowser(void *ptr)
 }
 static const obs_android_browser_host host = {
 	createBrowser,     takeBrowserBuffer, updateBrowser, reloadBrowser,  goBackBrowser,   visibleBrowser,
-	touchBrowser,      rightClickBrowser, wheelBrowser,  destroyBrowser, readBrowserAudio};
+	touchBrowser,      touchMultiBrowser, rightClickBrowser, wheelBrowser, destroyBrowser, readBrowserAudio};
 bool OBSAndroidBrowserInit()
 {
 	obs_android_set_browser_host(&host);

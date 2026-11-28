@@ -327,6 +327,8 @@ struct obs_android_browser_host {
  void (*set_visible)(void *handle, bool visible);
  /* action: 0 down, 1 up, 2 move, 3 cancel */
  void (*touch)(void *handle, int x, int y, int action);
+ /* action: 0 begin, 1 move, 2 end, 3 cancel (2-finger pinch/pan) */
+ void (*touch_multi)(void *handle, int action, int x0, int y0, int x1, int y1);
  void (*right_click)(void *handle, int x, int y);
  void (*wheel)(void *handle, int x, int y, int dx, int dy);
  void (*destroy)(void *handle);
@@ -347,6 +349,7 @@ EXPORT void obs_android_browser_reload(void *handle);
 EXPORT void obs_android_browser_go_back(void *handle);
 EXPORT void obs_android_browser_set_visible(void *handle, bool visible);
 EXPORT void obs_android_browser_touch(void *handle, int x, int y, int action);
+EXPORT void obs_android_browser_touch_multi(void *handle, int action, int x0, int y0, int x1, int y1);
 EXPORT void obs_android_browser_right_click(void *handle, int x, int y);
 EXPORT void obs_android_browser_wheel(void *handle, int x, int y, int dx, int dy);
 EXPORT void obs_android_browser_destroy(void *handle);

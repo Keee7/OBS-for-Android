@@ -300,6 +300,8 @@ public final class ObsBrowserHost {
     private FrameLayout container;
     private WebView web;
     private boolean touching;
+    private boolean multiTouching;
+    private int lastMultiX0, lastMultiY0, lastMultiX1, lastMultiY1;
     private long downTime;
 
     private static final Pattern CHROME_VERSION_PATTERN = Pattern.compile("Chrome/\\d+(?:\\.\\d+)*");
@@ -578,6 +580,9 @@ public final class ObsBrowserHost {
         WebSettings settings = web.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
+        settings.setSupportZoom(true);
+        settings.setBuiltInZoomControls(true);
+        settings.setDisplayZoomControls(false);
         settings.setAllowFileAccess(allowFileAccess);
         settings.setAllowContentAccess(false);
         settings.setAllowFileAccessFromFileURLs(false);
@@ -644,7 +649,7 @@ public final class ObsBrowserHost {
                 Log.w(TAG, "WebView renderer exited; recreating");
                 if (container != null) container.removeView(view);
                 view.destroy();
-                if (web == view) { web = null; touching = false; }
+                if (web == view) { web = null; touching = false; multiTouching = false; }
                 if (!closed) ui.postDelayed(ObsBrowserHost.this::createWebSafe, 1000);
                 return true;
             }
@@ -711,6 +716,10 @@ public final class ObsBrowserHost {
         ui.post(() -> {
             if (closed || web == null) return;
             long now = SystemClock.uptimeMillis();
+            if (multiTouching) {
+                dispatchMultiTouch(MotionEvent.ACTION_CANCEL, 2, lastMultiX0, lastMultiY0, lastMultiX1, lastMultiY1, now);
+                multiTouching = false;
+            }
             if (action == MotionEvent.ACTION_DOWN) {
                 if (touching) dispatchTouch(MotionEvent.ACTION_CANCEL, x, y, now);
                 downTime = now; touching = true;
@@ -720,10 +729,53 @@ public final class ObsBrowserHost {
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) touching = false;
         });
     }
+    /** 2-finger pinch-to-zoom / pan: action 0=begin, 1=move, 2=end, 3=cancel. */
+    public void touchMulti(int action, int x0, int y0, int x1, int y1) {
+        ui.post(() -> {
+            if (closed || web == null) return;
+            long now = SystemClock.uptimeMillis();
+            if (action == 0) {
+                if (touching) {
+                    dispatchTouch(MotionEvent.ACTION_CANCEL, x0, y0, now);
+                    touching = false;
+                }
+                if (multiTouching) {
+                    dispatchMultiTouch(MotionEvent.ACTION_CANCEL, 2, lastMultiX0, lastMultiY0, lastMultiX1, lastMultiY1, now);
+                }
+                downTime = now;
+                multiTouching = true;
+                lastMultiX0 = x0; lastMultiY0 = y0; lastMultiX1 = x1; lastMultiY1 = y1;
+                web.requestFocus();
+                dispatchMultiTouch(MotionEvent.ACTION_DOWN, 1, x0, y0, x1, y1, now);
+                dispatchMultiTouch(MotionEvent.ACTION_POINTER_DOWN | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                        2, x0, y0, x1, y1, now + 1);
+            } else if (action == 1) {
+                if (!multiTouching) return;
+                lastMultiX0 = x0; lastMultiY0 = y0; lastMultiX1 = x1; lastMultiY1 = y1;
+                dispatchMultiTouch(MotionEvent.ACTION_MOVE, 2, x0, y0, x1, y1, Math.max(now, downTime + 2));
+            } else if (action == 2) {
+                if (!multiTouching) return;
+                lastMultiX0 = x0; lastMultiY0 = y0; lastMultiX1 = x1; lastMultiY1 = y1;
+                long endTime = Math.max(now, downTime + 3);
+                dispatchMultiTouch(MotionEvent.ACTION_POINTER_UP | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                        2, x0, y0, x1, y1, endTime);
+                dispatchMultiTouch(MotionEvent.ACTION_UP, 1, x0, y0, x1, y1, endTime + 1);
+                multiTouching = false;
+            } else if (action == 3) {
+                if (!multiTouching) return;
+                dispatchMultiTouch(MotionEvent.ACTION_CANCEL, 2, x0, y0, x1, y1, now);
+                multiTouching = false;
+            }
+        });
+    }
     public void rightClick(int x, int y) {
         ui.post(() -> {
             if (closed || web == null) return;
             long now = SystemClock.uptimeMillis();
+            if (multiTouching) {
+                dispatchMultiTouch(MotionEvent.ACTION_CANCEL, 2, lastMultiX0, lastMultiY0, lastMultiX1, lastMultiY1, now);
+                multiTouching = false;
+            }
             if (touching) {
                 dispatchTouch(MotionEvent.ACTION_CANCEL, x, y, now);
                 touching = false;
@@ -757,6 +809,23 @@ public final class ObsBrowserHost {
     private void dispatchTouch(int action, int x, int y, long now) {
         MotionEvent event = MotionEvent.obtain(downTime, now, action, x, y, 0);
         try { web.dispatchTouchEvent(event); } finally { event.recycle(); }
+    }
+    private void dispatchMultiTouch(int action, int count, int x0, int y0, int x1, int y1, long now) {
+        MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[count];
+        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[count];
+        for (int i = 0; i < count; i++) {
+            props[i] = new MotionEvent.PointerProperties();
+            props[i].id = i;
+            props[i].toolType = MotionEvent.TOOL_TYPE_FINGER;
+            coords[i] = new MotionEvent.PointerCoords();
+            coords[i].x = (i == 0) ? x0 : x1;
+            coords[i].y = (i == 0) ? y0 : y1;
+            coords[i].pressure = 1f;
+            coords[i].size = 1f;
+        }
+        MotionEvent ev = MotionEvent.obtain(downTime, now, action, count, props, coords,
+                0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+        try { web.dispatchTouchEvent(ev); } finally { ev.recycle(); }
     }
     private void dispatchMouseButton(int action, int buttonState, int x, int y, long down, long now) {
         MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[1];
@@ -828,7 +897,7 @@ public final class ObsBrowserHost {
             if (held[i] != null) { try { held[i].close(); } catch (RuntimeException e) { } held[i] = null; }
         }
         if (reader != null) { reader.close(); reader = null; }
-        if (web != null) { touching = false; if (container != null) container.removeView(web); web.destroy(); web = null; }
+        if (web != null) { touching = false; multiTouching = false; if (container != null) container.removeView(web); web.destroy(); web = null; }
         if (presentation != null) { try { presentation.dismiss(); } catch (RuntimeException e) { Log.w(TAG, "Presentation dismiss failed", e); } presentation = null; }
         if (display != null) { display.release(); display = null; }
         container = null;

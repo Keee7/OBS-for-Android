@@ -31,6 +31,7 @@
 #include <QPushButton>
 #include <QTimer>
 #include <QTouchEvent>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <utility/android-window-fit.hpp>
@@ -77,6 +78,7 @@ OBSBasicInteraction::OBSBasicInteraction(QWidget *parent, OBSSource source_)
 
 	const char *sourceId = obs_source_get_id(source);
 	if (sourceId && strcmp(sourceId, "android_browser_source") == 0) {
+		isAndroidBrowser = true;
 		auto *backButton = new QPushButton(QTStr("Basic.InteractionWindow.Back"), this);
 		backButton->setObjectName(QStringLiteral("androidInteractionBackButton"));
 		backButton->setMinimumSize(64, 36);
@@ -150,6 +152,10 @@ OBSBasicInteraction::~OBSBasicInteraction()
 #ifdef __ANDROID__
 	if (longPressTimer)
 		longPressTimer->stop();
+	if (twoFingerActive && isAndroidBrowser) {
+		SendBrowserTouchMulti(3, lastPinchX0, lastPinchY0, lastPinchX1, lastPinchY1);
+		twoFingerActive = false;
+	}
 #endif
 	// since QT fakes a mouse movement while destructing a widget
 	// remove our event filter
@@ -363,6 +369,10 @@ bool OBSBasicInteraction::GetSourceRelativeXY(int mouseX, int mouseY, int &relX,
 
 bool OBSBasicInteraction::HandleMouseClickEvent(QMouseEvent *event)
 {
+#ifdef __ANDROID__
+	if (event->source() != Qt::MouseEventNotSynthesized)
+		return true;
+#endif
 	bool mouseUp = event->type() == QEvent::MouseButtonRelease;
 	int clickCount = 1;
 	if (event->type() == QEvent::MouseButtonDblClick) {
@@ -434,6 +444,10 @@ bool OBSBasicInteraction::HandleMouseClickEvent(QMouseEvent *event)
 
 bool OBSBasicInteraction::HandleMouseMoveEvent(QMouseEvent *event)
 {
+#ifdef __ANDROID__
+	if (event->type() != QEvent::Leave && event->source() != Qt::MouseEventNotSynthesized)
+		return true;
+#endif
 	struct obs_mouse_event mouseEvent = {};
 
 	bool mouseLeave = event->type() == QEvent::Leave;
@@ -480,34 +494,117 @@ void OBSBasicInteraction::TriggerLongPressRightClick()
 	obs_source_send_mouse_click(source, &rightEvent, MOUSE_RIGHT, true, 1);
 }
 
+void OBSBasicInteraction::GetSourceRelativeXYClamped(int mouseX, int mouseY, int &relX, int &relY)
+{
+	const float pixelRatio = devicePixelRatioF();
+	const int mouseXscaled = (int)roundf(mouseX * pixelRatio);
+	const int mouseYscaled = (int)roundf(mouseY * pixelRatio);
+	const QSize size = GetPixelSize(ui->preview);
+	const uint32_t sourceCX = max(obs_source_get_width(source), 1u);
+	const uint32_t sourceCY = max(obs_source_get_height(source), 1u);
+
+	int x, y;
+	float scale;
+	GetScaleAndCenterPos(sourceCX, sourceCY, size.width(), size.height(), x, y, scale);
+	if (scale <= 0.0f) {
+		relX = 0;
+		relY = 0;
+		return;
+	}
+	if (x > 0) {
+		relX = int(float(mouseXscaled - x) / scale);
+		relY = int(float(mouseYscaled) / scale);
+	} else {
+		relX = int(float(mouseXscaled) / scale);
+		relY = int(float(mouseYscaled - y) / scale);
+	}
+	relX = std::clamp(relX, 0, int(sourceCX));
+	relY = std::clamp(relY, 0, int(sourceCY));
+}
+
+void OBSBasicInteraction::SendBrowserTouchMulti(int action, int x0, int y0, int x1, int y1)
+{
+	if (!source)
+		return;
+	proc_handler_t *ph = obs_source_get_proc_handler(source);
+	if (!ph)
+		return;
+	calldata_t cd = {};
+	calldata_set_int(&cd, "action", action);
+	calldata_set_int(&cd, "x0", x0);
+	calldata_set_int(&cd, "y0", y0);
+	calldata_set_int(&cd, "x1", x1);
+	calldata_set_int(&cd, "y1", y1);
+	proc_handler_call(ph, "browser_touch_multi", &cd);
+	calldata_free(&cd);
+}
+
 bool OBSBasicInteraction::HandleTouchEvent(QTouchEvent *event)
 {
 	if (!source || !event)
 		return false;
 
 	const auto &points = event->points();
+	QList<const QEventPoint *> activePoints;
+	activePoints.reserve(points.size());
+	for (const auto &pt : points) {
+		if (pt.state() != QEventPoint::State::Released)
+			activePoints.append(&pt);
+	}
+
 	if (event->type() == QEvent::TouchCancel || points.isEmpty()) {
 		if (longPressTimer)
 			longPressTimer->stop();
 		if (twoFingerActive) {
+			if (isAndroidBrowser)
+				SendBrowserTouchMulti(3, lastPinchX0, lastPinchY0, lastPinchX1, lastPinchY1);
 			twoFingerActive = false;
-			suppressNextLeftRelease = true;
+		}
+		if (singleTouchActive) {
+			struct obs_mouse_event cancelEvent = {};
+			obs_source_send_mouse_move(source, &cancelEvent, true);
+			singleTouchActive = false;
+		}
+		longPressTriggered = false;
+		waitAllTouchReleased = false;
+		event->accept();
+		return true;
+	}
+
+	if (activePoints.size() >= 2) {
+		if (longPressTimer)
+			longPressTimer->stop();
+		if (singleTouchActive) {
+			struct obs_mouse_event cancelEvent = {};
+			obs_source_send_mouse_move(source, &cancelEvent, true);
+			singleTouchActive = false;
+		}
+		longPressTriggered = false;
+		waitAllTouchReleased = false;
+
+		if (isAndroidBrowser) {
+			int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+			GetSourceRelativeXYClamped(int(std::lround(activePoints[0]->position().x())),
+						   int(std::lround(activePoints[0]->position().y())), x0, y0);
+			GetSourceRelativeXYClamped(int(std::lround(activePoints[1]->position().x())),
+						   int(std::lround(activePoints[1]->position().y())), x1, y1);
+			lastPinchX0 = x0;
+			lastPinchY0 = y0;
+			lastPinchX1 = x1;
+			lastPinchY1 = y1;
+			if (!twoFingerActive) {
+				twoFingerActive = true;
+				SendBrowserTouchMulti(0, x0, y0, x1, y1);
+			} else {
+				SendBrowserTouchMulti(1, x0, y0, x1, y1);
+			}
 			event->accept();
 			return true;
 		}
-		return false;
-	}
 
-	if (points.size() >= 2) {
-		if (longPressTimer)
-			longPressTimer->stop();
-		const QPointF mid = (points[0].position() + points[1].position()) * 0.5;
+		const QPointF mid = (activePoints[0]->position() + activePoints[1]->position()) * 0.5;
 		if (!twoFingerActive) {
-			struct obs_mouse_event cancelEvent = {};
-			obs_source_send_mouse_move(source, &cancelEvent, true);
 			twoFingerActive = true;
-			suppressNextLeftRelease = true;
-			longPressTriggered = false;
 			lastTwoFingerMid = mid;
 		} else {
 			const QPointF delta = mid - lastTwoFingerMid;
@@ -526,13 +623,70 @@ bool OBSBasicInteraction::HandleTouchEvent(QTouchEvent *event)
 	}
 
 	if (twoFingerActive) {
-		if (event->type() == QEvent::TouchEnd)
-			twoFingerActive = false;
+		if (isAndroidBrowser)
+			SendBrowserTouchMulti(2, lastPinchX0, lastPinchY0, lastPinchX1, lastPinchY1);
+		twoFingerActive = false;
+		waitAllTouchReleased = !activePoints.isEmpty();
 		event->accept();
 		return true;
 	}
 
-	return false;
+	if (waitAllTouchReleased) {
+		if (activePoints.isEmpty() || event->type() == QEvent::TouchEnd)
+			waitAllTouchReleased = false;
+		event->accept();
+		return true;
+	}
+
+	const QEventPoint &pt = !activePoints.isEmpty() ? *activePoints[0] : points.first();
+	const QPoint pos(int(std::lround(pt.position().x())), int(std::lround(pt.position().y())));
+	struct obs_mouse_event mouseEvent = {};
+	const bool insideSource = GetSourceRelativeXY(pos.x(), pos.y(), mouseEvent.x, mouseEvent.y);
+
+	if (event->type() == QEvent::TouchBegin) {
+		longPressTriggered = false;
+		if (longPressTimer)
+			longPressTimer->stop();
+		if (insideSource) {
+			singleTouchActive = true;
+			if (longPressTimer) {
+				longPressWidgetPos = pos;
+				longPressRelX = mouseEvent.x;
+				longPressRelY = mouseEvent.y;
+				longPressTimer->start();
+			}
+			obs_source_send_mouse_click(source, &mouseEvent, MOUSE_LEFT, false, 1);
+		}
+	} else if (event->type() == QEvent::TouchUpdate && !activePoints.isEmpty()) {
+		if (singleTouchActive) {
+			if (longPressTimer && longPressTimer->isActive()) {
+				const int dx = pos.x() - longPressWidgetPos.x();
+				const int dy = pos.y() - longPressWidgetPos.y();
+				if (dx * dx + dy * dy > 12 * 12)
+					longPressTimer->stop();
+			}
+			if (!longPressTriggered) {
+				if (!insideSource)
+					GetSourceRelativeXYClamped(pos.x(), pos.y(), mouseEvent.x, mouseEvent.y);
+				obs_source_send_mouse_move(source, &mouseEvent, false);
+			}
+		}
+	} else {
+		if (longPressTimer)
+			longPressTimer->stop();
+		if (singleTouchActive) {
+			singleTouchActive = false;
+			if (!longPressTriggered) {
+				if (!insideSource)
+					GetSourceRelativeXYClamped(pos.x(), pos.y(), mouseEvent.x, mouseEvent.y);
+				obs_source_send_mouse_click(source, &mouseEvent, MOUSE_LEFT, true, 1);
+			}
+		}
+		longPressTriggered = false;
+	}
+
+	event->accept();
+	return true;
 }
 #endif
 
