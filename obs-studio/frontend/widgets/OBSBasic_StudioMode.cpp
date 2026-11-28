@@ -80,6 +80,9 @@ void OBSBasic::CreateProgramOptions()
 
 	QPushButton *configTransitions = new QPushButton();
 	configTransitions->setProperty("class", "icon-dots-vert");
+#ifdef __ANDROID__
+	configTransitions->setMinimumSize(36, 36);
+#endif
 
 	QHBoxLayout *mainButtonLayout = new QHBoxLayout();
 	mainButtonLayout->setSpacing(2);
@@ -92,6 +95,9 @@ void OBSBasic::CreateProgramOptions()
 
 	QPushButton *addQuickTransition = new QPushButton();
 	addQuickTransition->setProperty("class", "icon-plus");
+#ifdef __ANDROID__
+	addQuickTransition->setMinimumSize(36, 36);
+#endif
 
 	QLabel *quickTransitionsLabel = new QLabel(QTStr("QuickTransitions"));
 	quickTransitionsLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);

@@ -423,9 +423,14 @@ void OBSBasic::ResizeAndroidDocks()
 		ui->scenes->doItemsLayout();
 		ui->sources->doItemsLayout();
 
-		const QSize preferred = ui->transitionAdd->sizeHint();
-		const QSize buttonSize = compact ? preferred : preferred.expandedTo(QSize(48, 48));
-		const QSize iconSize = compact ? ui->transitionAdd->iconSize() : QSize(24, 24);
+		const QSize buttonSize = compact ? QSize(36, 36) : QSize(48, 48);
+		const QSize iconSize = compact ? QSize(16, 16) : QSize(24, 24);
+		const QSize transitionBtnSize = compact ? QSize(36, 36) : QSize(40, 40);
+		for (QPushButton *btn : {ui->transitionAdd, ui->transitionRemove, ui->transitionProps}) {
+			if (!btn)
+				continue;
+			btn->setFixedSize(transitionBtnSize);
+		}
 		for (QToolBar *bar : {ui->scenesToolbar, ui->sourcesToolbar}) {
 			bar->setIconSize(iconSize);
 			for (QAction *action : bar->actions()) {

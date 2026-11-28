@@ -6,7 +6,13 @@
 #include "moc_OBSBasicPreview.cpp"
 
 #define HANDLE_RADIUS 4.0f
+#ifdef __ANDROID__
+#define HANDLE_SEL_RADIUS 18.0f
+#define ROT_HANDLE_SEL_RADIUS 26.0f
+#else
 #define HANDLE_SEL_RADIUS (HANDLE_RADIUS * 1.5f)
+#define ROT_HANDLE_SEL_RADIUS HANDLE_SEL_RADIUS
+#endif
 #define HELPER_ROT_BREAKPOINT 45.0f
 
 namespace {
@@ -355,6 +361,8 @@ bool OBSBasicPreview::SelectedAtPos(const vec2 &pos)
 struct HandleFindData {
 	const vec2 &pos;
 	const float radius;
+	const float rotRadius;
+	const float rotOffset;
 	matrix4 parent_xform;
 
 	OBSSceneItem item;
@@ -370,7 +378,11 @@ struct HandleFindData {
 	HandleFindData &operator=(const HandleFindData &) = delete;
 	HandleFindData &operator=(HandleFindData &&) = delete;
 
-	inline HandleFindData(const vec2 &pos_, float scale) : pos(pos_), radius(HANDLE_SEL_RADIUS / scale)
+	inline HandleFindData(const vec2 &pos_, float scale)
+		: pos(pos_),
+		  radius(HANDLE_SEL_RADIUS / scale),
+		  rotRadius(ROT_HANDLE_SEL_RADIUS / scale),
+		  rotOffset((HANDLE_RADIUS * 8.0f) / scale)
 	{
 		matrix4_identity(&parent_xform);
 	}
@@ -378,6 +390,8 @@ struct HandleFindData {
 	inline HandleFindData(const HandleFindData &hfd, obs_sceneitem_t *parent)
 		: pos(hfd.pos),
 		  radius(hfd.radius),
+		  rotRadius(hfd.rotRadius),
+		  rotOffset(hfd.rotOffset),
 		  item(hfd.item),
 		  handle(hfd.handle),
 		  angle(hfd.angle),
@@ -411,7 +425,7 @@ static bool FindHandleAtPos(obs_scene_t * /* scene */, obs_sceneitem_t *item, vo
 
 	matrix4 transform;
 	vec3 pos3;
-	float closestHandle = data.radius;
+	float closestHandle = std::max(data.radius, data.rotRadius) + 1.0f;
 
 	vec3_set(&pos3, data.pos.x, data.pos.y, 0.0f);
 
@@ -444,7 +458,7 @@ static bool FindHandleAtPos(obs_scene_t * /* scene */, obs_sceneitem_t *item, vo
 	obs_sceneitem_get_scale(item, &scale);
 	obs_bounds_type boundsType = obs_sceneitem_get_bounds_type(item);
 	vec2 rotHandleOffset;
-	vec2_set(&rotHandleOffset, 0.0f, HANDLE_RADIUS * data.radius * 1.5 - data.radius);
+	vec2_set(&rotHandleOffset, 0.0f, data.rotOffset);
 	bool invertx = scale.x < 0.0f && boundsType == OBS_BOUNDS_NONE;
 	float angle =
 		atan2(invertx ? transform.x.y * -1.0f : transform.x.y, invertx ? transform.x.x * -1.0f : transform.x.x);
@@ -458,7 +472,7 @@ static bool FindHandleAtPos(obs_scene_t * /* scene */, obs_sceneitem_t *item, vo
 	handlePos.y -= rotHandleOffset.y;
 
 	float dist = vec3_dist(&handlePos, &pos3);
-	if (dist < data.radius) {
+	if (dist < data.rotRadius) {
 		if (dist < closestHandle) {
 			closestHandle = dist;
 			data.item = item;

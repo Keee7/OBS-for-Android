@@ -19,6 +19,20 @@
 
 #ifdef __ANDROID__
 #include <util/base.h>
+#include <QGraphicsOpacityEffect>
+
+static void setAndroidButtonEnabledVisual(QPushButton *button, bool enabled)
+{
+	if (!button)
+		return;
+	button->setEnabled(enabled);
+	auto *effect = qobject_cast<QGraphicsOpacityEffect *>(button->graphicsEffect());
+	if (!effect) {
+		effect = new QGraphicsOpacityEffect(button);
+		button->setGraphicsEffect(effect);
+	}
+	effect->setOpacity(enabled ? 1.0 : 0.35);
+}
 #endif
 
 #include <algorithm>
@@ -455,8 +469,13 @@ void OBSBasic::SetTransition(OBSSource transition)
 	ui->transitionDuration->setVisible(!fixed);
 
 	bool configurable = transition ? obs_source_configurable(transition) : false;
+#ifdef __ANDROID__
+	setAndroidButtonEnabledVisual(ui->transitionRemove, configurable);
+	setAndroidButtonEnabledVisual(ui->transitionProps, configurable);
+#else
 	ui->transitionRemove->setEnabled(configurable);
 	ui->transitionProps->setEnabled(configurable);
+#endif
 
 	OnEvent(OBS_FRONTEND_EVENT_TRANSITION_CHANGED);
 }
@@ -1425,10 +1444,18 @@ void OBSBasic::EnableTransitionWidgets(bool enable)
 	ui->transitions->setEnabled(enable);
 
 	if (!enable) {
+#ifdef __ANDROID__
+		setAndroidButtonEnabledVisual(ui->transitionProps, false);
+#else
 		ui->transitionProps->setEnabled(false);
+#endif
 	} else {
 		bool configurable = obs_source_configurable(GetCurrentTransition());
+#ifdef __ANDROID__
+		setAndroidButtonEnabledVisual(ui->transitionProps, configurable);
+#else
 		ui->transitionProps->setEnabled(configurable);
+#endif
 	}
 
 	if (!IsPreviewProgramMode() || !programOptions || !programOptions->layout()) {
