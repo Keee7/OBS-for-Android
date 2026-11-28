@@ -79,6 +79,7 @@ cmake -S "$ROOT/obs-studio" -B "$BUILD_DIR" -G Ninja \
   -DANDROID_PLATFORM="android-$API" \
   -DANDROID_STL=c++_shared \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DHAS_INTERPROCEDURAL_OPTIMIZATION=OFF \
   -DCMAKE_PREFIX_PATH="$ROOT/deps-android/prebuilt/$ABI;$QT/android_arm64_v8a" \
   -DQT_HOST_PATH="$HOST" \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
@@ -102,116 +103,54 @@ echo "=== build exit=$BUILD_RC  失败任务数=$(grep -c '^FAILED:' "$LOG") ===
 grep -E "error:|fatal error|FAILED:" "$LOG" | head -30
 [ "$BUILD_RC" = 0 ] || { echo "FATAL: 整树构建失败，看 $LOG"; exit 1; }
 
-# ---- 插件暂存进包源目录（assets/obs-plugins，运行时由 AndroidRuntimeBootstrap 解到 $OBS_ROOT_PATH/lib） ----
-PKG_ASSETS="$ROOT/obs-studio/frontend/cmake/android/assets/obs-plugins"
-PLUG_SRC=$(find "$BUILD_DIR/rundir" -type d -path '*/lib/obs-plugins' 2>/dev/null | head -1)
-if [ -n "$PLUG_SRC" ]; then
-  rm -rf "$PKG_ASSETS"
-  mkdir -p "$PKG_ASSETS"
-  cp -f "$PLUG_SRC"/*.so "$PKG_ASSETS"/
-  STRIP_BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
-  for f in "$PKG_ASSETS"/*.so; do
-    [ -f "$f" ] || continue
-    if [ -x "$STRIP_BIN" ]; then "$STRIP_BIN" --strip-unneeded "$f" || true; fi
-  done
-  python3 "$SCRIPT_DIR/android-plugin-bundle.py" generate "$PKG_ASSETS" || exit 1
-  echo "=== 插件暂存 → frontend/cmake/android/assets/obs-plugins/: $(cd "$PKG_ASSETS" && ls -1 *.so | tr '\n' ' ') ==="
-else
-  echo "WARNING: rundir 里没找到 obs-plugins 目录 —— APK 不会带 OBS 插件"
-fi
-
-# ---- 强制重打包（同 Windows 版：清 androiddeployqt 产物 + gradle native 中间件） ----
-AB_DIR="$BUILD_DIR/frontend/android-build"
-if [ -d "$AB_DIR" ]; then
-  # 只清插件 .so（插件名不带 lib 前缀），保留 CMake 放好的应用库 libobs_<abi>.so
-  if [ -d "$AB_DIR/libs/$ABI" ]; then
-    find "$AB_DIR/libs/$ABI" -maxdepth 1 -type f -name '*.so' ! -name 'lib*' -delete
-  fi
-  mkdir -p "$AB_DIR/libs/$ABI"
-  APP_LIB="$(ls "$BUILD_DIR/frontend"/libobs_*.so 2>/dev/null | head -1)"
-  [ -n "$APP_LIB" ] && cp -f "$APP_LIB" "$AB_DIR/libs/$ABI/"
-  rm -f "$AB_DIR/obs-studio.apk"
-  rm -rf "$AB_DIR/build/outputs/apk" \
-         "$AB_DIR/build/intermediates/merged_jni_libs" \
-         "$AB_DIR/build/intermediates/merged_native_libs" \
-         "$AB_DIR/build/intermediates/stripped_native_libs"
-  find "$AB_DIR/build/outputs" -name '*-signed*.apk' -delete 2>/dev/null
-  echo "=== 强制重打包：插件已拷进 android-build/libs/$ABI ==="
-fi
+# ---- 打包与预验（stage → androiddeployqt → Qt jar → Gradle → 验包） ----
+PKG_SOURCE="$ROOT/obs-studio/frontend/cmake/android"
+python3 "$SCRIPT_DIR/package-android-apk.py" \
+  --build-dir "$BUILD_DIR" \
+  --package-source "$PKG_SOURCE" \
+  --abi "$ABI" \
+  --qt-version "$QT_VERSION" \
+  --qt-android-dir "$QT/android_arm64_v8a" \
+  --qt-host-dir "$HOST" \
+  --sdk "$SDK" \
+  --ndk "$NDK" \
+  --java-home "$JAVA_HOME" \
+  --gradle "$GRADLE_BIN/gradle" \
+  --android-platform "android-$COMPILE_SDK_VERSION" \
+  --build-tools "$BUILD_TOOLS_VERSION" \
+  --clean-intermediates \
+  --verify-unsigned \
+  --unsigned-apk-out "$BUILD_DIR/.unsigned-apk-path" || exit 1
 
 APP_LIB="$BUILD_DIR/frontend/libobs_${ABI}.so"
-echo "=== 应用库 = $APP_LIB ==="
-ls -la "$APP_LIB" 2>/dev/null || ls -la "$BUILD_DIR/frontend"/*.so 2>/dev/null
-
-# ---- androiddeployqt 直接出包 ----
-DEPLOY_QT="$HOST/bin/androiddeployqt"
-FE="$BUILD_DIR/frontend"
-echo "=== androiddeployqt 出包（日志 $LOGDIR/fe-$ABI-apk-wsl.log） ==="
-( cd "$FE" && "$DEPLOY_QT" \
-    --input "$FE/android-obs-studio-deployment-settings.json" \
-    --output "$FE/android-build" \
-    --apk "$FE/android-build/obs-studio.apk" \
-    --depfile "$FE/android-build/obs-studio.d" \
-    --android-platform "android-$COMPILE_SDK_VERSION" \
-    --builddir "$FE" --release --aux-mode ) > "$LOGDIR/fe-$ABI-apk-wsl.log" 2>&1
-APK_RC=$?
-echo "=== androiddeployqt exit=$APK_RC ==="
-grep -iE "BUILD FAILED|FAILURE|CANNOT LINK|Exception|error:" "$LOGDIR/fe-$ABI-apk-wsl.log" | head -25
-grep -iE "BUILD SUCCESSFUL|Android package built successfully" "$LOGDIR/fe-$ABI-apk-wsl.log" | tail -3
-[ "$APK_RC" = 0 ] || { echo "FATAL: androiddeployqt 出包失败，看 $LOGDIR/fe-$ABI-apk-wsl.log"; exit 1; }
-
-python3 "$SCRIPT_DIR/stage-qt-gradle-properties.py" \
-    --deployment-settings "$FE/android-obs-studio-deployment-settings.json" \
-    --output "$AB_DIR" \
-    --android-platform "android-$COMPILE_SDK_VERSION" \
-    --sdk "$SDK" \
-    --build-tools "$BUILD_TOOLS_VERSION" || exit 1
-
-python3 "$SCRIPT_DIR/qt-android-ime/patch-qt-android-jar.py" \
-    --qt-version "$QT_VERSION" --jar "$QT/android_arm64_v8a/jar/Qt6Android.jar" \
-    --qtbase-src "$BUILD_DIR/_deps/obs_qtbase_android-src" \
-    --android-jar "$SDK/platforms/android-$COMPILE_SDK_VERSION/android.jar" \
-    --javac "$JAVA_HOME/bin/javac" --output "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" || exit 1
-cp -f "$BUILD_DIR/qt-ime-patched/Qt6Android.jar" "$AB_DIR/libs/Qt6Android.jar" || exit 1
-cp -f "$BUILD_DIR/qt-android-platform/libplugins_platforms_qtforandroid_$ABI.so" \
-    "$AB_DIR/libs/$ABI/libplugins_platforms_qtforandroid_$ABI.so" || exit 1
-gradle --no-daemon -p "$AB_DIR" assembleRelease || exit 1
-
-# ---- 应用库 main 可被 dlsym 校验 ----
 RE="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
 if [ -f "$APP_LIB" ]; then
   echo "=== 应用库 main 动态符号 ==="
   "$RE" --dyn-syms "$APP_LIB" | grep -w "main" || echo "FAIL：.dynsym 里没有 main"
 fi
 
-# ---- 签名 ----
-APK=$(find "$BUILD_DIR" -path "*build/outputs/apk/release/*-unsigned.apk" 2>/dev/null | head -1)
-[ -n "$APK" ] || APK=$(find "$BUILD_DIR" -path "*build/outputs/apk/*.apk" ! -name '*-signed*.apk' 2>/dev/null | head -1)
-[ -n "$APK" ] || { echo "FATAL: 未找到生成的 APK"; exit 1; }
+# ---- 对齐 + 签名 ----
+APK="$(cat "$BUILD_DIR/.unsigned-apk-path")"
+[ -f "$APK" ] || { echo "FATAL: 未找到生成的 APK：$APK" >&2; exit 1; }
 
-python3 "$SCRIPT_DIR/qt-android-ime/verify-runtime-apk.py" "$APK" || exit 1
-python3 "$SCRIPT_DIR/android-plugin-bundle.py" verify "$APK" || exit 1
-
+ZIPALIGN="$SDK/build-tools/$BUILD_TOOLS_VERSION/zipalign"
 APKSIGNER="$SDK/build-tools/$BUILD_TOOLS_VERSION/apksigner"
-[ -f "$APKSIGNER" ] || APKSIGNER="$SDK/build-tools/34.0.0/apksigner"
-if ! "$APKSIGNER" verify "$APK" >/dev/null 2>&1; then
-  echo "=== 签名 $(basename "$APK") ==="
-  SIGNED="$(dirname "$APK")/$(basename "${APK%.apk}")-signed.apk"
-  cp -f "$APK" "$SIGNED"
-  "$APKSIGNER" sign \
-    --ks "$SCRIPT_DIR/signing/debug.keystore" \
-    --ks-key-alias androiddebugkey --ks-pass pass:android --key-pass pass:android \
-    --out "$SIGNED" "$SIGNED" || { echo "FATAL: apksigner 签名失败"; exit 1; }
-  "$APKSIGNER" verify "$SIGNED" || { echo "FATAL: 签名校验未通过"; exit 1; }
-  APK="$SIGNED"
-fi
+ALIGNED="$BUILD_DIR/aligned.apk"
+SIGNED="$(dirname "$APK")/$(basename "${APK%.apk}")-signed.apk"
+"$ZIPALIGN" -f -P 16 4 "$APK" "$ALIGNED" || { echo "FATAL: zipalign 失败"; exit 1; }
+"$APKSIGNER" sign \
+  --ks "$SCRIPT_DIR/signing/debug.keystore" \
+  --ks-key-alias androiddebugkey --ks-pass pass:android --key-pass pass:android \
+  --out "$SIGNED" "$ALIGNED" || { echo "FATAL: apksigner 签名失败"; exit 1; }
+"$APKSIGNER" verify --verbose "$SIGNED" || { echo "FATAL: 签名校验未通过"; exit 1; }
+"$ZIPALIGN" -c -P 16 -v 4 "$SIGNED" | tail -3 || { echo "FATAL: 16KB 页对齐校验未通过"; exit 1; }
+APK="$SIGNED"
 
 echo "=== APK ==="
 ls -la "$APK"
 echo "=== APK 内的 native 库（$ABI）与清单 ==="
 unzip -l "$APK" | grep -c "lib/$ABI/" | xargs echo "lib/$ABI 条目数="
 AAPT2="$SDK/build-tools/$BUILD_TOOLS_VERSION/aapt2"
-[ -f "$AAPT2" ] || AAPT2="$SDK/build-tools/34.0.0/aapt2"
 "$AAPT2" dump badging "$APK" 2>/dev/null | grep -E "^package:|application-label:|native-code"
 
 # ---- 归档到 releases ----
